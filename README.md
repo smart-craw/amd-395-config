@@ -19,7 +19,7 @@ Then run
 
 ## Start service
 
-Put llama-start.sh and llm-server.service in your $HOME/service folder.  Edit llama-start.sh to put the name of your distrobox.
+Put llama-start.sh in your $HOME/service folder.  Edit llama-start.sh to put the name of your distrobox.  Add  llm-server.service to ~/.config/systemd/user/, creating the folder if it doesn't already exist.
 
 Run
 
