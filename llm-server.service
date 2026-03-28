@@ -1,0 +1,12 @@
+[Unit]
+Description=llm server service
+
+[Service]
+Type=simple
+# assumes you've put llama-start.sh in $HOME/service
+ExecStart=%h/service/llama-start.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
