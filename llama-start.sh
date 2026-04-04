@@ -10,4 +10,4 @@ exec distrobox enter llama-vulkan-radv -- llama-server \
   -ngl 99 --flash-attn on --no-mmap \
   -b 2048 -ub 512 \
   --cache-type-k q8_0 --cache-type-v q8_0 \
-  --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.00
+  --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.00 # https://unsloth.ai/docs/models/qwen3.5#thinking-mode
