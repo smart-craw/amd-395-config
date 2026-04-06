@@ -35,6 +35,7 @@ To run at boot without login:
 
 ## Other altneratives
 
+### ROCM pre-built binaries
 The https://github.com/lemonade-sdk/llamacpp-rocm repository contains pre-built binaries for AMD systems.  I found that this was not quite as performant as distrobox, likely because vulkan has additional GPU optimizations that aren't fully mature in rocm.  As rocm matures I imagine the llamacpp-rocm will be an easier approach to performant AI use cases.
 
 Example use:
@@ -44,3 +45,22 @@ Example use:
 `unzip llama-rocm.zip`
 
 `chmod +x ./llama*`
+
+### Lemonade with NPU...not recommended since it is slow and not fully open source but is technically an option
+
+https://lemonade-server.ai/flm_npu_linux.html
+
+`sudo add-apt-repository ppa:lemonade-team/stable`
+
+`sudo apt update`
+
+`sudo apt install libxrt-npu2 amdxdna-dkms lemonade-server`
+
+`sudo reboot`
+
+`curl -L https://github.com/FastFlowLM/FastFlowLM/releases/download/v0.9.38/fastflowlm_0.9.38_ubuntu25.10_amd64.deb -o fastflowlm.deb`
+
+`sudo apt install ./fastflowlm.deb`
+
+
+
