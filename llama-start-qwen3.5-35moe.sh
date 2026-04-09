@@ -6,6 +6,7 @@ exec distrobox enter llama-vulkan-radv -- llama-server \
   --port 8080 \
   -c 524288 -np 4 \
   --jinja \
+  --chat-template-kwargs '{"enable_thinking":true}' \
   -ngl 99 --flash-attn on --no-mmap \
   -b 2048 -ub 512 \
   --cache-type-k q8_0 --cache-type-v q8_0 \
