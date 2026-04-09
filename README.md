@@ -19,7 +19,7 @@ Then run
 
 ## Start service
 
-Put llama-start.sh in your $HOME/service folder.  Edit llama-start.sh to put the name of your distrobox.  Add  llm-server.service to ~/.config/systemd/user/, creating the folder if it doesn't already exist.
+Put your choice of llama-start-*.sh in your $HOME/service folder.  Edit the shell script to put the name of your distrobox.  Add  llm-server.service to ~/.config/systemd/user/, creating the folder if it doesn't already exist.  Update llm-server.service to point to your actual shell script name.
 
 Run
 
@@ -32,6 +32,17 @@ Run
 To run at boot without login:
 
 `sudo loginctl enable-linger $USER`
+
+## Run benchmarks
+
+`
+llama-bench -pg 512,128 \
+-m ~/models/Qwen3.5-9B-Q4_K_M.gguf \
+-m ~/models/gemma-4-26B-A4B-it-UD-Q4_K_S.gguf \
+-m ~/models/Qwen3.5-35B-A3B-Q4_K_S.gguf \
+-b 2048 -ub 512 \
+-ngl 99 --flash-attn on
+`
 
 ## Other altneratives
 
@@ -61,6 +72,3 @@ https://lemonade-server.ai/flm_npu_linux.html
 `curl -L https://github.com/FastFlowLM/FastFlowLM/releases/download/v0.9.38/fastflowlm_0.9.38_ubuntu25.10_amd64.deb -o fastflowlm.deb`
 
 `sudo apt install ./fastflowlm.deb`
-
-
-
