@@ -13,9 +13,13 @@ Set GRUB_CMDLINE_LINUX_DEFAULT to the following:
 
 Then run
 
-`sudo update-grub`
+```sh
+sudo update-grub
+```
 
-`sudo reboot`
+```sh
+sudo reboot
+```
 
 ## Start service
 
@@ -23,26 +27,34 @@ Put your choice of llama-start-*.sh in your $HOME/service folder.  Edit the shel
 
 Run
 
-`systemctl --user daemon-reload`
+```sh
+systemctl --user daemon-reload
+```
 
-`systemctl --user enable llm-server`
+```sh
+systemctl --user enable llm-server
+```
 
-`systemctl --user start llm-server`
+```sh
+systemctl --user start llm-server
+```
 
 To run at boot without login:
 
-`sudo loginctl enable-linger $USER`
+```sh
+sudo loginctl enable-linger $USER
+```
 
 ## Run benchmarks
 
-`
+```sh
 llama-bench -pg 512,128 \
 -m ~/models/Qwen3.5-9B-Q4_K_M.gguf \
 -m ~/models/gemma-4-26B-A4B-it-UD-Q4_K_S.gguf \
 -m ~/models/Qwen3.5-35B-A3B-Q4_K_S.gguf \
 -b 2048 -ub 512 \
 -ngl 99 --flash-attn on
-`
+```
 
 ## Other altneratives
 
@@ -51,24 +63,43 @@ The https://github.com/lemonade-sdk/llamacpp-rocm repository contains pre-built 
 
 Example use:
 
-`curl -o llama-rocm.zip -L https://github.com/lemonade-sdk/llamacpp-rocm/releases/download/b1223/llama-b1223-ubuntu-rocm-gfx1151-x64.zip`
+```sh
+curl -o llama-rocm.zip -L https://github.com/lemonade-sdk/llamacpp-rocm/releases/download/b1223/llama-b1223-ubuntu-rocm-gfx1151-x64.zip
+```
 
-`unzip llama-rocm.zip`
+```sh
+unzip llama-rocm.zip
+```
 
-`chmod +x ./llama*`
+```sh
+chmod +x ./llama*
+```
 
 ### Lemonade with NPU...not recommended since it is slow and not fully open source but is technically an option
 
 https://lemonade-server.ai/flm_npu_linux.html
 
-`sudo add-apt-repository ppa:lemonade-team/stable`
+```sh
+sudo add-apt-repository ppa:lemonade-team/stable
+```
 
-`sudo apt update`
+```sh
+sudo apt update
+```
 
-`sudo apt install libxrt-npu2 amdxdna-dkms lemonade-server`
+```sh
+sudo apt install libxrt-npu2 amdxdna-dkms lemonade-server
+```
 
-`sudo reboot`
+```sh
+sudo reboot
+```
 
-`curl -L https://github.com/FastFlowLM/FastFlowLM/releases/download/v0.9.38/fastflowlm_0.9.38_ubuntu25.10_amd64.deb -o fastflowlm.deb`
 
-`sudo apt install ./fastflowlm.deb`
+```sh
+curl -L https://github.com/FastFlowLM/FastFlowLM/releases/download/v0.9.38/fastflowlm_0.9.38_ubuntu25.10_amd64.deb -o fastflowlm.deb
+```
+
+```sh
+sudo apt install ./fastflowlm.deb
+```
