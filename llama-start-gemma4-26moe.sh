@@ -1,7 +1,7 @@
 #!/bin/bash
 # 4 concurrent, each with 128 K context
 exec distrobox enter llama-vulkan-radv -- llama-server \
-  -m ~/models/gemma-4-26B-A4B-it-UD-Q4_K_S.gguf \
+  -m ~/models/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf \
   --host 0.0.0.0 \
   --port 8080 \
   -c 524288 -np 4 \
