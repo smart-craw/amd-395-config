@@ -14,4 +14,5 @@ exec distrobox enter llama-vulkan-radv -- llama-server \
   --reasoning-format none \
   -ngl 99 --flash-attn on --no-mmap \
   -b 2048 -ub 512 \
+  --cache-type-k q8_0 --cache-type-v q8_0 \
   --temp 1.0 --top-p 0.95 --top-k 64 # https://unsloth.ai/docs/models/gemma-4#recommended-settings
