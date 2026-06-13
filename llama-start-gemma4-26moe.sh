@@ -2,11 +2,10 @@
 # 2 concurrent, each with 128 K context
 # 4 concurrent made mtp way slower
 exec distrobox enter llama-vulkan-radv -- llama-server \
-  -m ~/models/gemma-4-26B-A4B-it-UD-Q5_K_M.gguf \
+  -hf unsloth/gemma-4-26B-A4B-it-qat-GGUF:UD-Q4_K_XL \
   --host 0.0.0.0 \
   --port 8080 \
   -c 262144 -np 2 \
-  --model-draft ~/models/gemma-4-26B-A4B-it-MTP-Q8_0 \ # from https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF/tree/main/MTP
   --spec-type draft-mtp \
   --spec-draft-n-max 4 \
   --jinja \
