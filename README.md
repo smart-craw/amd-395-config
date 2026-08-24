@@ -47,6 +47,8 @@ sudo loginctl enable-linger $USER
 
 ## Run benchmarks
 
+This only works without mtp.  You need to use another type of benchmarking (eg a custom testing scaffold) to fully test mtp.
+
 ```sh
 llama-bench -pg 512,128 \
 -m ~/models/Qwen3.5-9B-Q4_K_M.gguf \
