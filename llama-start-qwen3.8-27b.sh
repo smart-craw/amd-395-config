@@ -1,6 +1,8 @@
 ##!/bin/bash
 exec distrobox enter llama-vulkan-radv -- llama-server \
-  -m ~/models/Qwen3.8-27B-UD-Q4_K_M.gguf \
+  # -m ~/models/Qwen3.8-27B-UD-Q4_K_M.gguf \
+  # use --models-dir with the pi harness
+  --models-dir ~/models \
   --host 0.0.0.0 \
   --port 8080 \
   -c 262144 -np 2 \
