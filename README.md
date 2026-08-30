@@ -1,5 +1,16 @@
 # Instructions
 
+Much of this is based off https://github.com/kyuz0/amd-strix-halo-toolboxes.
+
+Eg:
+
+```sh
+distrobox create llama-rocm-10.0 \
+  --image docker.io/kyuz0/amd-strix-halo-toolboxes:rocm-10.0 \
+  -- --device /dev/dri --device /dev/kfd --group-add video --group-add render --group-add sudo \
+  --security-opt seccomp=unconfined
+```
+
 ## Initial setup
 Follow https://github.com/kyuz0/amd-strix-halo-toolboxes to create distrobox installs.  Fastest for me with `qwen3.5 9b` was llama-vulkan-radv, though as rocm matures it may start being the better alternative.
 
@@ -51,11 +62,10 @@ This only works without mtp.  You need to use another type of benchmarking (eg a
 
 ```sh
 llama-bench -pg 512,128 \
--m ~/models/Qwen3.5-9B-Q4_K_M.gguf \
--m ~/models/gemma-4-26B-A4B-it-UD-Q4_K_S.gguf \
--m ~/models/Qwen3.5-35B-A3B-Q4_K_S.gguf \
+-m ~/models/gemma4-26B/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf \
+-m ~/models/qwen3.8-27B/Qwen3.8-27B-UD-Q4_K_M.gguf \
 -b 2048 -ub 512 \
--ngl 99 --flash-attn on
+-ngl 99 --flash-attn on --load-mode none
 ```
 
 ## Other altneratives
