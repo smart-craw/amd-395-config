@@ -12,7 +12,7 @@ exec distrobox enter llama-vulkan-radv -- llama-server \
   --spec-draft-n-max 4 \
   --jinja \
   --reasoning on \
-  --reasoning-format none \
+  --reasoning-format auto \
   -ngl 99 --flash-attn on --load-mode none \
   -b 2048 -ub 512 \
   --cache-type-k q8_0 --cache-type-v q8_0 \
