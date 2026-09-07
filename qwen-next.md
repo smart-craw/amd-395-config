@@ -4,7 +4,7 @@ Halogen is closed source and should be treated as "untrusted".
 
 ### Basic use (not recommended):
 
-[Reference](Using https://github.com/peonist-ai/halogen-flash-server).
+[Reference](https://github.com/peonist-ai/halogen-flash-server).
 
 * Download weights from [hf](https://huggingface.co/peonist-ai/halogen-qwen3.8-flash-next) to `~/models/qwen3.8-flash-halogen`
 * Run the following command:
