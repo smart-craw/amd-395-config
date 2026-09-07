@@ -29,8 +29,7 @@ Block outbound traffic at the network level.  This guide allows outbound on
 * ubuntu package repositories
 
 ```sh
-## create the subnet to run halogen in.  Needed to keep isolated from other containers
-# running on this server
+## create the subnet to run halogen in.  Needed to keep isolated from other containers, but doesn't isolate from internet/host.
 podman network create webserver-net --subnet 10.89.10.0/24
 ```
 
@@ -145,4 +144,4 @@ podman run --rm --network webserver-net \
 
 ### Full docker compose
 
-While not tested, it should be possible to provide network segmentation within a docker compose application.  Something like squid could be used for outbound.  There could be a reverse proxy inbound.  The halogen container would only have network access to the reverse proxy pod and the squid pod.
+While not tested, it should be possible to provide network segmentation within a docker compose application.  Something like squid could be used for outbound.  There could be a reverse proxy inbound.  The halogen container would only have network access to the reverse proxy pod and the squid pod.  This would allow the host (server) to have full access to the internet, if desired.
