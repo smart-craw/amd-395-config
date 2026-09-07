@@ -14,6 +14,12 @@ distrobox create llama-rocm-10.0 \
 ## Initial setup
 Follow https://github.com/kyuz0/amd-strix-halo-toolboxes to create distrobox installs.  Fastest for me with `qwen3.5 9b` was llama-vulkan-radv, though as rocm matures it may start being the better alternative.
 
+## Minimize GPU allocation in BIOS
+
+The BIOS can pre-allocate GPU memory.  This would work well for (eg) video games which could then use the dedicated pre-allocated memory.  It does not work well for LLMs, which use the shared memory available to the OS.
+
+To get around this, minimize the GPU allocation in BIOS.  On my Beelink this is found in Advanced → AMD CBS → NBIO Common Options → GFX Configuration → Dedicated Graphics Memory.
+
 ## Provide sufficient GPU memory
 
 Open /etc/default/grub with sudo and find the line GRUB_CMDLINE_LINUX_DEFAULT.
