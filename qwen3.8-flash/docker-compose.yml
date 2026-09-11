@@ -1,0 +1,32 @@
+services:
+  halogen-qwen3.8-flash-next:
+    networks:
+      - halogen-internal # isolate
+    image: ghcr.io/peonist-ai/halogen-flash-server:0.5.6
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    security_opt:
+      - seccomp:unconfined
+    ipc: host
+    ulimits:
+      memlock: -1
+    volumes:
+      - $HOME/models/qwen3.8-flash-halogen:/models:ro
+
+  litellm:
+    networks:
+      - halogen-internal # so litellm can hit halogen
+      - public-inbound
+    image: ghcr.io/berriai/litellm:main-stable
+    ports:
+      - "8080:4000" # only this is exposed to the host/LAN
+    volumes:
+      - $HOME/service/litellm-config.yml:/app/config.yml
+    command: ["--config", "/app/config.yml"]
+
+networks:
+  public-inbound:
+    driver: bridge
+  halogen-internal:
+    internal: true
