@@ -144,4 +144,22 @@ podman run --rm --network webserver-net \
 
 ### Full docker compose
 
-While not tested, it should be possible to provide network segmentation within a docker compose application.  Something like squid could be used for outbound.  There could be a reverse proxy inbound.  The halogen container would only have network access to the reverse proxy pod and the squid pod.  This would allow the host (server) to have full access to the internet, if desired.
+This keeps the host internet and firewall untouched while providing network isolation to halogen.
+
+`docker compose -f docker-compose.yml up`
+
+As a service,
+
+```sh
+cp llm-halogen.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable llm-halogen
+systemctl --user start llm-halogen
+```
+
+Make sure to add your user to the docker group first:
+
+```sh
+sudo groupadd docker || echo "group already exists"
+sudo usermod -aG docker $USER
+```

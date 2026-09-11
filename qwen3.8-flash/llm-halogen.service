@@ -1,0 +1,12 @@
+[Unit]
+Description=halogen llm service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=%h/service
+ExecStart=/usr/bin/docker compose -f docker-compose.yml up --detach
+ExecStop=/usr/bin/docker compose -f docker-compose.yml stop
+
+[Install]
+WantedBy=default.target

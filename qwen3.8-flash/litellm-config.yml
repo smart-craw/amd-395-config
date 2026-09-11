@@ -1,0 +1,13 @@
+model_list:
+  - model_name: halogen-qwen3.8-flash-next
+    litellm_params:
+      model: hosted_vllm/halogen-qwen3.8-flash-next
+      api_base: http://halogen-qwen3.8-flash-next:8731/v1
+      # https://unsloth.ai/docs/models/qwen3.8-next#recommended-settings
+      temperature: 1.0
+      top_k: 20
+      top_p: 0.95
+      min_p: 0.0
+      presence_penalty: 0.0
+    model_info:
+      supports_reasoning: True
