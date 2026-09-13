@@ -14,6 +14,22 @@ services:
     volumes:
       - $HOME/models/qwen3.8-flash-halogen:/models:ro
 
+  # for direct chat/completion proxy with no litellm proxy
+  # I believe there is a bug in litellm that prevents
+  # consistent tool output over hosted_vllm
+  nginx-openai:
+    networks:
+      - halogen-internal # so litellm can hit halogen
+      - public-inbound
+    image: ghcr.io/smart-craw/smart-craw-llm-proxy:v0.6.2
+    ports:
+      - "8081:8080" # only this is exposed to the host/LAN
+    environment:
+      BACKEND_SERVICE: http://halogen-qwen3.8-flash-next:8731
+    depends_on:
+      halogen-qwen3.8-flash-next:
+        condition: service_started #healthy
+
   litellm:
     networks:
       - halogen-internal # so litellm can hit halogen

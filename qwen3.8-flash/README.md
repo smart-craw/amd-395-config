@@ -144,7 +144,7 @@ podman run --rm --network webserver-net \
 
 ### Full docker compose
 
-This keeps the host internet and firewall untouched while providing network isolation to halogen.
+This keeps the host internet and firewall untouched while providing network isolation to halogen.  It uses `litellm` for a proxy to expose a `messages` api (Anthropic compatable) on `8080`, and an `nginx` proxy for straightforward openai compatable (/chat/complete) on `8081`.
 
 `docker compose -f docker-compose.yml up`
 
