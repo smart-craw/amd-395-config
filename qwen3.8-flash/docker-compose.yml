@@ -2,7 +2,7 @@ services:
   halogen-qwen3.8-flash-next:
     networks:
       - halogen-internal # isolate
-    image: ghcr.io/peonist-ai/halogen-flash-server:0.5.6
+    image: ghcr.io/peonist-ai/halogen-flash-server:0.6.3
     devices:
       - /dev/kfd
       - /dev/dri
@@ -11,6 +11,13 @@ services:
     ipc: host
     ulimits:
       memlock: -1
+    environment:
+      # these can be overriden by the calling client on a per-request basis
+      HALOGEN_TEMPERATURE: 1.0
+      HALOGEN_TOP_P: 0.95
+      HALOGEN_TOP_K: 20
+      HALOGEN_MIN_P: 0.0
+      HALOGEN_PRESENCE_PENALTY: 0.0
     volumes:
       - $HOME/models/qwen3.8-flash-halogen:/models:ro
 
