@@ -1,8 +1,9 @@
 services:
   halogen-qwen3.8-flash-next:
+    restart: unless-stopped
     networks:
       - halogen-internal # isolate
-    image: ghcr.io/peonist-ai/halogen-flash-server:0.6.3
+    image: ghcr.io/peonist-ai/halogen-flash-server:0.11.5
     devices:
       - /dev/kfd
       - /dev/dri
@@ -25,6 +26,7 @@ services:
   # I believe there is a bug in litellm that prevents
   # consistent tool output over hosted_vllm
   nginx-openai:
+    restart: unless-stopped
     networks:
       - halogen-internal # so litellm can hit halogen
       - public-inbound
@@ -38,6 +40,7 @@ services:
         condition: service_started
 
   litellm:
+    restart: unless-stopped
     networks:
       - halogen-internal # so litellm can hit halogen
       - public-inbound
