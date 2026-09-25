@@ -25,6 +25,9 @@ services:
   # for direct chat/completion proxy with no litellm proxy
   # I believe there is a bug in litellm that prevents
   # consistent tool output over hosted_vllm
+  # UPDATE: Actually I thinkk this was a bug in halogen
+  # https://github.com/peonist-ai/halogen-flash-server/blob/main/CHANGELOG.md#0136
+  # consider removing the nginx proxy and using litellm for all services
   nginx-openai:
     restart: unless-stopped
     networks:
