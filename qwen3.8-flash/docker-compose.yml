@@ -3,7 +3,7 @@ services:
     restart: unless-stopped
     networks:
       - halogen-internal # isolate
-    image: ghcr.io/peonist-ai/halogen-flash-server:0.11.5
+    image: ghcr.io/peonist-ai/halogen-flash-server:0.13.8
     devices:
       - /dev/kfd
       - /dev/dri
