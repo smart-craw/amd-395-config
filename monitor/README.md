@@ -8,6 +8,7 @@ matter:
 | `serve.py`            | stdlib-only same-origin proxy + static file host            |
 | `static/index.html`   | the dashboard (with `static/app.js`, `static/styles.css`)   |
 | `llm-monitor.service` | systemd **user** unit that keeps `serve.py` running         |
+| `tests/`              | proxy, markup-contract and headless UI tests (see below)     |
 
 It polls the three read-only endpoints the model server already exposes —
 `/health`, `/v1/models` and `/cache` — through a tiny local proxy, so the page
@@ -233,3 +234,32 @@ python3 monitor/serve.py --url http://127.0.0.1:8001 --port 8090
 Point the endpoint selector at a dead port (or stop the fake upstream) to see the
 failure path: red pill, per-card error strips with retry, and the all-failed
 banner.
+
+`tests/mock_upstream.py` is that stand-in, kept as a script so it can be used
+both by the tests and by hand, with modes for the pathological cases
+(`healthy`, `weird`, `free`, `plain`, `empty`, `broken`, `wedged`):
+
+```sh
+python3 monitor/tests/mock_upstream.py --port 8001 --mode healthy
+python3 monitor/serve.py --url http://127.0.0.1:8001 --port 8090
+```
+
+## Tests
+
+Two suites, no dependencies to install (stdlib `unittest` + `node --test`):
+
+```sh
+python3 -m unittest discover -s monitor/tests -p "test_*.py"   # the proxy
+node --test "monitor/tests/*.test.mjs"                         # the dashboard UI
+```
+
+| file                      | what it pins down                                                            |
+| ------------------------- | ---------------------------------------------------------------------------- |
+| `tests/test_serve.py`     | the JSON envelope, `?url=` override + validation, the 5 s cap per upstream request, dead / 5xx / non-JSON upstreams, static hosting (bodies really get copied), traversal-proofing |
+| `tests/test_static.py`    | contracts no browser would warn about: every id app.js looks up exists, every class it toggles is styled, no off-box asset, upstream data never reaches `innerHTML` |
+| `tests/test_app.test.mjs` | the real app.js in a headless DOM against a live `serve.py`: first paint, retargeting without a reload, an unknown `/cache` shape, the unreachable-upstream path, zero uncaught errors |
+| `tests/frontend_dom.mjs`  | the miniature DOM the last file needs (parses `index.html`, runs `app.js` unmodified) |
+| `tests/mock_upstream.py`  | the model-server double, usable standalone                                    |
+
+The `node --test` glob is quoted so node expands it itself. On a box without
+node, the Python suite still covers the proxy end to end.
