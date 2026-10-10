@@ -1,0 +1,15 @@
+[Unit]
+Description=llm monitor dashboard
+
+[Service]
+Type=simple
+# assumes you cloned this repo into $HOME/service, the folder llm-server.service
+# already expects; replace %h/service with your actual checkout path
+ExecStart=/usr/bin/python3 %h/service/monitor/serve.py
+# upstream model server to poll; --url on the command line wins over this
+Environment=LLM_MONITOR_UPSTREAM=http://llm.home:8001
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

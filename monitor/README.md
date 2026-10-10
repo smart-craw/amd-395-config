@@ -1,22 +1,101 @@
 # monitor — LLM server dashboard
 
-A single-page dashboard for a vLLM / llama.cpp style model server. Two files
+A single-page dashboard for a vLLM / llama.cpp style model server. Three files
 matter:
 
-| path                | what it is                                                        |
-| ------------------- | ----------------------------------------------------------------- |
-| `serve.py`          | stdlib-only same-origin proxy + static file host                  |
-| `static/index.html` | the dashboard (with `static/app.js`, `static/styles.css`)         |
+| path                  | what it is                                                  |
+| --------------------- | ----------------------------------------------------------- |
+| `serve.py`            | stdlib-only same-origin proxy + static file host            |
+| `static/index.html`   | the dashboard (with `static/app.js`, `static/styles.css`)   |
+| `llm-monitor.service` | systemd **user** unit that keeps `serve.py` running         |
+
+It polls the three read-only endpoints the model server already exposes —
+`/health`, `/v1/models` and `/cache` — through a tiny local proxy, so the page
+and its API share one origin.
+
+## Quick start
 
 ```sh
-python3 monitor/serve.py --url http://llm.home:8001 --port 8090
+python3 monitor/serve.py
 # then open http://localhost:8090/
 ```
 
-`--url` (or `$LLM_MONITOR_UPSTREAM`) is the upstream the proxy polls; `static/`
-is served from the same origin, so no CORS is involved and nothing is loaded
-from outside the box. No build step, no npm, no CDN: plain HTML/CSS/JS, charts
-drawn as inline `<svg>`.
+Same thing with the defaults spelled out:
+
+```sh
+python3 monitor/serve.py --host 127.0.0.1 --port 8090 --url http://llm.home:8001
+```
+
+Nothing to install: `serve.py` is standard-library Python 3, and the UI is plain
+HTML/CSS/JS with charts drawn as inline `<svg>` — no build step, no npm, no CDN,
+no third-party deps, and nothing loaded from outside the box. `python3
+monitor/serve.py --help` lists the flags and their defaults.
+
+## Pointing it at a server
+
+The upstream (the model server being watched) is resolved at startup, first match
+wins:
+
+| source                     | example                                          |
+| -------------------------- | ------------------------------------------------ |
+| `--url`                    | `python3 monitor/serve.py --url http://localhost:8000` |
+| `$LLM_MONITOR_UPSTREAM`    | `export LLM_MONITOR_UPSTREAM=http://localhost:8080`   |
+| built-in default           | `http://llm.home:8001`                           |
+
+Three ways to change the target, cheapest first:
+
+* **From the UI, no restart** — type a base URL in the endpoint selector (or hit
+  a preset) and Apply. Every poll then carries `?url=<base>` on the proxy route,
+  which overrides the upstream for that request only. The choice is kept in
+  `localStorage`, so it survives a reload, but it never changes the server's own
+  config — `/api/config` keeps reporting the startup value.
+* **`--url` on the command line** — sets the server-side default that
+  `?url=` overrides sit on top of. Restart the process to pick up a change.
+* **`LLM_MONITOR_UPSTREAM`** — same thing without touching the command line;
+  this is what `llm-monitor.service` uses, and `--url` wins if both are set.
+
+There is no config file and no state on disk. Only absolute `http://` / `https://`
+URLs with a host are accepted; anything else (`file:///etc/passwd`, a bare
+`localhost:8000`) is refused with 400 on the proxy route. Because `?url=` lets a
+caller make this server fetch an arbitrary URL, the default bind address is
+loopback — pass `--host 0.0.0.0` only on a network you trust the requesters on.
+
+## Run it as a service
+
+[llm-monitor.service](./llm-monitor.service) is a systemd **user** unit for
+`monitor/serve.py`, same shape as [../llm-server.service](../llm-server.service)
+at the repo root. Put it in `~/.config/systemd/user/`, creating the folder if it
+doesn't already exist, and update the `%h/service` path in `ExecStart` to point
+at your actual checkout.
+
+Run
+
+```sh
+systemctl --user daemon-reload
+```
+
+```sh
+systemctl --user enable llm-monitor
+```
+
+```sh
+systemctl --user start llm-monitor
+```
+
+The upstream comes from `Environment=LLM_MONITOR_UPSTREAM=http://llm.home:8001`
+in the unit; edit that line (or add `--url` to `ExecStart`, which takes
+precedence) and `systemctl --user restart llm-monitor` after any change. Logs go
+to the journal:
+
+```sh
+journalctl --user -u llm-monitor -f
+```
+
+To run at boot without login:
+
+```sh
+sudo loginctl enable-linger $USER
+```
 
 ## What the page shows
 
@@ -42,17 +121,61 @@ drawn as inline `<svg>`.
   older than 3 intervals, and a full-width banner appears when *all* endpoints
   fail.
 
+## Why the proxy exists
+
+The model server sends **no CORS headers**, so a dashboard served from any other
+origin (another port, another box, `file://`) would be blocked by the browser
+from reading `/health`, `/v1/models` and `/cache` directly. So `serve.py` hosts
+the UI and the API on the *same origin*: the page only ever talks to its own
+server, and that server — not a browser, so no same-origin policy — does the
+fetching and hands the result back. Nothing on the model server side has to
+change.
+
+## The API surface
+
+| route             | upstream                | notes                                    |
+| ----------------- | ----------------------- | ---------------------------------------- |
+| `GET /api/health` | `<upstream>/health`     | proxied                                  |
+| `GET /api/models` | `<upstream>/v1/models`  | proxied                                  |
+| `GET /api/cache`  | `<upstream>/cache`      | proxied                                  |
+| `GET /api/config` | *(no upstream call)*    | active upstream + the endpoints to offer |
+
+Any other `/api/...` path answers 404, a malformed `?url=` answers 400, and
+everything that is not under `/api/` is served out of `static/` (directory
+listings are disabled). Each proxy route takes an optional `?url=<http(s) base>`
+that overrides the upstream for that single request.
+
 ## The envelope
 
-`serve.py` answers `GET /api/{health,models,cache,config}` with a fixed shape,
-and always with HTTP 200 even when the upstream is on fire (upstream trouble
-lives inside the envelope, not in the transport status):
+All four `/api/*` routes answer with the same shape, and always with HTTP 200
+even when the upstream is on fire (upstream trouble lives inside the envelope,
+not in the transport status):
 
 ```json
 {"ok": true, "url": "http://llm.home:8001/health", "status": 200,
  "latency_ms": 4.2, "content_type": "application/json",
  "body": {"status": "ok"}, "error": null}
 ```
+
+* `ok` — `true` only when the upstream answered 2xx/3xx.
+* `url` — the absolute upstream URL actually fetched (`null` for `/api/config`).
+* `status` — upstream HTTP status, `null` when there was no response.
+* `latency_ms` — round-trip time, rounded to 2 decimals.
+* `content_type` — upstream `Content-Type`, or `application/json` when the
+  envelope was synthesised locally.
+* `body` — parsed JSON when it is JSON (or claims to be), otherwise the raw text;
+  `null` when there was no body.
+* `error` — `null` on success, otherwise a one-line reason (timeout,
+  connection refused, HTTP 500, ...).
+
+A dead, slow or angry upstream is still HTTP 200 with `ok:false` and a populated
+`error` — never a 500 that takes the dashboard down — and no request ever waits
+longer than 5s for the upstream.
+
+`/api/config` is the odd one out: it never calls the upstream, and its `body` is
+`{"upstream": ..., "endpoints": ["/health", "/v1/models", "/cache"],
+"default_upstream": ...}`, with those three keys also copied onto the top level
+of the envelope so `body.upstream` and `upstream` both work.
 
 ## Why `/cache` is parsed defensively
 
