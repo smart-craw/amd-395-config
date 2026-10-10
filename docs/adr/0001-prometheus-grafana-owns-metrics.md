@@ -100,7 +100,8 @@ stdlib-only page is the wrong place to spend effort.
   `monitor/serve.py:103`), bound to `127.0.0.1:9090`.
 * Grafana: provisioned datasource + provisioned dashboard, sign-up off, plugins
   disabled, update/analytics checks off, bound to `127.0.0.1:3000`.
-* Alert rules live in `monitoring/prometheus/rules.yml` (Alertmanager is phase 2).
+* Alert rules live in `monitoring/prometheus/` (`rules.yml`, rendered from the
+  committed template + thresholds file; Alertmanager itself is phase 2).
 * Every knob is a committed `.env.example` entry.
 
 ### Layer 2 — `monitor/serve.py`, scope frozen
@@ -210,23 +211,34 @@ double-counts. `rate(llm_monitor_scrape_success_total[…])` is the canonical
 
 ### C3 — recording rules publish the neutral aliases
 
-`monitoring/prometheus/rules.yml` is the single place that knows vendor names.
+`monitoring/prometheus/recording_rules.yml` is the single place that knows vendor
+names — the file that vendor spellings are resolved **in**, never in the browser.
 Canonical aliases (quantiles carry the `:quantile` suffix per Prometheus
 convention):
 
 | alias | from |
 | --- | --- |
-| `llm:decode_tokens_per_second` | `rate(llamacpp:predicted_tokens_seconds[…])` / vendor equivalent |
-| `llm:prompt_tokens_per_second` | `rate(llamacpp:prompt_tokens_seconds[…])` |
-| `llm:time_to_first_token_seconds:p99` (and `:p50`, `:p90`) | `histogram_quantile(… , rate(*_bucket))` |
-| `llm:kv_cache_utilization` | `llamacpp:kv_cache_usage_ratio` / `halogen:kv_pool_positions` ÷ pool size |
-| `llm:prompt_cache_hit_ratio` | `rate(cached[5m]) / (rate(total[5m]) + rate(cached[5m]))` |
-| `llm:draft_accept_ratio` | `rate(draft_tokens_accepted_total[5m]) / rate(draft_tokens_total[5m])` |
-| `llm:requests_running`, `llm:requests_queued` | `requests_processing` / `requests_deferred` |
-| `llm:scrape_ok`, `llm:scrape_success_ratio` | from `llm_monitor_*` (C2) |
+| `llm:decode_tokens_per_second` | `sum(rate({__name__=~"llamacpp:tokens_predicted_total\|llamacpp:predicted_tokens_total\|…"}[5m]))` |
+| `llm:prompt_tokens_per_second` | `sum(rate({__name__=~"llamacpp:prompt_tokens_total\|…"}[5m]))` |
+| `llm:requests_per_second` | `rate({__name__=~"halogen:requests_total\|llamacpp:requests_total"}[5m])` |
+| `llm:time_to_first_token_seconds:p99` (and `:p50`, `:p90`) | `histogram_quantile(…, rate(*_bucket))` — to be added with the latency panels (`workspace-szw.4`) |
+| `llm:kv_cache_usage_ratio` | `llamacpp:kv_cache_usage_ratio` (further vendor spellings / `÷ pool size` variants land here as needed) |
+| `llm:prompt_cache_hit_ratio` | `rate(cached[5m]) / (rate(total[5m]) + rate(cached[5m]))`, `clamp_min`-guarded |
+| `llm:draft_acceptance_ratio` | `rate(draft_tokens_accepted_total[5m]) / rate(draft_tokens_total[5m])`, `clamp_min`-guarded |
+| `llm:requests_running`, `llm:requests_queued` | `requests_processing` / `requests_deferred` — pending |
+| `llm:scrape_ok`, `llm:scrape_success_ratio` | from `llm_monitor_*` (C2) — pending, needed by `workspace-szw.5` |
 
-Vendor spellings are resolved **here**, never in the browser. Adding a server
-family means adding rules, not adding regexes.
+The alias **names** are the contract, not the file layout: alert rules may be
+rendered from a template (`rules.yml`), recording rules are hand-written and
+committed directly. Ratios should be `clamp_min`-guarded so a restart produces a
+flat line rather than a NaN hole. Adding a serving stack means adding a rule here,
+not a new regex in `app.js`.
+
+> Reconciliation at acceptance: the first cut of this ADR said `llm:kv_cache_utilization`
+> and `llm:draft_accept_ratio`. The recording-rules file that landed uses
+> `llm:kv_cache_usage_ratio` (mirrors the source gauge) and
+> `llm:draft_acceptance_ratio`; those shipped names are now canonical and this table
+> reflects them. Anything written against the earlier two names is a bug.
 
 ### C4 — Grafana deep links
 
