@@ -144,7 +144,7 @@ podman run --rm --network webserver-net \
 
 ### Full docker compose
 
-This keeps the host internet and firewall untouched while providing network isolation to halogen.  It uses `litellm` for a proxy to expose a `messages` api (Anthropic compatable) on `8080`, and an `nginx` proxy for straightforward openai compatable (/chat/complete) on `8081`.
+This keeps the host internet and firewall untouched while providing network isolation to halogen.  It uses `nginx` as a proxy via my [llm-proxy](https://github.com/smart-craw/smart-craw/tree/master/docker/llm-proxy) image.  I used to have `litellm` act as a proxy to expose the Anthropic `messages` api but Halogen now natively supports it.  I have kept the [litellm-config.yml](./litellm-config.yml) for reference.
 
 `docker compose -f docker-compose.yml up`
 

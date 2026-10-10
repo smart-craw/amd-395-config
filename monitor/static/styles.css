@@ -491,6 +491,29 @@ code {
   align-items: stretch;
 }
 
+/* /metrics carries tiles, a chart and the whole series list, so it gets two
+ * columns — but only from the width where the grid really has two: `span 2` in
+ * a single-column grid would conjure an implicit third and a horizontal
+ * scrollbar. */
+@media (min-width: 760px) {
+  .card-wide {
+    grid-column: span 2;
+  }
+
+  .card-wide .metric-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  /* metric names are long: give name + value room before wrapping */
+  .card-wide .kv {
+    grid-template-columns: repeat(auto-fit, minmax(min(230px, 100%), 1fr));
+  }
+
+  .card-wide .raw-json {
+    max-height: 260px;
+  }
+}
+
 .card {
   display: flex;
   flex-direction: column;
@@ -629,6 +652,19 @@ code {
   overflow-wrap: anywhere;
 }
 
+/* a muted footnote beside the error strip: an endpoint this server does not
+ * have, lines of /metrics that were not metrics, a truncated scrape */
+.card-note {
+  color: var(--text-mute);
+  font-size: 0.72rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.card-note[hidden] {
+  display: none;
+}
+
 .chip {
   font-size: 0.68rem;
   text-transform: uppercase;
@@ -682,6 +718,13 @@ code {
 /* the odd metric out (uptime) takes the full row instead of leaving a hole */
 .metric-wide {
   grid-column: 1 / -1;
+}
+
+/* the small line under a metric value: where the number came from */
+.metric-sub {
+  font-size: 0.68rem;
+  color: var(--text-mute);
+  overflow-wrap: anywhere;
 }
 
 .t-ok {

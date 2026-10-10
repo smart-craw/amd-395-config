@@ -7,13 +7,16 @@
  *
  *   {ok, url, status, latency_ms, content_type, body, error}
  *
+ * /metrics is the exception: its body is Prometheus text, so serve.py also
+ * returns it parsed, as `metrics` (see renderMetrics below).
+ *
  * Two consequences this file is built around:
  *   1. A dead upstream is still HTTP 200 + ok:false, so "did the poll work" is
  *      `env.ok`, never `res.ok`.
- *   2. Only /health and /v1/models have a provable schema. /cache is whatever the
- *      monitored box happens to answer, so the cache card classifies whatever it
- *      gets instead of assuming fields exist — worst case it shows the raw
- *      payload, it never renders blank.
+ *   2. Only /health and /v1/models have a provable schema. /cache and /metrics are
+ *      whatever the monitored box happens to answer, so those cards classify what
+ *      they get instead of assuming fields exist — worst case they show the raw
+ *      payload, they never render blank.
  */
 
 (function () {
@@ -24,8 +27,17 @@
   const ENDPOINTS = [
     { key: "health", route: "api/health", label: "health" },
     { key: "models", route: "api/models", label: "models" },
-    { key: "cache", route: "api/cache", label: "cache" },
+    // Not every model server has these: /cache and /metrics are extras that a
+    // stock vLLM or llama.cpp may answer 404 for, and a 404 on an extra is a
+    // note on its card rather than an outage.
+    { key: "cache", route: "api/cache", label: "cache", optional: true },
+    { key: "metrics", route: "api/metrics", label: "metrics", optional: true },
   ];
+
+  const ENDPOINT_BY_KEY = {};
+  ENDPOINTS.forEach((ep) => {
+    ENDPOINT_BY_KEY[ep.key] = ep;
+  });
 
   /** Presets taken from this repo's own launch scripts, so retargeting is one click. */
   const PRESETS = [
@@ -33,6 +45,11 @@
       label: "llm.home:8001",
       url: "http://llm.home:8001",
       hint: "serve.py default (--url / LLM_MONITOR_UPSTREAM)",
+    },
+    {
+      label: "llm.home:8081",
+      url: "http://llm.home:8081",
+      hint: "the front door that also answers /metrics",
     },
     {
       label: "localhost:8000",
@@ -113,6 +130,42 @@
       i += 1;
     }
     return (i === 0 ? n.toFixed(0) : n.toFixed(2)) + " " + units[i];
+  }
+
+  /** Tokens per second, the number everyone actually reads off an LLM dashboard. */
+  function fmtRate(v) {
+    if (!isNum(v)) return "\u2014";
+    if (Math.abs(v) >= 10000) return (v / 1000).toFixed(1) + "k tok/s";
+    if (Math.abs(v) >= 100) return fmtInt(v) + " tok/s";
+    return (Math.round(v * 10) / 10).toFixed(1) + " tok/s";
+  }
+
+  /** Seconds -> "480 ms" / "12.4 s" / "3m 05s" / "1h 50m". */
+  function fmtDuration(seconds) {
+    if (!isNum(seconds)) return "\u2014";
+    const s = Math.abs(seconds);
+    if (s < 1) return Math.round(seconds * 1000) + " ms";
+    if (s < 60) return seconds.toFixed(1) + " s";
+    if (s < 3600) return Math.floor(s / 60) + "m " + pad2(Math.round(s % 60)) + "s";
+    return Math.floor(s / 3600) + "h " + pad2(Math.round((s % 3600) / 60)) + "m";
+  }
+
+  /** A percentage with as little noise as the value can stand: "88%" / "88.2%". */
+  function pctLabel(pct) {
+    if (!isNum(pct)) return "\u2014";
+    const rounded = Math.round(pct * 10) / 10;
+    return (Math.abs(rounded - Math.round(rounded)) < 0.05
+      ? String(Math.round(rounded))
+      : rounded.toFixed(1)) + "%";
+  }
+
+  /** "halogen:kv_pool_positions" -> "kv_pool_positions" (the vendor is noise). */
+  function shortMetricName(name) {
+    return String(name || "").replace(/^[a-zA-Z0-9_]+:/, "");
+  }
+
+  function lastOf(list) {
+    return list && list.length ? list[list.length - 1] : null;
   }
 
   /** Unix seconds (or ms, or an ISO string) -> "2026-10-10 13:05:07 (3h ago)". */
@@ -203,6 +256,13 @@
       hasGood: false,
       stale: false,
       loading: false,
+      // metrics card only:
+      metrics: null, // parsed scrape from the last poll
+      lastMetrics: null, // last scrape that parsed, for degraded renders
+      rateHistory: [], // generation tok/s samples
+      rateBase: null, // previous counter sample, for the tok/s fallback
+      notServed: false, // optional route answered 404: this server has no such endpoint
+      note: null, // muted one-liner next to the error strip
     };
   });
 
@@ -252,6 +312,10 @@
       kv: $("#" + k + "-kv"),
       raw: $("#" + k + "-raw"),
       rawJson: $("#" + k + "-raw-json"),
+      note: $("#" + k + "-note"),
+      tiles: $("#" + k + "-tiles"),
+      throughput: $("#" + k + "-throughput"),
+      throughputStats: $("#" + k + "-throughput-stats"),
     };
   });
 
@@ -275,6 +339,7 @@
       content_type: "",
       body: null,
       error: "proxy returned an unexpected payload",
+      metrics: null,
     };
     if (!raw || typeof raw !== "object" || Array.isArray(raw) || !("ok" in raw)) {
       return base;
@@ -291,6 +356,10 @@
         : raw.ok
           ? null
           : "upstream reported a failure without an error message",
+      // The one extra key the proxy sends, on /api/metrics only: the parsed
+      // Prometheus view of `body`. Dropped here if it is not that shape.
+      metrics:
+        raw.metrics && Array.isArray(raw.metrics.series) ? raw.metrics : null,
     };
   }
 
@@ -603,9 +672,17 @@
     refs.rawJson.textContent = text;
   }
 
-  /** Inline-SVG sparkline: gridlines, area, line, last-sample tick. */
-  function renderSpark(refs, samples) {
-    const svg = refs.spark;
+  /**
+   * Inline-SVG sparkline: gridlines, area, line, last-sample tick.
+   *
+   * Defaults to the card's latency chart; pass {svg, stats, fmt} to draw a
+   * different series (the metrics card uses it for tokens/s) with its own unit.
+   */
+  function renderSpark(refs, samples, opts) {
+    const options = opts || {};
+    const svg = options.svg || refs.spark;
+    const stats = options.stats || refs.sparkStats;
+    const fmt = options.fmt || fmtLatency;
     if (!svg) return;
     while (svg.firstChild) svg.removeChild(svg.firstChild);
     svg.setAttribute("viewBox", "0 0 " + SPARK_W + " " + SPARK_H);
@@ -619,7 +696,7 @@
 
     if (!samples.length) {
       add("line", { class: "spark-empty", x1: 0, y1: SPARK_H / 2, x2: SPARK_W, y2: SPARK_H / 2 });
-      refs.sparkStats.textContent = "awaiting data";
+      stats.textContent = "awaiting data";
       return;
     }
 
@@ -663,14 +740,14 @@
     });
 
     const current = samples[samples.length - 1];
-    refs.sparkStats.textContent =
+    stats.textContent =
       samples.length < 2
-        ? "now " + fmtLatency(current) + " \u00b7 1 sample"
-        : "min " + fmtLatency(lo0) + " \u00b7 max " + fmtLatency(hi0) +
-          " \u00b7 now " + fmtLatency(current) + " \u00b7 " + samples.length + " samples";
+        ? "now " + fmt(current) + " \u00b7 1 sample"
+        : "min " + fmt(lo0) + " \u00b7 max " + fmt(hi0) +
+          " \u00b7 now " + fmt(current) + " \u00b7 " + samples.length + " samples";
   }
 
-  /** Card chrome shared by all three: error strip + retry, failure pulse, badge tone. */
+  /** Card chrome shared by all cards: error strip + retry, failure pulse, badge tone. */
   function renderChrome(key, card) {
     const refs = ui.cards[key];
     if (!refs.root) return;
@@ -684,6 +761,12 @@
       refs.errorText.title = detail;
     } else {
       refs.error.hidden = true;
+    }
+    // A muted line for "nothing is wrong, but you should know": an endpoint this
+    // server does not have, lines of /metrics that were not metrics, ...
+    if (refs.note) {
+      refs.note.textContent = card.note || "";
+      refs.note.hidden = !card.note;
     }
     const retry = refs.error ? refs.error.querySelector(".btn-retry") : null;
     if (retry) {
@@ -851,7 +934,426 @@
     renderSpark(refs, card.history);
   }
 
-  const RENDERERS = { health: renderHealth, models: renderModels, cache: renderCache };
+  // --- /metrics: Prometheus series ----------------------------------------
+  //
+  // /metrics is the one monitored endpoint that is not JSON: it answers the
+  // Prometheus text exposition format (text/plain; version=0.0.4). serve.py
+  // parses it, so the page gets both shapes:
+  //
+  //   env.body    "llamacpp:requests_processing 0\n…"      (raw panel, verbatim)
+  //   env.metrics {format, count, truncated, errors, families, series}
+  //
+  // Nothing here assumes a metric exists. llama.cpp, vLLM and the halogen router
+  // answer with different sets, so every tile looks its metric up by the exact
+  // name this box uses, falls back to a name pattern, and is left out when
+  // neither matches. If the parse found nothing the card still shows the raw
+  // text: never blank, never a guess.
+
+  /**
+   * What each tile wants. `exact` is a metric name observed on
+   * http://llm.home:8081/metrics; `fuzzy` is the best-effort match for a server
+   * that names the same thing differently.
+   */
+  const METRIC_SIGNALS = {
+    genRate: { exact: "llamacpp:predicted_tokens_seconds", fuzzy: /(pred|gen|decode)[a-z_:]*tokens_(seconds|per_second)$/i },
+    promptRate: { exact: "llamacpp:prompt_tokens_seconds", fuzzy: /prompt[a-z_:]*tokens_(seconds|per_second)$/i },
+    processing: { exact: "llamacpp:requests_processing", fuzzy: /requests?_(processing|active|running|inflight)$/i },
+    deferred: { exact: "llamacpp:requests_deferred", fuzzy: /requests?_(deferred|queued|waiting)$/i },
+    requests: { exact: "halogen:requests_total", fuzzy: /(^|:)requests_total$/i },
+    structured: { exact: "halogen:structured_requests_total", fuzzy: /structured_requests_total$/i },
+    promptTokens: { exact: "llamacpp:prompt_tokens_total", fuzzy: /(^|:)prompt_tokens_total$/i },
+    genTokens: { exact: "llamacpp:tokens_predicted_total", fuzzy: /(tokens_predicted|predicted_tokens|generation_tokens)_total$/i },
+    genSeconds: { exact: "llamacpp:tokens_predicted_seconds_total", fuzzy: /(tokens_predicted|predicted_tokens)_seconds_total$/i },
+    cachedPrompt: { exact: "halogen:prompt_tokens_cached_total", fuzzy: /prompt_tokens_cached_total$/i },
+    draftTotal: { exact: "halogen:draft_tokens_total", fuzzy: /(^|:)draft_tokens_total$/i },
+    draftAccepted: { exact: "halogen:draft_tokens_accepted_total", fuzzy: /draft_tokens_accepted_total$/i },
+    kvRatio: { exact: "llamacpp:kv_cache_usage_ratio", fuzzy: /(kv|cache)[a-z_]*usage[a-z_]*ratio$/i },
+    kvTokens: { exact: "llamacpp:kv_cache_tokens", fuzzy: /kv_cache_tokens$/i },
+    kvPool: { exact: "halogen:kv_pool_positions", fuzzy: /kv_pool_(positions|tokens)$/i },
+  };
+
+  /** envelope.metrics -> lookup-friendly view, or null when there is nothing. */
+  function metricsView(env) {
+    const parsed = env ? env.metrics : null;
+    if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.series)) return null;
+    const families = new Map();
+    (Array.isArray(parsed.families) ? parsed.families : []).forEach((family) => {
+      if (family && typeof family.name === "string") families.set(family.name, family);
+    });
+    const byName = new Map();
+    const names = [];
+    const entries = [];
+    parsed.series.forEach((sample) => {
+      if (!sample || typeof sample.name !== "string") return;
+      const family = families.get(sample.name) || {};
+      const entry = {
+        name: sample.name,
+        labels: sample.labels && typeof sample.labels === "object" ? sample.labels : {},
+        // NaN / +Inf arrive as null + value_text: JSON cannot spell them.
+        value:
+          typeof sample.value === "number" && Number.isFinite(sample.value) ? sample.value : null,
+        text: sample.value_text === null || sample.value_text === undefined ? "" : String(sample.value_text),
+        type: typeof family.type === "string" ? family.type : "unknown",
+        help: typeof family.help === "string" ? family.help : "",
+      };
+      entries.push(entry);
+      if (!byName.has(entry.name)) {
+        byName.set(entry.name, []);
+        names.push(entry.name);
+      }
+      byName.get(entry.name).push(entry);
+    });
+    return {
+      count: entries.length,
+      errors: Array.isArray(parsed.errors) ? parsed.errors : [],
+      truncated: !!parsed.truncated,
+      entries: entries,
+      byName: byName,
+      names: names,
+    };
+  }
+
+  /**
+   * The one number for one signal. A name can carry several series (one per
+   * label set: ``some:histogram_bucket{model="a"}`` and ``{model="b"}``), and a
+   * sum is the only honest single figure for a counter across label sets.
+   */
+  function signalValue(view, key) {
+    const signal = METRIC_SIGNALS[key];
+    if (!view || !signal) return null;
+    let hits = (signal.exact && view.byName.get(signal.exact)) || null;
+    for (let i = 0; (!hits || !hits.length) && i < view.names.length; i += 1) {
+      if (signal.fuzzy.test(view.names[i])) hits = view.byName.get(view.names[i]);
+    }
+    if (!hits || !hits.length) return null;
+    let total = 0;
+    let counted = 0;
+    hits.forEach((entry) => {
+      if (entry.value !== null) {
+        total += entry.value;
+        counted += 1;
+      }
+    });
+    return {
+      name: hits[0].name,
+      type: hits[0].type,
+      help: hits[0].help,
+      value: counted ? total : null,
+      text: counted ? "" : lastOf(hits).text,
+      series: hits.length,
+    };
+  }
+
+  function divide(numerator, denominator) {
+    if (!isNum(numerator) || !isNum(denominator) || denominator <= 0) return null;
+    return numerator / denominator;
+  }
+
+  function percent(part, whole) {
+    const ratio = divide(part, whole);
+    return ratio === null ? null : clamp(ratio * 100, 0, 999);
+  }
+
+  /** Pull every figure the card shows out of one scrape, in one pass. */
+  function metricsSummary(view) {
+    const pick = (key) => signalValue(view, key);
+    const out = {
+      genRate: pick("genRate"),
+      promptRate: pick("promptRate"),
+      processing: pick("processing"),
+      deferred: pick("deferred"),
+      requests: pick("requests"),
+      structured: pick("structured"),
+      promptTokens: pick("promptTokens"),
+      genTokens: pick("genTokens"),
+      genSeconds: pick("genSeconds"),
+      cachedPrompt: pick("cachedPrompt"),
+      draftTotal: pick("draftTotal"),
+      draftAccepted: pick("draftAccepted"),
+      kvRatio: pick("kvRatio"),
+      kvTokens: pick("kvTokens"),
+      kvPool: pick("kvPool"),
+    };
+    const num = (found) => (found && found.value !== null ? found.value : null);
+    const seen = num(out.promptTokens) || 0;
+    const cached = num(out.cachedPrompt) || 0;
+    out.genLifetime = divide(num(out.genTokens), num(out.genSeconds)); // tokens / s, lifetime
+    out.acceptPct = percent(num(out.draftAccepted), num(out.draftTotal));
+    out.cacheHitPct = seen + cached > 0 ? percent(cached, seen + cached) : null;
+    return out;
+  }
+
+  /** Tiles worth a big number, in reading order; a missing metric skips its tile. */
+  function metricsTiles(summary, genNow) {
+    const tiles = [];
+    const num = (found) => (found && found.value !== null ? found.value : null);
+
+    if (isNum(genNow)) {
+      tiles.push({
+        label: "generate tok/s",
+        value: fmtRate(genNow),
+        sub: isNum(summary.genLifetime)
+          ? "lifetime avg " + fmtRate(summary.genLifetime)
+          : shortMetricName(summary.genRate ? summary.genRate.name : ""),
+      });
+    }
+    if (num(summary.promptRate) !== null) {
+      tiles.push({
+        label: "prompt tok/s",
+        value: fmtRate(summary.promptRate.value),
+        sub:
+          num(summary.promptTokens) !== null
+            ? fmtInt(summary.promptTokens.value) + " prompt tokens total"
+            : shortMetricName(summary.promptRate.name),
+      });
+    }
+    if (num(summary.processing) !== null) {
+      const deferred = num(summary.deferred);
+      tiles.push({
+        label: "in flight",
+        value: fmtInt(summary.processing.value),
+        sub: deferred === null ? "now" : fmtInt(deferred) + " deferred",
+        tone: deferred > 0 ? "t-warn" : "",
+      });
+    }
+    if (num(summary.requests) !== null) {
+      tiles.push({
+        label: "requests",
+        value: fmtInt(summary.requests.value),
+        sub: num(summary.structured) !== null ? fmtInt(summary.structured.value) + " under a JSON schema" : "completed",
+      });
+    }
+    if (isNum(summary.acceptPct)) {
+      tiles.push({
+        label: "draft accept",
+        value: pctLabel(summary.acceptPct),
+        sub: fmtInt(summary.draftAccepted.value) + " / " + fmtInt(summary.draftTotal.value) + " drafted",
+      });
+    }
+    if (isNum(summary.cacheHitPct)) {
+      tiles.push({
+        label: "prompt cache hit",
+        value: pctLabel(summary.cacheHitPct),
+        sub: fmtInt(summary.cachedPrompt.value) + " cached / " + fmtInt(summary.promptTokens.value) + " processed",
+      });
+    }
+    return tiles;
+  }
+
+  /** KV-cache fill for the progress bar: the reported ratio, else used / pool. */
+  function metricsGauge(summary) {
+    if (!summary) return null;
+    const num = (found) => (found && found.value !== null ? found.value : null);
+    const ratio = num(summary.kvRatio);
+    const used = num(summary.kvTokens);
+    const pool = num(summary.kvPool);
+    let pct = null;
+    let label = "kv cache";
+    if (ratio !== null) {
+      pct = ratio <= 1 ? ratio * 100 : ratio;
+      label = shortMetricName(summary.kvRatio.name);
+    } else if (isNum(used) && isNum(pool)) {
+      pct = percent(used, pool);
+      if (pct !== null) {
+        label = shortMetricName(summary.kvTokens.name) + " / " + shortMetricName(summary.kvPool.name);
+      }
+    }
+    if (pct === null) return null;
+    let sub = "";
+    if (isNum(used) && isNum(pool)) sub = fmtInt(used) + " / " + fmtInt(pool) + " positions";
+    else if (summary.kvRatio && summary.kvRatio.help) sub = clip(summary.kvRatio.help, 96);
+    else sub = "reported as a " + (ratio <= 1 ? "0..1 ratio" : "percentage");
+    return { pct: pct, label: label, sub: sub };
+  }
+
+  /**
+   * A scraped number is friendlier with the unit its own name spells:
+   * ``*_ratio`` is a fraction, ``*_tokens_seconds`` a throughput,
+   * ``*_seconds_total`` a duration, everything else a count.
+   */
+  function fmtMetricValue(entry) {
+    if (entry.value === null) return entry.text || "\u2014";
+    const name = entry.name;
+    const value = entry.value;
+    if (/_ratio$|_fraction$/.test(name) && value >= 0 && value <= 1) return pctLabel(value * 100);
+    if (/(tokens|requests|messages|sequences|positions)_seconds$/i.test(name)) return fmtRate(value);
+    if (/_seconds$|_seconds_total$/i.test(name)) return fmtDuration(value);
+    if (Number.isInteger(value)) return fmtInt(value);
+    return String(Math.round(value * 1000) / 1000);
+  }
+
+  function metricKeyText(entry) {
+    const keys = Object.keys(entry.labels);
+    if (!keys.length) return clip(entry.name, 72);
+    const labels = keys.map((key) => key + "=" + entry.labels[key]).join(",");
+    return clip(entry.name + "{" + labels + "}", 72);
+  }
+
+  /** One row per series: name{labels} -> value, with type + help as the tooltip. */
+  function renderMetricsKv(container, entries, maxItems) {
+    if (!container) return;
+    const limit = maxItems || 40;
+    while (container.firstChild) container.removeChild(container.firstChild);
+    const row = (keyText, valueText, title, valueClass) => {
+      const item = document.createElement("div");
+      item.className = "kv-item";
+      const key = document.createElement("dt");
+      key.className = "kv-key";
+      key.textContent = keyText;
+      const val = document.createElement("dd");
+      val.className = "kv-value " + valueClass;
+      val.textContent = valueText;
+      if (title) val.title = title;
+      item.appendChild(key);
+      item.appendChild(val);
+      container.appendChild(item);
+    };
+
+    entries.slice(0, limit).forEach((entry) => {
+      row(
+        metricKeyText(entry),
+        fmtMetricValue(entry),
+        entry.type + (entry.help ? " \u00b7 " + entry.help : ""),
+        isNum(entry.value) ? "k-num" : "k-null"
+      );
+    });
+    if (entries.length > limit) {
+      row("\u2026", entries.length - limit + " more (see raw)", "", "k-null");
+    }
+  }
+
+  function renderTiles(container, tiles) {
+    if (!container) return;
+    while (container.firstChild) container.removeChild(container.firstChild);
+    tiles.forEach((tile) => {
+      const box = document.createElement("div");
+      box.className = "metric";
+      const label = document.createElement("span");
+      label.className = "metric-label";
+      label.textContent = tile.label;
+      const value = document.createElement("span");
+      value.className = "metric-value num" + (tile.tone ? " " + tile.tone : "");
+      value.textContent = tile.value;
+      box.appendChild(label);
+      box.appendChild(value);
+      if (tile.sub) {
+        const sub = document.createElement("span");
+        sub.className = "metric-sub num";
+        sub.textContent = tile.sub;
+        box.appendChild(sub);
+      }
+      container.appendChild(box);
+    });
+  }
+
+  /**
+   * One tok/s sample per successful poll, for the throughput chart.
+   *
+   * llama.cpp reports "since the last scrape" gauges and those are used as-is. A
+   * server without them gets the honest fallback: the delta of its tokens
+   * counter over the wall-clock gap between the two polls.
+   */
+  function noteThroughput(card, view) {
+    if (!view) return;
+    const now = nowMs();
+    const reported = signalValue(view, "genRate");
+    let rate = reported && reported.value !== null ? reported.value : null;
+    if (rate === null) {
+      const counter = signalValue(view, "genTokens");
+      const base = card.rateBase;
+      if (counter && counter.value !== null) {
+        card.rateBase = { value: counter.value, at: now };
+        if (base && counter.value >= base.value && now > base.at) {
+          rate = (counter.value - base.value) / ((now - base.at) / 1000);
+        }
+      }
+    }
+    if (!isNum(rate) || rate < 0) return;
+    card.rateHistory.push(rate);
+    if (card.rateHistory.length > HISTORY_SAMPLES) card.rateHistory.shift();
+  }
+
+  function renderMetrics(card) {
+    const refs = ui.cards.metrics;
+    const env = card.envelope;
+    if (!env || env.aborted) return;
+
+    const view = env.ok || !card.hasGood ? card.metrics : card.lastMetrics;
+    const summary = view ? metricsSummary(view) : null;
+    const genNow =
+      summary && summary.genRate && summary.genRate.value !== null
+        ? summary.genRate.value
+        : lastOf(card.rateHistory);
+
+    // 1. how full the KV cache is -- the one metric worth a progress bar
+    const gauge = metricsGauge(summary);
+    if (gauge) {
+      const pct = clamp(gauge.pct, 0, 100);
+      refs.barFill.style.width = pct.toFixed(1) + "%";
+      refs.bar.setAttribute("aria-valuenow", String(Math.round(pct)));
+      refs.bar.classList.remove("is-unknown");
+      refs.bar.classList.toggle("is-warn", pct >= 70 && pct < 90);
+      refs.bar.classList.toggle("is-bad", pct >= 90);
+      refs.gaugeValue.textContent = pctLabel(pct);
+      refs.gaugeLabel.textContent = gauge.label;
+      refs.gaugeSub.textContent = gauge.sub;
+    } else {
+      refs.barFill.style.width = "0%";
+      refs.bar.classList.add("is-unknown");
+      refs.bar.removeAttribute("aria-valuenow");
+      refs.bar.classList.remove("is-warn", "is-bad");
+      refs.gaugeValue.textContent = "\u2014";
+      refs.gaugeLabel.textContent = "kv cache";
+      refs.gaugeSub.textContent = view
+        ? "no kv-cache ratio in this scrape \u2014 every series is listed below"
+        : "awaiting /metrics data";
+    }
+
+    // 2. the numbers, 3. their history, 4. every series, 5. the raw text
+    renderTiles(refs.tiles, summary ? metricsTiles(summary, genNow) : []);
+    renderSpark(refs, card.rateHistory, {
+      svg: refs.throughput,
+      stats: refs.throughputStats,
+      fmt: fmtRate,
+    });
+    renderMetricsKv(refs.kv, view ? view.entries : []);
+    setRaw(refs, { body: bodyOf(card, env), error: env.error });
+
+    // 6. notes: worth knowing, not failures
+    const notes = [];
+    if (card.notServed) {
+      notes.push("this server does not answer /metrics (HTTP 404)");
+    } else if (view && view.errors.length) {
+      notes.push(
+        view.errors.length +
+          (view.errors.length === 1 ? " line" : " lines") +
+          " of /metrics were not metrics \u2014 " +
+          clip(String(view.errors[0]), 90)
+      );
+    } else if (!view && env.ok) {
+      notes.push("the response was not Prometheus text \u2014 raw payload below");
+    }
+    if (view && view.truncated) {
+      notes.push("only the first " + fmtInt(view.count) + " series were kept");
+    }
+    card.note = notes.length ? clip(notes.join("  \u00b7  "), 190) : null;
+
+    if (card.notServed) setBadge(refs, "neutral", "not served");
+    else if (!env.ok) setBadge(refs, "bad", "down");
+    else if (!view) setBadge(refs, "warn", "not metrics");
+    else setBadge(refs, "ok", fmtInt(view.count) + " series");
+
+    refs.badge.title = env.url || "";
+    renderChrome("metrics", card);
+    renderSpark(refs, card.history);
+  }
+
+  const RENDERERS = {
+    health: renderHealth,
+    models: renderModels,
+    cache: renderCache,
+    metrics: renderMetrics,
+  };
 
   /** Wipe a card's data area (used when the target changes and we are re-polling). */
   function resetCardBody(key) {
@@ -872,6 +1374,22 @@
       refs.tableWrap.hidden = true;
       refs.empty.hidden = false;
       refs.empty.textContent = "awaiting /v1/models";
+    } else if (key === "metrics") {
+      refs.barFill.style.width = "0%";
+      refs.bar.classList.add("is-unknown");
+      refs.bar.removeAttribute("aria-valuenow");
+      refs.bar.classList.remove("is-warn", "is-bad");
+      refs.gaugeValue.textContent = "\u2014";
+      refs.gaugeLabel.textContent = "kv cache";
+      refs.gaugeSub.textContent = "awaiting /metrics data";
+      clear(refs.tiles);
+      clear(refs.kv);
+      refs.raw.hidden = true;
+      renderSpark(refs, [], {
+        svg: refs.throughput,
+        stats: refs.throughputStats,
+        fmt: fmtRate,
+      });
     } else {
       refs.barFill.style.width = "0%";
       refs.bar.classList.add("is-unknown");
@@ -1012,6 +1530,10 @@
     if (!env || env.aborted) return;
     card.attempts += 1;
     card.envelope = env;
+    // /cache and /metrics are extras a stock server need not have: a 404 on one
+    // is a note on its card, not an outage, so it must not set lastError.
+    card.notServed =
+      !env.ok && env.status === 404 && !!(ENDPOINT_BY_KEY[key] || {}).optional;
     if (env.ok) {
       card.lastOkAt = nowMs();
       if (!state.firstOkAt) state.firstOkAt = card.lastOkAt;
@@ -1019,9 +1541,17 @@
       card.errorDetail = null;
       card.lastGood = env.body;
       card.hasGood = true;
+    } else if (card.notServed) {
+      card.lastError = null;
+      card.errorDetail = null;
     } else {
       card.lastError = env.error || "request failed";
       card.errorDetail = card.lastError + (env.url ? "  [" + env.url + "]" : "");
+    }
+    if (key === "metrics") {
+      card.metrics = metricsView(env);
+      if (card.metrics) card.lastMetrics = card.metrics;
+      if (env.ok) noteThroughput(card, card.metrics);
     }
     if (isNum(env.latency_ms)) {
       card.history.push(env.latency_ms);
@@ -1134,6 +1664,12 @@
       card.lastGood = null;
       card.hasGood = false;
       card.stale = false;
+      card.metrics = null;
+      card.lastMetrics = null;
+      card.rateHistory = [];
+      card.rateBase = null;
+      card.notServed = false;
+      card.note = null;
     });
     abortAll([state.cycle].concat(Array.from(state.retries.values())));
     state.retries.clear();

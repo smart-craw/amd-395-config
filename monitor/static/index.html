@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
-  <meta name="description" content="Local dashboard for a vLLM / llama.cpp style LLM server: health, models and cache.">
+  <meta name="description" content="Local dashboard for a vLLM / llama.cpp style LLM server: health, models, cache and Prometheus metrics.">
   <title>llm monitor</title>
   <!-- Inline favicon: keeps the page free of any request outside its own origin. -->
   <link rel="icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAzMiAzMic+PHJlY3Qgd2lkdGg9JzMyJyBoZWlnaHQ9JzMyJyByeD0nNycgZmlsbD0nJTIzMTUxYTIxJy8+PHBhdGggZD0nTTUgMjFsNi04IDUgNSA0LTYgNyA5JyBmaWxsPSdub25lJyBzdHJva2U9JyUyMzRjYzJmZicgc3Ryb2tlLXdpZHRoPScyLjUnIHN0cm9rZS1saW5lam9pbj0ncm91bmQnIHN0cm9rZS1saW5lY2FwPSdyb3VuZCcvPjwvc3ZnPg==">
@@ -15,8 +15,9 @@
 
   <!--
     Everything below is plain HTML/CSS/JS. Data comes from the same-origin proxy
-    in monitor/serve.py (api/health, api/models, api/cache, api/config), so there
-    is no cross-origin call and no asset loaded from anywhere but this directory.
+    in monitor/serve.py (api/health, api/models, api/cache, api/metrics,
+    api/config), so there is no cross-origin call and no asset loaded from
+    anywhere but this directory.
   -->
 
   <header class="topbar">
@@ -231,6 +232,67 @@
             <span id="cache-error" class="card-error" hidden>
               <span id="cache-error-text" class="card-error-text"></span>
               <button type="button" class="btn btn-retry" data-endpoint="cache">Retry</button>
+            </span>
+          </div>
+        </footer>
+      </article>
+
+      <!-- metrics --------------------------------------------------------- -->
+      <article class="card card-wide" id="card-metrics" aria-labelledby="metrics-title">
+        <header class="card-head">
+          <div class="card-heading">
+            <h2 id="metrics-title">Metrics</h2>
+            <code class="card-path">/metrics</code>
+          </div>
+          <span id="metrics-badge" class="badge badge-neutral">—</span>
+        </header>
+
+        <div class="card-body">
+          <div class="gauge">
+            <div class="gauge-top">
+              <span id="metrics-gauge-label" class="gauge-label">kv cache</span>
+              <span id="metrics-gauge-value" class="gauge-value num">—</span>
+            </div>
+            <div id="metrics-bar" class="bar" role="progressbar"
+                 aria-label="KV-cache usage" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+              <div id="metrics-bar-fill" class="bar-fill"></div>
+            </div>
+            <p id="metrics-gauge-sub" class="gauge-sub">awaiting /metrics data</p>
+          </div>
+
+          <div class="metric-grid" id="metrics-tiles"></div>
+
+          <div class="chart">
+            <div class="chart-head">
+              <span class="chart-title">generate tok/s</span>
+              <span id="metrics-throughput-stats" class="chart-stats num">awaiting data</span>
+            </div>
+            <svg id="metrics-throughput" class="spark" viewBox="0 0 300 60" preserveAspectRatio="none"
+                 role="img" aria-label="rolling generation throughput history from /metrics"></svg>
+          </div>
+
+          <dl class="kv" id="metrics-kv"></dl>
+          <details class="raw" id="metrics-raw" hidden>
+            <summary>raw response</summary>
+            <pre id="metrics-raw-json" class="raw-json num"></pre>
+          </details>
+        </div>
+
+        <footer class="card-foot">
+          <div class="chart">
+            <div class="chart-head">
+              <span class="chart-title">latency</span>
+              <span id="metrics-spark-stats" class="chart-stats num">awaiting data</span>
+            </div>
+            <svg id="metrics-spark" class="spark" viewBox="0 0 300 60" preserveAspectRatio="none"
+                 role="img" aria-label="rolling latency history for /metrics"></svg>
+          </div>
+          <div class="card-foot-row">
+            <span id="metrics-stale" class="chip chip-stale" hidden>stale</span>
+            <span id="metrics-note" class="card-note" hidden></span>
+            <span id="metrics-error" class="card-error" hidden>
+              <span id="metrics-error-text" class="card-error-text"></span>
+              <button type="button" class="btn btn-retry" data-endpoint="metrics">Retry</button>
             </span>
           </div>
         </footer>

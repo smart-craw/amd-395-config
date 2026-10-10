@@ -87,6 +87,9 @@ function spawnPython(args, { name, port }) {
 
 const ENV = {};
 
+/** The four cards, in the order they appear on the page. */
+const CARD_KEYS = ["health", "models", "cache", "metrics"];
+
 async function startMock(mode) {
   const port = await freePort();
   return spawnPython(
@@ -98,6 +101,7 @@ async function startMock(mode) {
 before(async () => {
   const healthy = await startMock("healthy");
   const weird = await startMock("weird");
+  const nometrics = await startMock("nometrics");
   const port = await freePort();
   const monitor = spawnPython(
     [
@@ -111,6 +115,7 @@ before(async () => {
 
   ENV.healthy = await healthy.started;
   ENV.weird = await weird.started;
+  ENV.nometrics = await nometrics.started;
   ENV.monitor = await monitor.started;
   for (const [name, url] of Object.entries({ ...ENV })) {
     assert.match(String(url), /^http:\/\/[\d.]+:\d+$/, `${name} URL looks wrong`);
@@ -163,9 +168,28 @@ function card(page, key) {
     gaugeLabel: id("gauge-label"),
     gaugeValue: id("gauge-value"),
     gaugeSub: id("gauge-sub"),
+    note: id("note"),
+    tiles: id("tiles"),
+    throughput: id("throughput"),
+    throughputStats: id("throughput-stats"),
     raw: id("raw"),
     rawJson: id("raw-json"),
   };
+}
+
+/** The metrics card's tiles as [label, value, sub] triples. */
+function tilesOf(metricsCard) {
+  return metricsCard.tiles.children.map((tile) => [
+    tile.children[0].textContent,
+    tile.children[1].textContent,
+    tile.children.length > 2 ? tile.children[2].textContent : "",
+  ]);
+}
+
+function tile(map, label) {
+  const found = map.find(([name]) => name === label);
+  assert.ok(found, `no "${label}" tile: ${map.map(([n]) => n).join(", ")}`);
+  return found;
 }
 
 function kvRows(cacheCard) {
@@ -266,7 +290,7 @@ describe("dashboard: healthy upstream", () => {
   });
 
   test("every card draws a sparkline with min/max/current", () => {
-    for (const key of ["health", "models", "cache"]) {
+    for (const key of CARD_KEYS) {
       const c = card(page, key);
       const drawn = c.spark.children.map((el) => el.tagName);
       assert.ok(drawn.length > 0, `${key} sparkline is empty`);
@@ -277,7 +301,7 @@ describe("dashboard: healthy upstream", () => {
   });
 
   test("nothing is in an error or stale state", () => {
-    for (const key of ["health", "models", "cache"]) {
+    for (const key of CARD_KEYS) {
       const c = card(page, key);
       assert.equal(c.error.hidden, true, `${key} shows an error strip`);
       assert.equal(c.stale.hidden, true, `${key} is marked stale`);
@@ -295,10 +319,15 @@ describe("dashboard: healthy upstream", () => {
       "exactly one poll interval is selected"
     );
     const presets = page.byId("preset-row").children;
-    assert.equal(presets.length, 3);
+    assert.equal(presets.length, 4);
     assert.deepEqual(
       presets.map((b) => b.dataset.url),
-      ["http://llm.home:8001", "http://localhost:8000", "http://localhost:8080"]
+      [
+        "http://llm.home:8001",
+        "http://llm.home:8081",
+        "http://localhost:8000",
+        "http://localhost:8080",
+      ]
     );
   });
 
@@ -325,6 +354,131 @@ describe("dashboard: healthy upstream", () => {
     } finally {
       paused.dispose();
     }
+  });
+});
+
+describe("dashboard: the metrics card", () => {
+  let page;
+
+  before(async () => {
+    page = boot();
+    await twoPolls(page);
+  });
+
+  after(() => page.dispose());
+
+  test("the scrape is counted, and nothing about it was dropped", () => {
+    const metrics = card(page, "metrics");
+    assert.equal(textOf(metrics.badge), "17 series");
+    assert.equal(metrics.error.hidden, true);
+    assert.equal(metrics.note.hidden, true, "a clean scrape needs no note");
+  });
+
+  test("the kv-cache ratio becomes a labelled progress bar", () => {
+    const metrics = card(page, "metrics");
+    assert.equal(textOf(metrics.gaugeLabel), "kv_cache_usage_ratio");
+    assert.equal(textOf(metrics.gaugeValue), "62.5%");
+    assert.equal(metrics.barFill.style.width, "62.5%");
+    assert.equal(metrics.bar.getAttribute("aria-valuenow"), "63");
+    assert.match(textOf(metrics.gaugeSub), /5,120 \/ 8,192 positions/);
+  });
+
+  test("the tiles read like an LLM dashboard, not like a metric dump", () => {
+    const tiles = tilesOf(card(page, "metrics"));
+    assert.deepEqual(
+      tiles.map(([label]) => label),
+      ["generate tok/s", "prompt tok/s", "in flight", "requests", "draft accept", "prompt cache hit"]
+    );
+    assert.equal(tile(tiles, "generate tok/s")[1], "72.9 tok/s");
+    assert.equal(tile(tiles, "generate tok/s")[2], "lifetime avg 61.2 tok/s");
+    assert.equal(tile(tiles, "prompt tok/s")[1], "1,416 tok/s");
+    assert.equal(tile(tiles, "prompt tok/s")[2], "779,554 prompt tokens total");
+    assert.equal(tile(tiles, "in flight")[1], "2");
+    assert.equal(tile(tiles, "in flight")[2], "0 deferred");
+    assert.equal(tile(tiles, "requests")[1], "522");
+    assert.equal(tile(tiles, "requests")[2], "0 under a JSON schema");
+    // derived, because no single metric says it: accepted / drafted, cached / seen
+    assert.equal(tile(tiles, "draft accept")[1], "81.4%");
+    assert.equal(tile(tiles, "draft accept")[2], "248,795 / 305,696 drafted");
+    assert.equal(tile(tiles, "prompt cache hit")[1], "98.5%");
+    assert.equal(tile(tiles, "prompt cache hit")[2], "49,838,237 cached / 779,554 processed");
+  });
+
+  test("every series is listed, with the unit its own name spells", () => {
+    const rows = kvRows(card(page, "metrics"));
+    const rowOf = (name) => {
+      const found = rows.find(([key]) => key === name);
+      assert.ok(found, `${name} is missing from the series list`);
+      return found;
+    };
+    assert.equal(rows.length, 17);
+    assert.equal(rowOf("llamacpp:prompt_tokens_total")[1], "779,554");
+    assert.equal(rowOf("llamacpp:kv_cache_usage_ratio")[1], "62.5%");
+    assert.equal(rowOf("llamacpp:tokens_predicted_seconds_total")[1], "1h 50m");
+    assert.equal(rowOf("llamacpp:predicted_tokens_seconds")[1], "72.9 tok/s");
+    assert.equal(rowOf("halogen:requests_total")[1], "522");
+    // type + help ride along as the tooltip, so the list stays narrow
+    const row = card(page, "metrics").kv.children.find(
+      (item) => item.children[0].textContent === "halogen:requests_total"
+    );
+    assert.match(row.children[1].title, /counter \u00b7 Requests completed\./);
+  });
+
+  test("the raw exposition format stays available verbatim", () => {
+    const metrics = card(page, "metrics");
+    assert.equal(metrics.raw.hidden, false);
+    assert.match(textOf(metrics.rawJson), /# TYPE llamacpp:requests_processing gauge/);
+    assert.match(textOf(metrics.rawJson), /halogen:requests_total 522/);
+  });
+
+  test("generation throughput gets its own history chart, in tok/s", () => {
+    const metrics = card(page, "metrics");
+    const drawn = metrics.throughput.children.map((el) => el.tagName);
+    assert.ok(drawn.includes("POLYLINE"), "throughput chart has no line");
+    assert.ok(drawn.includes("POLYGON"), "throughput chart has no area");
+    assert.match(textOf(metrics.throughputStats), /min .*tok\/s \u00b7 max .*tok\/s \u00b7 now .*tok\/s/);
+  });
+});
+
+describe("dashboard: a server without /metrics", () => {
+  let page;
+
+  before(async () => {
+    page = boot();
+    await twoPolls(page);
+    retarget(page, ENV.nometrics);
+    await waitFor(() => textOf(card(page, "metrics").badge) === "not served", {
+      what: "the metrics card to notice the 404",
+    });
+  });
+
+  after(() => page.dispose());
+
+  test("a missing endpoint is a note, not an outage", () => {
+    const metrics = card(page, "metrics");
+    assert.equal(metrics.error.hidden, true, "a 404 must not raise the error strip");
+    assert.equal(metrics.note.hidden, false, "but it must be explained");
+    assert.match(textOf(metrics.note), /does not answer \/metrics \(HTTP 404\)/);
+    assert.match(metrics.root.className, /^(?!.*is-error).*$/, "card is not marked failed");
+  });
+
+  test("the rest of the dashboard is unbothered", () => {
+    assert.match(page.byId("status-pill").className, /pill-healthy/);
+    assert.equal(textOf(page.byId("status-text")), "healthy");
+    assert.equal(page.byId("banner").hidden, true);
+    assert.equal(textOf(card(page, "health").badge), "up");
+    assert.match(card(page, "cache").kv.textContent, /n_ctx/);
+    assert.deepEqual(page.window.errors, []);
+  });
+
+  test("the card falls back to the raw response and an empty gauge", () => {
+    const metrics = card(page, "metrics");
+    assert.equal(textOf(metrics.gaugeValue), "\u2014");
+    assert.equal(metrics.bar.classList.contains("is-unknown"), true);
+    assert.match(textOf(metrics.gaugeSub), /awaiting \/metrics data/);
+    assert.equal(metrics.tiles.children.length, 0);
+    assert.equal(metrics.raw.hidden, false);
+    assert.match(textOf(metrics.rawJson), /does not expose/);
   });
 });
 
@@ -414,7 +568,7 @@ describe("dashboard: unreachable upstream", () => {
   });
 
   test("every card explains itself instead of going blank", () => {
-    for (const key of ["health", "models", "cache"]) {
+    for (const key of CARD_KEYS) {
       const c = card(page, key);
       assert.equal(c.error.hidden, false, `${key} hides its error`);
       assert.ok(textOf(c.errorText).length > 10, `${key} has no error text`);

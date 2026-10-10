@@ -10,9 +10,9 @@ matter:
 | `llm-monitor.service` | systemd **user** unit that keeps `serve.py` running         |
 | `tests/`              | proxy, markup-contract and headless UI tests (see below)     |
 
-It polls the three read-only endpoints the model server already exposes —
-`/health`, `/v1/models` and `/cache` — through a tiny local proxy, so the page
-and its API share one origin.
+It polls the four read-only endpoints the model server already exposes —
+`/health`, `/v1/models`, `/cache` and `/metrics` — through a tiny local proxy, so
+the page and its API share one origin.
 
 ## Quick start
 
@@ -109,6 +109,9 @@ sudo loginctl enable-linger $USER
   `localStorage` and re-polls immediately with `?url=`, no reload.
 * **poll interval** — 2s / 5s / 15s / paused, also persisted. Overlapping polls
   are prevented: the previous cycle is aborted and late answers are dropped.
+* a 404 on an *optional* endpoint (`/cache`, `/metrics`: not stock routes, many
+  servers do not have them) is shown as a muted note on that card — "this server
+  does not answer /metrics (HTTP 404)" — and leaves the status pill healthy.
 * **health card** — `/health`: status text, HTTP code, round-trip latency, last
   check, uptime since the first good poll, plus any other field the server sends.
 * **models card** — `/v1/models`: count badge and a table of
@@ -117,6 +120,10 @@ sudo loginctl enable-linger $USER
 * **cache card** — `/cache`: utilisation as a labelled progress bar with the raw
   numbers, then a key/value grid of everything the endpoint returned, then a raw
   JSON panel.
+* **metrics card** — `/metrics`: a KV-cache progress bar, tiles for generate
+  tok/s, prompt tok/s, requests in flight, requests total, draft-accept rate and
+  prompt-cache hit rate, a throughput history chart, one row per scraped series
+  and the raw exposition text. See “Why `/metrics` is parsed server-side”.
 * every card has a ~60-sample latency sparkline (min / max / now labelled), an
   error strip with a retry button, stale styling once the last good poll is
   older than 3 intervals, and a full-width banner appears when *all* endpoints
@@ -139,6 +146,7 @@ change.
 | `GET /api/health` | `<upstream>/health`     | proxied                                  |
 | `GET /api/models` | `<upstream>/v1/models`  | proxied                                  |
 | `GET /api/cache`  | `<upstream>/cache`      | proxied                                  |
+| `GET /api/metrics`| `<upstream>/metrics`    | proxied, **plus** `metrics` (parsed)      |
 | `GET /api/config` | *(no upstream call)*    | active upstream + the endpoints to offer |
 
 Any other `/api/...` path answers 404, a malformed `?url=` answers 400, and
@@ -148,7 +156,7 @@ that overrides the upstream for that single request.
 
 ## The envelope
 
-All four `/api/*` routes answer with the same shape, and always with HTTP 200
+All five `/api/*` routes answer with the same shape, and always with HTTP 200
 even when the upstream is on fire (upstream trouble lives inside the envelope,
 not in the transport status):
 
@@ -173,10 +181,45 @@ A dead, slow or angry upstream is still HTTP 200 with `ok:false` and a populated
 `error` — never a 500 that takes the dashboard down — and no request ever waits
 longer than 5s for the upstream.
 
+`/api/metrics` is the only route with a key beyond the seven above: `metrics`, the
+parsed form of `body` (see “Why `/metrics` is parsed server-side”).
+
 `/api/config` is the odd one out: it never calls the upstream, and its `body` is
 `{"upstream": ..., "endpoints": ["/health", "/v1/models", "/cache"],
 "default_upstream": ...}`, with those three keys also copied onto the top level
 of the envelope so `body.upstream` and `upstream` both work.
+
+## Why `/metrics` is parsed server-side
+
+`/metrics` is the one monitored endpoint that is not JSON: it answers the
+Prometheus text exposition format (`text/plain; version=0.0.4`). Rather than ship
+a second parser to the browser, `serve.py` leaves the text in `body` and adds one
+extra key next to the envelope:
+
+```json
+{"format": "prometheus", "count": 17, "truncated": false, "errors": [],
+ "families": [{"name": "llamacpp:requests_processing", "type": "gauge",
+               "help": "Number of requests processing."}],
+ "series": [{"name": "llamacpp:requests_processing", "labels": {},
+             "value": 0.0, "value_text": "0"}]}
+```
+
+* `families` carries each metric's declared `type` and `help`; `series` carries
+  the values, one entry per label set.
+* `NaN` / `+Inf` / `-Inf` are legal in the exposition format and impossible in
+  JSON, so such a sample has `value: null` and keeps its spelling in
+  `value_text` — the response is always strict JSON.
+* Anything the parser cannot read is skipped and named in `errors` (max 8) rather
+  than losing the rest of the scrape; more than 2000 series sets `truncated`.
+* If the server answers `/metrics` with something that is not Prometheus text at
+  all, `metrics` is `null` and the card shows the raw payload.
+
+The card never assumes a metric exists: each tile looks up the exact name this box
+uses (`llamacpp:predicted_tokens_seconds`, `halogen:kv_pool_positions`, …) and
+falls back to a name pattern, and a tile whose metric is missing is simply not
+rendered. Two figures are derived rather than read: draft acceptance
+(`draft_tokens_accepted_total / draft_tokens_total`) and prompt-cache hit rate
+(`prompt_tokens_cached_total / (prompt_tokens_total + prompt_tokens_cached_total)`).
 
 ## Why `/cache` is parsed defensively
 
@@ -237,7 +280,8 @@ banner.
 
 `tests/mock_upstream.py` is that stand-in, kept as a script so it can be used
 both by the tests and by hand, with modes for the pathological cases
-(`healthy`, `weird`, `free`, `plain`, `empty`, `broken`, `wedged`):
+(`healthy`, `weird`, `free`, `plain`, `empty`, `broken`, `wedged`, and `nometrics`
+for a server whose `/metrics` answers 404):
 
 ```sh
 python3 monitor/tests/mock_upstream.py --port 8001 --mode healthy
@@ -255,9 +299,9 @@ node --test "monitor/tests/*.test.mjs"                         # the dashboard U
 
 | file                      | what it pins down                                                            |
 | ------------------------- | ---------------------------------------------------------------------------- |
-| `tests/test_serve.py`     | the JSON envelope, `?url=` override + validation, the 5 s cap per upstream request, dead / 5xx / non-JSON upstreams, static hosting (bodies really get copied), traversal-proofing |
+| `tests/test_serve.py`     | the JSON envelope, `?url=` override + validation, the 5 s cap per upstream request, dead / 5xx / non-JSON upstreams, the Prometheus parser (labels, NaN/Inf, garbage lines, the series cap), static hosting (bodies really get copied), traversal-proofing |
 | `tests/test_static.py`    | contracts no browser would warn about: every id app.js looks up exists, every class it toggles is styled, no off-box asset, upstream data never reaches `innerHTML` |
-| `tests/test_app.test.mjs` | the real app.js in a headless DOM against a live `serve.py`: first paint, retargeting without a reload, an unknown `/cache` shape, the unreachable-upstream path, zero uncaught errors |
+| `tests/test_app.test.mjs` | the real app.js in a headless DOM against a live `serve.py`: first paint, retargeting without a reload, an unknown `/cache` shape, the metrics tiles/gauge/chart, a server without `/metrics`, the unreachable-upstream path, zero uncaught errors |
 | `tests/frontend_dom.mjs`  | the miniature DOM the last file needs (parses `index.html`, runs `app.js` unmodified) |
 | `tests/mock_upstream.py`  | the model-server double, usable standalone                                    |
 

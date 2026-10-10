@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """A stand-in for a vLLM / llama.cpp style model server, for tests and demos.
 
-The real box (``http://llm.home:8001``) is not part of this repo, so anything
+The real box (``http://llm.home:8081``) is not part of this repo, so anything
 that wants to exercise the dashboard end to end needs a local double that
-answers the three monitored routes -- ``/health``, ``/v1/models`` and ``/cache``
--- in the shapes those servers are known to produce, plus a few pathological
-shapes (plain text, HTTP 5xx, a wedged route, an unexpected ``/cache`` schema)
-so the "never renders blank" rules can be checked.
+answers the four monitored routes -- ``/health``, ``/v1/models``, ``/cache`` and
+``/metrics`` -- in the shapes those servers are known to produce, plus a few
+pathological shapes (plain text, HTTP 5xx, a wedged route, an unexpected
+``/cache`` schema, a ``/metrics`` the server does not serve) so the "never renders
+blank" rules can be checked.
 
 Start one on its own::
 
@@ -14,9 +15,13 @@ Start one on its own::
 
 Modes:
 
-    healthy     OpenAI-style /v1/models, JSON /health, llama.cpp-shaped /cache
-    weird       /cache answers with keys the dashboard has never seen
+    healthy     OpenAI-style /v1/models, JSON /health, llama.cpp-shaped /cache,
+                llama.cpp/halogen-shaped /metrics (Prometheus text)
+    weird       /cache answers with keys the dashboard has never seen, /metrics
+                with labels, buckets, NaN/Inf and one unparsable line
     free        /cache reports free space instead of used space
+    nometrics   everything is healthy except /metrics, which 404s (a server that
+                does not expose metrics at all)
     empty       every route answers 204 with no body
     plain       every route answers text/plain (a stock llama.cpp /health)
     broken      every route answers 500
@@ -74,9 +79,86 @@ CACHE_BODIES = {
     "free": {"n_ctx": 4096, "free_tokens": 1024},
 }
 
+#: /metrics is Prometheus text exposition format -- ``text/plain``, not JSON.
+#: The healthy body mirrors what a llama.cpp + halogen front door actually
+#: answers (same metric names, plausible numbers for CACHE_BODIES["healthy"]).
+METRICS_BODIES = {
+    "healthy": """# HELP llamacpp:prompt_tokens_total Number of prompt tokens processed.
+# TYPE llamacpp:prompt_tokens_total counter
+llamacpp:prompt_tokens_total 779554
+# HELP llamacpp:prompt_seconds_total Prompt process time.
+# TYPE llamacpp:prompt_seconds_total counter
+llamacpp:prompt_seconds_total 638.037
+# HELP llamacpp:tokens_predicted_total Number of generation tokens processed.
+# TYPE llamacpp:tokens_predicted_total counter
+llamacpp:tokens_predicted_total 404669
+# HELP llamacpp:tokens_predicted_seconds_total Predict process time.
+# TYPE llamacpp:tokens_predicted_seconds_total counter
+llamacpp:tokens_predicted_seconds_total 6607.03
+# HELP llamacpp:prompt_tokens_seconds Average prompt throughput in tokens/s.
+# TYPE llamacpp:prompt_tokens_seconds gauge
+llamacpp:prompt_tokens_seconds 1415.51
+# HELP llamacpp:predicted_tokens_seconds Average generation throughput in tokens/s.
+# TYPE llamacpp:predicted_tokens_seconds gauge
+llamacpp:predicted_tokens_seconds 72.9496
+# HELP llamacpp:requests_processing Number of requests processing.
+# TYPE llamacpp:requests_processing gauge
+llamacpp:requests_processing 2
+# HELP llamacpp:requests_deferred Number of requests deferred.
+# TYPE llamacpp:requests_deferred gauge
+llamacpp:requests_deferred 0
+# HELP llamacpp:kv_cache_tokens KV-cache tokens.
+# TYPE llamacpp:kv_cache_tokens gauge
+llamacpp:kv_cache_tokens 5120
+# HELP llamacpp:kv_cache_usage_ratio KV-cache usage. 1 means 100 percent usage.
+# TYPE llamacpp:kv_cache_usage_ratio gauge
+llamacpp:kv_cache_usage_ratio 0.625
+# HELP halogen:requests_total Requests completed.
+# TYPE halogen:requests_total counter
+halogen:requests_total 522
+# HELP halogen:structured_requests_total Requests decoded under a JSON schema.
+# TYPE halogen:structured_requests_total counter
+halogen:structured_requests_total 0
+# HELP halogen:prompt_tokens_cached_total Prompt tokens the prompt cache covered.
+# TYPE halogen:prompt_tokens_cached_total counter
+halogen:prompt_tokens_cached_total 49838237
+# HELP halogen:draft_tokens_accepted_total Of the drafted tokens, accepted.
+# TYPE halogen:draft_tokens_accepted_total counter
+halogen:draft_tokens_accepted_total 248795
+# HELP halogen:draft_tokens_total Tokens proposed by the draft head.
+# TYPE halogen:draft_tokens_total counter
+halogen:draft_tokens_total 305696
+# HELP halogen:kv_pool_positions The KV pool, in positions.
+# TYPE halogen:kv_pool_positions gauge
+halogen:kv_pool_positions 8192
+# HELP halogen:kv_pool_reserved_tokens Positions the front-end slots asked for.
+# TYPE halogen:kv_pool_reserved_tokens gauge
+halogen:kv_pool_reserved_tokens 0
+""",
+    # Shapes the dashboard must survive: labels, buckets, non-finite values,
+    # a metric with no HELP/TYPE, and a line that is not a sample at all.
+    "weird": """# HELP some:histogram a histogram with labels
+# TYPE some:histogram histogram
+some:histogram_bucket{model="qwen3, 27b",le="0.5"} 12
+some:histogram_bucket{model="qwen3, 27b",le="+Inf"} 20
+some:histogram_count{model="qwen3, 27b"} 20
+some:histogram_sum{model="qwen3, 27b"} 7.5
+# a plain comment, and an OpenMetrics one
+# UNIT some:other seconds
+some:unknown_no_type 3
+some:not_a_number nope
+some:nan NaN
+some:plus_inf +Inf
+totally unparsable here
+""",
+}
+
+#: Content-Type of a real /metrics response (nginx reports version 0.0.4).
+METRICS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
+
 
 class MockUpstreamHandler(BaseHTTPRequestHandler):
-    """Answers the three monitored routes according to ``server.mode``."""
+    """Answers the four monitored routes according to ``server.mode``."""
 
     protocol_version = "HTTP/1.1"
     server_version = "mock-llm/1.0"
@@ -140,6 +222,16 @@ class MockUpstreamHandler(BaseHTTPRequestHandler):
             self._reply(200, MODELS)
         elif path == "/cache":
             self._reply(200, CACHE_BODIES.get(mode, CACHE_BODIES["healthy"]))
+        elif path == "/metrics":
+            if mode == "nometrics":
+                # A server that simply does not have the route (vLLM, old llama.cpp).
+                self._reply(404, {"error": "this server does not expose /metrics"})
+                return
+            self._reply(
+                200,
+                METRICS_BODIES.get(mode, METRICS_BODIES["healthy"]),
+                METRICS_CONTENT_TYPE,
+            )
         elif path == "/slow":
             time.sleep(float((self.path.split("=", 1) + ["5"])[1]))
             self._reply(200, {"slept": True})
@@ -181,7 +273,10 @@ def main() -> int:
     parser.add_argument(
         "--mode",
         default="healthy",
-        choices=sorted(set(list(CACHE_BODIES) + ["broken", "plain", "empty", "wedged"])),
+        choices=sorted(
+            set(list(CACHE_BODIES) + list(METRICS_BODIES))
+            | {"broken", "plain", "empty", "wedged", "nometrics"}
+        ),
     )
     args = parser.parse_args()
     server = MockUpstream(mode=args.mode, port=args.port)

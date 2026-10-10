@@ -76,10 +76,10 @@ llama-bench -pg 512,128 \
 
 ## Monitor dashboard
 
-A dependency-free dashboard for whichever model server is running: `monitor/serve.py` hosts the page and proxies `/health`, `/v1/models` and `/cache` from the same origin, so no CORS setup is needed.  Point it at any server (defaults to `http://llm.home:8001`) and open `http://localhost:8090/`.
+A dependency-free dashboard for whichever model server is running: `monitor/serve.py` hosts the page and proxies `/health`, `/v1/models`, `/metrics`, and `/cache` from the same origin, so no CORS setup is needed.  Point it at any server (defaults to `http://llm.home:8080`) and open `http://localhost:8090/`.
 
 ```sh
-python3 monitor/serve.py --url http://llm.home:8001 --port 8090
+python3 monitor/serve.py --url http://llm.home:8080 --port 8090
 ```
 
 There is a `llm-monitor.service` systemd user unit for it, installed the same way as `llm-server.service`.  See [monitor/README.md](monitor/README.md).

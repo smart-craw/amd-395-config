@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import threading
 import unittest
@@ -234,6 +235,32 @@ class HealthyUpstreamTests(ProxyFixture):
         self.assertTrue(env["ok"])
         self.assertEqual(env["body"]["n_ctx"], 8192)
 
+    def test_metrics_text_is_proxied_verbatim_and_parsed(self):
+        env = self.api("metrics")
+        self.assertTrue(env["ok"])
+        # body stays the upstream's own text: /metrics is not JSON, and the raw
+        # panel in the dashboard shows exactly what the server said.
+        self.assertEqual(env["content_type"].split(";")[0], "text/plain")
+        self.assertIn("llamacpp:prompt_tokens_total 779554", env["body"])
+        # ...and the parsed view rides alongside it, as an extra key.
+        self.assertEqual([k for k in env if k != "_status"], ENVELOPE_KEYS + ["metrics"])
+        metrics = env["metrics"]
+        self.assertEqual(metrics["format"], "prometheus")
+        self.assertEqual(metrics["count"], 17)
+        self.assertEqual(metrics["errors"], [])
+        names = {s["name"] for s in metrics["series"]}
+        self.assertIn("llamacpp:predicted_tokens_seconds", names)
+        self.assertIn("halogen:requests_total", names)
+        by_name = {f["name"]: f for f in metrics["families"]}
+        self.assertEqual(by_name["halogen:requests_total"]["type"], "counter")
+        self.assertEqual(
+            by_name["llamacpp:requests_processing"]["help"],
+            "Number of requests processing.",
+        )
+        value = [s for s in metrics["series"] if s["name"] == "llamacpp:requests_processing"][0]
+        self.assertEqual(value["value"], 2.0)
+        self.assertEqual(value["labels"], {})
+
     def test_config_names_the_startup_upstream(self):
         env = self.api("config")
         self.assertTrue(env["ok"])
@@ -242,7 +269,7 @@ class HealthyUpstreamTests(ProxyFixture):
         self.assertEqual(env["upstream"], self.upstream.url)
 
     def test_every_route_is_gettable(self):
-        for route in ("config", "health", "models", "cache"):
+        for route in ("config", "health", "models", "cache", "metrics"):
             with self.subTest(route=route):
                 status, headers, _ = get(f"{self.base}/api/{route}")
                 self.assertEqual(status, 200)
@@ -357,6 +384,132 @@ class TimeoutTests(ProxyFixture):
             elapsed = time.monotonic() - started
         self.assertTrue(env["ok"])
         self.assertLess(elapsed, 2.0)
+
+
+class MetricsRouteTests(ProxyFixture):
+    """/api/metrics on servers that answer it badly, or not at all."""
+
+    mode = "healthy"
+
+    def test_odd_metrics_still_produce_every_good_series(self):
+        with MockUpstream(mode="weird") as weird:
+            env = self.api("metrics", url=weird.url)
+            status, _, raw = get(f"{self.base}/api/metrics?url=" + urllib.parse.quote(weird.url, safe=""))
+        self.assertTrue(env["ok"])
+        metrics = env["metrics"]
+        names = {s["name"] for s in metrics["series"]}
+        self.assertIn("some:histogram_bucket", names)
+        self.assertNotIn("totally", names)  # the unparsable line is not a series
+        self.assertEqual(metrics["count"], 7)
+        bucket = [s for s in metrics["series"] if s["name"] == "some:histogram_bucket"][0]
+        # label values keep their commas
+        self.assertEqual(bucket["labels"]["model"], "qwen3, 27b")
+        # ...and a non-finite value survives as text, never as invalid JSON
+        nan = [s for s in metrics["series"] if s["name"] == "some:nan"][0]
+        self.assertIsNone(nan["value"])
+        self.assertEqual(nan["value_text"], "NaN")
+        self.assertTrue(any("not a number" in e for e in metrics["errors"]))
+        # the wire bytes must be strict JSON: no bare NaN / Infinity literals
+        self.assertIsNone(
+            re.search(rb":\s*(NaN|\+?-Infinity)\b", raw),
+            "non-finite values must travel as text, never as JSON literals",
+        )
+        self.assertIn(b'"value_text": "NaN"', raw)
+        self.assertEqual(json.loads(raw)["metrics"]["count"], 7)
+
+    def test_a_server_without_metrics_is_reported_not_raised(self):
+        with MockUpstream(mode="nometrics") as quiet:
+            env = self.api("metrics", url=quiet.url)
+            health = self.api("health", url=quiet.url)
+        self.assertEqual(env["_status"], 200)
+        self.assertFalse(env["ok"])
+        self.assertEqual(env["status"], 404)
+        self.assertIsNone(env["metrics"])  # nothing text-shaped to parse
+        # ...while the rest of that server is fine (this must not read as "down")
+        self.assertTrue(health["ok"])
+
+    def test_non_prometheus_text_parses_to_nothing_but_says_so(self):
+        with MockUpstream(mode="plain") as plain:
+            env = self.api("metrics", url=plain.url)
+        self.assertTrue(env["ok"])
+        self.assertEqual(env["body"], "keep-alive\n")
+        # "keep-alive" looks like a name with a non-numeric value: zero series.
+        self.assertEqual(env["metrics"]["count"], 0)
+        self.assertTrue(env["metrics"]["errors"])
+
+
+class PrometheusParserTests(unittest.TestCase):
+    """Unit tests for the exposition-format reader (no sockets involved)."""
+
+    def test_counts_and_groups(self):
+        parsed = serve.parse_prometheus(
+            "# HELP a Total a.\n# TYPE a counter\na 1\n# TYPE b gauge\nb 2.5\n"
+        )
+        self.assertEqual(parsed["count"], 2)
+        self.assertEqual(parsed["truncated"], False)
+        self.assertEqual(
+            [(f["name"], f["type"]) for f in parsed["families"]], [("a", "counter"), ("b", "gauge")]
+        )
+        self.assertEqual(parsed["series"][1]["value"], 2.5)
+
+    def test_help_may_come_after_type_and_names_may_contain_colons(self):
+        parsed = serve.parse_prometheus("# TYPE x:y gauge\n# HELP x:y Some help.\nx:y 1\n")
+        self.assertEqual(parsed["families"][0], {"name": "x:y", "type": "gauge", "help": "Some help."})
+        self.assertEqual(parsed["series"][0]["name"], "x:y")
+
+    def test_labels_including_escapes_commas_and_braces(self):
+        parsed = serve.parse_prometheus('m{a="1",b="say \\"hi\\"",c="x, } y"} 4\n')
+        self.assertEqual(
+            parsed["series"][0]["labels"], {"a": "1", "b": 'say "hi"', "c": "x, } y"}
+        )
+        self.assertEqual(parsed["errors"], [])
+
+    def test_timestamps_and_exponential_notation(self):
+        parsed = serve.parse_prometheus("m 1.5e3 1600000000000\n")
+        self.assertEqual(parsed["series"][0]["value"], 1500.0)
+
+    def test_non_finite_values_are_json_safe(self):
+        parsed = serve.parse_prometheus("a NaN\nb +Inf\nc -Inf\n")
+        self.assertEqual([s["value"] for s in parsed["series"]], [None, None, None])
+        self.assertEqual([s["value_text"] for s in parsed["series"]], ["NaN", "+Inf", "-Inf"])
+        self.assertEqual(parsed["errors"], [], "NaN/Inf are legal, not errors")
+
+    def test_garbage_is_skipped_and_reported(self):
+        parsed = serve.parse_prometheus(
+            "# just a comment\n# EOF\ntotally unparsable here\nbroken{ 7\n\n   \ngood 1\n"
+        )
+        self.assertEqual([s["name"] for s in parsed["series"]], ["good"])
+        self.assertTrue(any("unterminated label" in e for e in parsed["errors"]))
+        self.assertEqual(len(parsed["errors"]), len(parsed["errors"][: serve.MAX_PARSE_ERRORS]))
+
+    def test_empty_input_is_harmless(self):
+        for blank in ("", "   \n\n", None):
+            with self.subTest(blank=blank):
+                parsed = serve.parse_prometheus(blank)
+                self.assertEqual(parsed["count"], 0)
+                self.assertEqual(parsed["series"], [])
+
+    def test_series_are_capped(self):
+        body = "\n".join(f"m{i} {i}" for i in range(serve.MAX_SERIES + 50))
+        parsed = serve.parse_prometheus(body)
+        self.assertEqual(parsed["count"], serve.MAX_SERIES)
+        self.assertTrue(parsed["truncated"])
+
+    def test_attach_metrics_keeps_body_and_adds_one_key(self):
+        result = serve.envelope(
+            ok=True, url="u", status=200, latency_ms=1, content_type="text/plain",
+            body="x 1\n", error=None,
+        )
+        serve.attach_metrics(result)
+        self.assertEqual(list(result.keys()), ENVELOPE_KEYS + ["metrics"])
+        self.assertEqual(result["body"], "x 1\n")
+        self.assertEqual(result["metrics"]["count"], 1)
+
+    def test_attach_metrics_on_a_body_there_is_not(self):
+        for body in (None, "", "   ", {"json": True}, [1]):
+            with self.subTest(body=body):
+                result = serve.attach_metrics({"body": body})
+                self.assertIsNone(result["metrics"])
 
 
 class UnknownApiTests(ProxyFixture):

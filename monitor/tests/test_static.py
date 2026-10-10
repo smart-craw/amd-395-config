@@ -45,11 +45,12 @@ REQUIRED_CLASSES = [
     "btn-preset", "btn-retry", "btn-primary", "btn-ghost",
     "spark-line", "spark-fill", "spark-grid", "spark-empty", "spark-head",
     "kv-item", "kv-key", "kv-value",
-    "card-error", "chip-stale", "empty-state", "banner",
+    "card-error", "card-note", "chip-stale", "empty-state", "banner",
+    "card-wide", "metric-sub",
 ]
 
-#: Element ids the three cards are built from, with the health-only and
-#: cache-only extras spelled out.
+#: Element ids the four cards are built from, with the per-card extras spelled
+#: out.
 #: ids every card defines, and the ones only one card defines. app.js builds a
 #: full ref set per card and guards the ones it does not use, so this is the
 #: contract for the ones it *does* dereference.
@@ -62,6 +63,11 @@ CARD_ID_SUFFIXES = {
     "cache": [
         "gauge-label", "gauge-value", "bar", "bar-fill", "gauge-sub",
         "kv", "raw", "raw-json",
+    ],
+    "metrics": [
+        "gauge-label", "gauge-value", "bar", "bar-fill", "gauge-sub",
+        "kv", "raw", "raw-json", "note", "tiles", "throughput",
+        "throughput-stats",
     ],
 }
 CHROME_IDS = [
@@ -118,29 +124,40 @@ class MarkupContractTests(unittest.TestCase):
         missing = sorted(referenced - set(self.ids()))
         self.assertFalse(missing, f"app.js looks up ids that index.html does not define: {missing}")
 
-    def test_all_three_endpoint_cards_are_present(self):
-        for key in ("health", "models", "cache"):
-            self.assertIn(f'id="card-{key}"', HTML)
-            route = {"health": "/health", "models": "/v1/models", "cache": "/cache"}[key]
-            self.assertIn(route, HTML, f"the {key} card does not name {route}")
+    def test_every_endpoint_card_is_present(self):
+        for key, route in (
+            ("health", "/health"),
+            ("models", "/v1/models"),
+            ("cache", "/cache"),
+            ("metrics", "/metrics"),
+        ):
+            with self.subTest(card=key):
+                self.assertIn(f'id="card-{key}"', HTML)
+                self.assertIn(route, HTML, f"the {key} card does not name {route}")
 
     def test_retry_buttons_are_present_and_wired_by_dataset(self):
         retries = re.findall(r'class="btn btn-retry" data-endpoint="(\w+)"', HTML)
-        self.assertEqual(sorted(retries), ["cache", "health", "models"])
+        self.assertEqual(sorted(retries), ["cache", "health", "metrics", "models"])
 
     def test_reachable_endpoints_match_the_proxy(self):
         """The UI documents the upstream paths; the proxy must proxy exactly those."""
-        for route in ("/health", "/v1/models", "/cache"):
+        for route in ("/health", "/v1/models", "/cache", "/metrics"):
             self.assertIn(route, HTML)
         self.assertEqual(
             set(serve.PUBLIC_ENDPOINTS),
             set(serve.PROXY_ROUTES.values()),
         )
 
+    def test_the_ui_polls_every_proxied_route(self):
+        """A route the proxy adds but the page never polls is invisible dead code."""
+        for route in serve.PROXY_ROUTES:
+            with self.subTest(route=route):
+                self.assertIn(route.lstrip("/"), JS)
+
     def test_live_regions_are_announced(self):
         self.assertIn('role="status"', HTML)   # the pill
         self.assertIn('role="alert"', HTML)    # the banner and the field error
-        self.assertIn('role="progressbar"', HTML)  # the cache gauge
+        self.assertIn('role="progressbar"', HTML)  # the cache and kv-cache gauges
         self.assertIn('href="#cards"', HTML)  # skip link
         self.assertIn('id="cards"', HTML)
 

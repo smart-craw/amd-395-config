@@ -4,14 +4,26 @@
 Serves the static UI out of ``monitor/static/`` and, on the *same origin*,
 proxies a handful of read-only GETs to the model server:
 
-    GET /api/health  -> <upstream>/health
-    GET /api/models  -> <upstream>/v1/models
-    GET /api/cache   -> <upstream>/cache
-    GET /api/config  -> active upstream + defaults (no upstream call)
+    GET /api/health   -> <upstream>/health
+    GET /api/models   -> <upstream>/v1/models
+    GET /api/cache    -> <upstream>/cache
+    GET /api/metrics  -> <upstream>/metrics  (+ parsed Prometheus series)
+    GET /api/config   -> active upstream + defaults (no upstream call)
 
 The proxy exists because the model server (llama.cpp / vLLM style) does not send
 CORS headers, so a page served from another origin could not poll it directly.
 UI + API from one origin means no CORS problem at all.
+
+``/metrics`` is the one route that is not JSON: it answers the Prometheus text
+exposition format (``text/plain; version=0.0.4``). The raw text is left in
+``body`` exactly as the upstream said it, and the parsed form is added as an extra
+``metrics`` key so the dashboard does not have to ship a second parser::
+
+    {"format": "prometheus", "count": 19, "truncated": false, "errors": [],
+     "families": [{"name": "llamacpp:requests_processing", "type": "gauge",
+                   "help": "Number of requests processing."}],
+     "series": [{"name": "llamacpp:requests_processing", "labels": {},
+                 "value": 0.0, "value_text": "0"}]}
 
 Every proxy response uses the same envelope so the UI never has to guess:
 
@@ -40,7 +52,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
+import re
 import sys
 import threading
 import time
@@ -53,7 +67,7 @@ from urllib import request as urlrequest
 
 # --- configuration -----------------------------------------------------------
 
-DEFAULT_UPSTREAM = "http://llm.home:8001"
+DEFAULT_UPSTREAM = "http://llm.home:8080"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8090
 
@@ -82,10 +96,228 @@ PROXY_ROUTES = {
     "/api/health": "/health",
     "/api/models": "/v1/models",
     "/api/cache": "/cache",
+    "/api/metrics": "/metrics",
 }
 
 #: The upstream-side endpoints the UI should offer in its selector.
-PUBLIC_ENDPOINTS = ["/health", "/v1/models", "/cache"]
+PUBLIC_ENDPOINTS = ["/health", "/v1/models", "/cache", "/metrics"]
+
+#: The one route whose upstream payload is not JSON.
+METRICS_ROUTE = "/api/metrics"
+
+# --- Prometheus text exposition format -------------------------------------
+#
+# /metrics answers lines like:
+#
+#     # HELP llamacpp:requests_processing Number of requests processing.
+#     # TYPE llamacpp:requests_processing gauge
+#     llamacpp:requests_processing 0
+#     llama:histogram_bucket{model="qwen",le="0.5"} 12 1600000000000
+#
+# Names may contain ':' (llama.cpp uses ``llamacpp:prompt_tokens_total``), label
+# values may contain escaped quotes and commas, and the value may be NaN/Inf --
+# which JSON cannot spell, so such a sample carries ``value: null`` plus the
+# original token in ``value_text``.
+
+_METRIC_NAME = r"[a-zA-Z_:][a-zA-Z0-9_:]*"
+_RE_COMMENT = re.compile(r"^#\s*(?P<kind>[A-Za-z]+)\b(?P<rest>.*)$")
+_RE_SAMPLE = re.compile(r"^(?P<name>" + _METRIC_NAME + r")(?P<rest>.*)$")
+_RE_LABEL = re.compile(r'(?P<key>[a-zA-Z_][a-zA-Z0-9_]*)="(?P<value>(?:\\.|[^"\\])*)"')
+
+#: Series kept per scrape, so a chatty server cannot balloon the response.
+MAX_SERIES = 2000
+#: Distinct bad lines reported back before the list is closed.
+MAX_PARSE_ERRORS = 8
+
+_UNESCAPE = {"n": "\n", '"': '"', "\\": "\\", "t": "\t"}
+
+
+def _unescape(text: str) -> str:
+    """Undo the exposition format's label-value escapes."""
+    if "\\" not in text:
+        return text
+    out: list[str] = []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "\\" and index + 1 < len(text):
+            nxt = text[index + 1]
+            out.append(_UNESCAPE.get(nxt, nxt))
+            index += 2
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def sample_value(token: str) -> tuple[float | None, str, str | None]:
+    """Parse one sample value into ``(number|None, text, problem|None)``.
+
+    ``NaN`` / ``+Inf`` / ``-Inf`` are legal in the exposition format and illegal
+    in JSON, so they come back as ``None`` with their original spelling in the
+    second slot and no complaint. A token that is not a number at all (a torn
+    line, an HTML error page) does report a problem, which the caller lists in
+    ``errors`` instead of dropping the line silently.
+    """
+    try:
+        value = float(token)
+    except (TypeError, ValueError):
+        return None, token, f"value {token!r} is not a number"
+    if not math.isfinite(value):
+        return None, token, None  # NaN / +-Inf: valid here, unspellable in JSON
+    return value, token, None
+
+
+def parse_labels(text: str) -> tuple[dict[str, str], str | None]:
+    """``a="b",c="d\"e"`` -> ``({"a": "b", "c": 'd"e'}, None)``.
+
+    The second slot carries a human-readable complaint instead of raising: one
+    odd label must not lose the rest of the scrape.
+    """
+    labels: dict[str, str] = {}
+    if not text.strip():
+        return labels, None
+    pos = 0
+    while pos < len(text):
+        while pos < len(text) and text[pos] in " \t,":
+            pos += 1
+        if pos >= len(text):
+            break
+        match = _RE_LABEL.match(text, pos)
+        if not match:
+            return labels, f"unparsable label list: {text[:60]!r}"
+        labels[match.group("key")] = _unescape(match.group("value"))
+        pos = match.end()
+    return labels, None
+
+
+def _split_labels(rest: str) -> tuple[dict[str, str], str, str | None]:
+    """Cut a ``{...}`` label block off the front of ``rest``.
+
+    Brace hunting has to be quote-aware: a label value may itself contain ``}``.
+    """
+    if not rest.startswith("{"):
+        return {}, rest, None
+    depth = 0
+    in_quotes = False
+    escaped = False
+    for index, char in enumerate(rest):
+        if in_quotes:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_quotes = False
+            continue
+        if char == '"':
+            in_quotes = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                labels, problem = parse_labels(rest[1:index])
+                return labels, rest[index + 1 :], problem
+    return {}, "", "unterminated label block"
+
+
+def parse_prometheus(text: str) -> dict:
+    """Parse Prometheus/OpenMetrics text into JSON-friendly data.
+
+    Never raises: anything that is not a sample line is skipped and named in
+    ``errors``, so a half-broken scrape still renders every good series.
+    """
+    families: dict[str, dict] = {}
+    series: list[dict] = []
+    errors: list[str] = []
+    truncated = False
+
+    def complain(message: str) -> None:
+        if len(errors) < MAX_PARSE_ERRORS:
+            errors.append(message)
+
+    def family(name: str) -> dict:
+        return families.setdefault(name, {"name": name, "type": None, "help": None})
+
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        if line.startswith("#"):
+            comment = _RE_COMMENT.match(line)
+            kind = comment.group("kind").upper() if comment else ""
+            if kind not in ("HELP", "TYPE") or not comment:
+                continue  # a plain comment, '# UNIT', '# EOF', ...
+            name, _, detail = comment.group("rest").strip().partition(" ")
+            if not name:
+                continue
+            if kind == "HELP":
+                family(name)["help"] = detail.strip() or None
+            else:
+                family(name)["type"] = detail.strip() or None
+            continue
+
+        sample = _RE_SAMPLE.match(line)
+        if not sample:
+            complain(f"not a sample line: {line[:60]!r}")
+            continue
+
+        name = sample.group("name")
+        labels, rest, problem = _split_labels(sample.group("rest").strip())
+        if problem:
+            complain(f"{name}: {problem}")
+            continue
+        fields = rest.split()
+        if len(fields) < 1:
+            complain(f"{name}: no value after the name")
+            continue
+        if len(fields) > 2:
+            complain(f"{name}: too many fields: {line[:60]!r}")
+            continue
+        value, as_text, problem = sample_value(fields[0])
+        if problem:
+            # Not a sample after all (a torn line, an HTML error page): report it
+            # rather than file it away as a series with a null value.
+            complain(f"{name}: {problem}")
+            continue
+        if len(series) >= MAX_SERIES:
+            truncated = True
+            continue
+        family(name)
+        series.append(
+            {"name": name, "labels": labels, "value": value, "value_text": as_text}
+        )
+
+    if truncated:
+        complain(f"only the first {MAX_SERIES} series were kept")
+
+    return {
+        "format": "prometheus",
+        "count": len(series),
+        "truncated": truncated,
+        "errors": errors,
+        "families": list(families.values()),
+        "series": series,
+    }
+
+
+def attach_metrics(result: dict) -> dict:
+    """Add a ``metrics`` key to the /api/metrics envelope, in place.
+
+    ``body`` keeps the upstream's own text (the raw panel shows it, and it is the
+    fallback whenever the parse finds nothing). ``metrics`` is ``null`` when
+    there is no text to parse -- no body, or a server that answered /metrics with
+    real JSON, which is a shape the dashboard then just shows as-is.
+    """
+    body = result.get("body")
+    if isinstance(body, str) and body.strip():
+        result["metrics"] = parse_prometheus(body)
+    else:
+        result["metrics"] = None
+    return result
+
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -421,7 +653,9 @@ class MonitorHandler(SimpleHTTPRequestHandler):
         params = urlparse.parse_qs(query, keep_blank_values=True)
         override = params.get("url", [""])[0]
         try:
-            upstream = normalize_upstream(override) if override.strip() else self.upstream
+            upstream = (
+                normalize_upstream(override) if override.strip() else self.upstream
+            )
         except UpstreamError as exc:
             self._send_json(
                 HTTPStatus.BAD_REQUEST,
@@ -439,6 +673,9 @@ class MonitorHandler(SimpleHTTPRequestHandler):
             return
 
         result = proxy_get(target_url(upstream, PROXY_ROUTES[route]))
+        if route == METRICS_ROUTE:
+            # The only non-JSON route: hand the UI a parsed view alongside the text.
+            attach_metrics(result)
         # The proxy itself always answers 200: upstream trouble belongs in the
         # envelope (ok:false / status / error), not in the transport status.
         self._send_json(HTTPStatus.OK, result, include_body)
@@ -512,7 +749,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Proxy routes: /api/health -> <upstream>/health, "
             "/api/models -> <upstream>/v1/models,\n"
             "              /api/cache -> <upstream>/cache, "
-            "/api/config -> active config (no upstream call).\n\n"
+            "/api/metrics -> <upstream>/metrics (Prometheus text, also\n"
+            "                                returned parsed as JSON),\n"
+            "              /api/config -> active config (no upstream call).\n\n"
             "Each proxy route accepts ?url=<http(s) base> to override the\n"
             "upstream for that one request.\n\n"
             f"Upstream precedence: --url > ${ENV_UPSTREAM} > {DEFAULT_UPSTREAM}\n\n"
