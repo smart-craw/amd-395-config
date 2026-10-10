@@ -41,7 +41,7 @@ wins:
 | -------------------------- | ------------------------------------------------ |
 | `--url`                    | `python3 monitor/serve.py --url http://localhost:8000` |
 | `$LLM_MONITOR_UPSTREAM`    | `export LLM_MONITOR_UPSTREAM=http://localhost:8080`   |
-| built-in default           | `http://llm.home:8001`                           |
+| built-in default           | `http://llm.home:8080`                           |
 
 Three ways to change the target, cheapest first:
 
