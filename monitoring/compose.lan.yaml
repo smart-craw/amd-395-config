@@ -1,0 +1,65 @@
+# Opt-in LAN exposure. The base stack binds 127.0.0.1 only; this override exists
+# so that publishing the dashboards is a deliberate, reviewable act rather than a
+# side effect of editing compose.yaml.
+#
+#   docker compose -f monitoring/compose.yaml -f monitoring/compose.lan.yaml up -d
+#
+# WHAT YOU ARE ACCEPTING: these dashboards disclose model ids, request rates,
+# prompt-cache behaviour and per-model usage to anyone who can reach the box on
+# the LAN. That is the same class of decision as running
+# `monitor/serve.py --host 0.0.0.0`, and it is why nothing is published by default.
+#
+# Auth choice, and why it is this one: anonymous *Viewer* access (no sign-up, no
+# admin, no explore) is enabled because the actual use case is "glance at the
+# dashboards from a phone". The alternative — a shared non-admin viewer account —
+# costs a password to manage and gives you per-user audit you will not use here;
+# if you want that instead, set GF_AUTH_ANONYMOUS_ENABLED=false and create one
+# Viewer user in the UI (it lands in the grafana-data volume, so it survives a
+# re-provision of dashboards but not `down -v`).
+
+services:
+  grafana:
+    ports:
+      # 0.0.0.0 is the point of this file. Do not do this on an untrusted network.
+      - "${GRAFANA_PORT:-3000}:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      # Read-only: no editing, no datasource admin, no Explore.
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+      GF_AUTH_ANONYMOUS_HIDE_SIGNOUT_BUTTON: "true"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      # Set when a reverse proxy serves Grafana under a path (see below).
+      GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL:-http://llm.home:3000/}
+
+  # Prometheus deliberately stays loopback-bound even in the LAN override:
+  # Grafana reads it through its own datasource proxy, so panels work without
+  # publishing an unauthenticated query API that can run arbitrary (expensive)
+  # PromQL at the box. If you truly need the HTTP API from another machine, copy
+  # the prometheus port block here and accept what that means.
+
+# --------------------------------------------------------------------------- #
+# nginx: Grafana behind basic auth on the LAN, under a subpath
+# --------------------------------------------------------------------------- #
+# The box already runs nginx for the LLM front door (see qwen3.8-flash/), so this
+# is the shape that fits: the LAN sees https + a password, Grafana stays on
+# loopback. Both settings matter — without SERVE_FROM_SUB_PATH Grafana emits
+# absolute /grafana/asset URLs it does not itself serve and the UI half-loads.
+#
+#   # /etc/nginx/sites-available/llm-grafana
+#   location /grafana/ {
+#       auth_basic           "llm dashboards";
+#       auth_basic_user_file /etc/nginx/.llm-passwd;   # htpasswd -c /etc/nginx/.llm-passwd YOU
+#       proxy_pass http://127.0.0.1:3000/;
+#       proxy_set_header Host              $host;
+#       proxy_set_header X-Forwarded-Proto $scheme;
+#       proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+#       proxy_http_version 1.1;
+#       proxy_set_header Upgrade    $http_upgrade;   # live dashboards / websocket
+#       proxy_set_header Connection "upgrade";
+#   }
+#
+# and for Grafana:
+#   GF_SERVER_ROOT_URL=https://llm.home/grafana/
+#   GF_SERVER_SERVE_FROM_SUB_PATH=true
+# then use -f monitoring/compose.lan.yaml without publishing the port at all
+# (bind it back to 127.0.0.1) so nginx is the only door.

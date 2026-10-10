@@ -62,6 +62,21 @@ MODELS = {
     ],
 }
 
+#: One model only, and an id that needs percent-encoding in a URL (``/`` and ``:``).
+#: The Grafana deep links pass `var-model` only when exactly one model is served, so
+#: both halves of that rule need a server that serves exactly one.
+MODELS_SINGLE = {
+    "object": "list",
+    "data": [
+        {
+            "id": "models/Qwen3-27B-Q4_K_M.gguf:latest",
+            "object": "model",
+            "owned_by": "local",
+            "created": 1730000000,
+        }
+    ],
+}
+
 #: Shapes the dashboard must cope with, keyed by mode.
 CACHE_BODIES = {
     "healthy": {
@@ -249,7 +264,7 @@ class MockUpstreamHandler(BaseHTTPRequestHandler):
         if path == "/health":
             self._reply(200, {"status": "ok", "load": 0.34, "load_avg": 0.21})
         elif path == "/v1/models":
-            self._reply(200, MODELS)
+            self._reply(200, MODELS_SINGLE if mode == "onemodel" else MODELS)
         elif path == "/cache":
             self._reply(200, CACHE_BODIES.get(mode, CACHE_BODIES["healthy"]))
         elif path == "/metrics":
@@ -312,7 +327,7 @@ def main() -> int:
         default="healthy",
         choices=sorted(
             set(list(CACHE_BODIES) + list(METRICS_BODIES))
-            | {"broken", "plain", "empty", "wedged", "nometrics", "huge"}
+            | {"broken", "plain", "empty", "wedged", "nometrics", "huge", "onemodel"}
         ),
     )
     args = parser.parse_args()

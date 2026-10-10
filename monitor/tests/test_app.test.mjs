@@ -121,6 +121,40 @@ before(async () => {
     assert.match(String(url), /^http:\/\/[\d.]+:\d+$/, `${name} URL looks wrong`);
   }
   ENV.dead = "http://127.0.0.1:9"; // nothing listens on the discard port
+
+  // A second monitor, this one told where Grafana lives, so the deep links and the
+  // scrape-health read-out can be tested as configured -- and with a Prometheus URL
+  // that points at the discard port, because "Prometheus is down" is the path that
+  // needs proving un-crashy.
+  const linkedPort = await freePort();
+  const linked = spawnPython(
+    [
+      path.join("monitor", "serve.py"),
+      "--host", "127.0.0.1",
+      "--port", String(linkedPort),
+      "--url", await healthy.started,
+      "--grafana-url", "http://127.0.0.1:3000/",
+      "--prometheus-url", ENV.dead,
+    ],
+    { name: "monitor/serve.py (linked)", port: linkedPort }
+  );
+  ENV.linked = await linked.started;
+
+  // ...and a third, pointed at a single-model server, because `var-model` is only
+  // sent when exactly one model is loaded.
+  const solo = await startMock("onemodel");
+  const soloPort = await freePort();
+  const soloMonitor = spawnPython(
+    [
+      path.join("monitor", "serve.py"),
+      "--host", "127.0.0.1",
+      "--port", String(soloPort),
+      "--url", await solo.started,
+      "--grafana-url", "http://127.0.0.1:3000/",
+    ],
+    { name: "monitor/serve.py (solo)", port: soloPort }
+  );
+  ENV.solo = await soloMonitor.started;
   // Keep the pipes from holding the event loop open; the after() hook kills all.
   for (const child of children) child.unref();
 });
@@ -141,6 +175,24 @@ function boot({ storage } = {}) {
     staticDir: STATIC_DIR,
     baseURI: `${ENV.monitor}/`,
     storage: storage || memoryStorage(),
+  });
+}
+
+/** Same page, pointed at the monitor that knows where Grafana is. */
+function bootLinked() {
+  return loadPage({
+    staticDir: STATIC_DIR,
+    baseURI: `${ENV.linked}/`,
+    storage: memoryStorage(),
+  });
+}
+
+/** ...and at the monitor whose server serves exactly one model. */
+function bootSolo() {
+  return loadPage({
+    staticDir: STATIC_DIR,
+    baseURI: `${ENV.solo}/`,
+    storage: memoryStorage(),
   });
 }
 
@@ -169,6 +221,9 @@ function card(page, key) {
     gaugeValue: id("gauge-value"),
     gaugeSub: id("gauge-sub"),
     note: id("note"),
+    grafanaLinks: page.byId("metrics-grafana-links"),
+    grafanaNav: page.byId("metrics-grafana-nav"),
+    grafanaHint: page.byId("metrics-grafana-hint"),
     tiles: id("tiles"),
     throughput: id("throughput"),
     throughputStats: id("throughput-stats"),
@@ -385,23 +440,44 @@ describe("dashboard: the metrics card", () => {
 
   test("the tiles read like an LLM dashboard, not like a metric dump", () => {
     const tiles = tilesOf(card(page, "metrics"));
+    // Every label carries which kind of number it is: a tile that just says
+    // "generate tok/s" gets read as a rate over a window, and none of these are.
+    // See metricsTiles() in app.js and ADR 0001.
     assert.deepEqual(
       tiles.map(([label]) => label),
-      ["generate tok/s", "prompt tok/s", "in flight", "requests", "draft accept", "prompt cache hit"]
+      [
+        "generate tok/s \u00b7 server avg",
+        "prompt tok/s \u00b7 server avg",
+        "in flight \u00b7 instant",
+        "requests \u00b7 lifetime",
+        "draft accept \u00b7 lifetime",
+        "prompt cache hit \u00b7 lifetime",
+      ]
     );
-    assert.equal(tile(tiles, "generate tok/s")[1], "72.9 tok/s");
-    assert.equal(tile(tiles, "generate tok/s")[2], "lifetime avg 61.2 tok/s");
-    assert.equal(tile(tiles, "prompt tok/s")[1], "1,416 tok/s");
-    assert.equal(tile(tiles, "prompt tok/s")[2], "779,554 prompt tokens total");
-    assert.equal(tile(tiles, "in flight")[1], "2");
-    assert.equal(tile(tiles, "in flight")[2], "0 deferred");
-    assert.equal(tile(tiles, "requests")[1], "522");
-    assert.equal(tile(tiles, "requests")[2], "0 under a JSON schema");
+    assert.equal(tile(tiles, "generate tok/s \u00b7 server avg")[1], "72.9 tok/s");
+    assert.equal(tile(tiles, "generate tok/s \u00b7 server avg")[2], "since start 61.2 tok/s");
+    assert.equal(tile(tiles, "prompt tok/s \u00b7 server avg")[1], "1,416 tok/s");
+    assert.equal(tile(tiles, "prompt tok/s \u00b7 server avg")[2], "779,554 prompt tokens total");
+    assert.equal(tile(tiles, "in flight \u00b7 instant")[1], "2");
+    assert.equal(tile(tiles, "in flight \u00b7 instant")[2], "0 deferred");
+    assert.equal(tile(tiles, "requests \u00b7 lifetime")[1], "522");
+    assert.equal(tile(tiles, "requests \u00b7 lifetime")[2], "0 under a JSON schema");
     // derived, because no single metric says it: accepted / drafted, cached / seen
-    assert.equal(tile(tiles, "draft accept")[1], "81.4%");
-    assert.equal(tile(tiles, "draft accept")[2], "248,795 / 305,696 drafted");
-    assert.equal(tile(tiles, "prompt cache hit")[1], "98.5%");
-    assert.equal(tile(tiles, "prompt cache hit")[2], "49,838,237 cached / 779,554 processed");
+    assert.equal(tile(tiles, "draft accept \u00b7 lifetime")[1], "81.4%");
+    assert.equal(tile(tiles, "draft accept \u00b7 lifetime")[2], "248,795 / 305,696 drafted");
+    assert.equal(tile(tiles, "prompt cache hit \u00b7 lifetime")[1], "98.5%");
+    assert.equal(tile(tiles, "prompt cache hit \u00b7 lifetime")[2], "49,838,237 cached / 779,554 processed");
+  });
+
+  test("with no Grafana configured the card says so instead of pretending", () => {
+    // boot() starts serve.py without --grafana-url: deep links are not rendered,
+    // and the muted hint explains that nothing here has a past.
+    assert.equal(card(page, "metrics").grafanaLinks.hidden, true);
+    assert.equal(card(page, "metrics").grafanaHint.hidden, false);
+    assert.match(textOf(card(page, "metrics").grafanaHint), /no Grafana configured/);
+    assert.match(textOf(card(page, "metrics").grafanaHint), /--grafana-url/);
+    assert.equal(page.byId("grafana-home").hidden, true);
+    assert.equal(textOf(page.byId("scrape-health")), "history: not configured");
   });
 
   test("every series is listed, with the unit its own name spells", () => {
@@ -615,5 +691,83 @@ describe("dashboard: input validation", () => {
     } finally {
       page.dispose();
     }
+  });
+});
+
+describe("dashboard: Grafana deep links and scrape health (ADR 0001 C4/C6)", () => {
+  // `page` runs serve.py with --grafana-url AND a --prometheus-url that points at a
+  // port nothing listens on: a dead history layer must be legible, not fatal.
+  // `solo` points at a one-model server, which is when var-model is allowed.
+  let page;
+  let solo;
+
+  before(async () => {
+    page = bootLinked();
+    solo = bootSolo();
+    await twoPolls(page);
+    await twoPolls(solo);
+  });
+
+  after(() => {
+    page.dispose();
+    solo.dispose();
+  });
+
+  test("configured Grafana replaces the honest note with links", () => {
+    const metrics = card(page, "metrics");
+    assert.equal(metrics.grafanaLinks.hidden, false);
+    assert.equal(metrics.grafanaHint.hidden, true);
+    assert.equal(metrics.grafanaNav.children.length, 7, "one link per reserved panel id");
+    assert.equal(page.byId("grafana-home").hidden, false);
+  });
+
+  test("the links are the ADR's shape, panel ids 1-7 in order", () => {
+    const instance = new URL(ENV.healthy).host;
+    const hrefs = card(page, "metrics").grafanaNav.children.map((a) => a.getAttribute("href"));
+    assert.equal(hrefs.length, 7);
+    hrefs.forEach((href, index) => {
+      assert.ok(
+        href.startsWith("http://127.0.0.1:3000/d/llm-server/llm-server?"),
+        `wrong dashboard path: ${href}`
+      );
+      assert.ok(href.includes("orgId=1"), href);
+      assert.ok(
+        href.includes(`var-instance=${encodeURIComponent(instance)}`),
+        `instance must be the upstream host:port: ${href}`
+      );
+      assert.ok(href.includes(`viewPanel=${index + 1}`), `viewPanel order: ${href}`);
+      assert.ok(href.includes("refresh=30s"), href);
+    });
+  });
+
+  test("two models loaded means no var-model, so neither model gets hidden", () => {
+    const href = card(page, "metrics").grafanaNav.children[0].getAttribute("href");
+    assert.ok(!href.includes("var-model="), `two-model server must not pin a model: ${href}`);
+  });
+
+  test("one model loaded sends var-model, percent-encoded", () => {
+    const href = card(solo, "metrics").grafanaNav.children[0].getAttribute("href");
+    const want = encodeURIComponent("models/Qwen3-27B-Q4_K_M.gguf:latest");
+    assert.ok(href.includes(`var-model=${want}`), `model id must be encoded: ${href}`);
+  });
+
+  test("a dead Prometheus is reported as dead, in words", async () => {
+    await waitFor(
+      () => /Prometheus unreachable/.test(String(textOf(page.byId("scrape-health")))),
+      { what: "the scrape-health read-out" }
+    );
+    assert.ok(page.byId("scrape-health").classList.contains("scrape-health-bad"));
+    assert.match(String(page.byId("scrape-health").title), /127\.0\.0\.1:9|unreachable|refused|failed/);
+  });
+
+  test("the header link opens the dashboard itself, not a panel", () => {
+    const href = String(page.byId("grafana-home").getAttribute("href"));
+    assert.match(href, /^http:\/\/127\.0\.0\.1:3000\/d\/llm-server\/llm-server\?/);
+    assert.ok(!href.includes("viewPanel="), `header link must not pin a panel: ${href}`);
+  });
+
+  test("neither page threw", () => {
+    assert.deepEqual(page.window.errors, []);
+    assert.deepEqual(solo.window.errors, []);
   });
 });

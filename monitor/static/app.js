@@ -71,8 +71,27 @@
   ];
   const DEFAULT_POLL_MS = 5000;
 
-  /** ~60 latency samples kept per endpoint, in memory only. */
+  /** ~60 latency samples kept per endpoint, in memory only.
+   *
+   * This is the whole storage budget of the page, and it is why the traces can only
+   * answer "what has THIS TAB been seeing" (~15 min at the 15s poll). Windowed
+   * rates, percentiles and anything older than the tab live in Prometheus/Grafana —
+   * see docs/adr/0001-prometheus-grafana-owns-metrics.md. Labels on the page say so.
+   */
   const HISTORY_SAMPLES = 60;
+
+  /** Grafana deep links: panel ids reserved by ADR 0001 C4. Do not renumber them
+   *  here if the dashboard changes — the dashboard's ids are the contract. */
+  const GRAFANA_PANELS = [
+    { id: 1, label: "decode" },
+    { id: 2, label: "prompt" },
+    { id: 3, label: "TTFT p99" },
+    { id: 4, label: "KV pressure" },
+    { id: 5, label: "queue" },
+    { id: 6, label: "cache & spec" },
+    { id: 7, label: "scrape health" },
+  ];
+  const GRAFANA_DASHBOARD_PATH = "/d/llm-server/llm-server";
   /** A card goes "stale" once its last success is older than 3 poll intervals. */
   const STALE_FACTOR = 3;
 
@@ -230,6 +249,13 @@
     upstream: "",
     /** what /api/config reports as the server-side default */
     configUpstream: "",
+    /** /api/config extras (ADR 0001 C4/C6): empty means "not configured" */
+    grafanaUrl: "",
+    prometheusUrl: "",
+    monitorVersion: "",
+    /** last /api/scrape-health digest, or null when Prometheus is not configured */
+    scrapeHealth: null,
+    scrapeHealthError: "",
     pollMs: DEFAULT_POLL_MS,
     /** bumped whenever the target changes so in-flight responses can be dropped */
     generation: 0,
@@ -282,6 +308,11 @@
     banner: $("#banner"),
     bannerText: $("#banner-text"),
     footUptime: $("#foot-uptime"),
+    scrapeHealth: $("#scrape-health"),
+    grafanaHome: $("#grafana-home"),
+    grafanaLinks: $("#metrics-grafana-links"),
+    grafanaNav: $("#metrics-grafana-nav"),
+    grafanaHint: $("#metrics-grafana-hint"),
     cards: {},
   };
 
@@ -742,9 +773,11 @@
     const current = samples[samples.length - 1];
     stats.textContent =
       samples.length < 2
-        ? "now " + fmt(current) + " \u00b7 1 sample"
-        : "min " + fmt(lo0) + " \u00b7 max " + fmt(hi0) +
-          " \u00b7 now " + fmt(current) + " \u00b7 " + samples.length + " samples";
+        ? "now " + fmt(current) + " \u00b7 1 sample in this tab"
+        : "min " + fmt(lo0) + " \u00b7 max " + fmt(hi0) + " \u00b7 now " + fmt(current) +
+          // "in this tab", not "history": the buffer is HISTORY_SAMPLES polls long and
+          // dies with the page. Grafana is where history lives (ADR 0001).
+          " \u00b7 " + samples.length + " samples in this tab";
   }
 
   /** Card chrome shared by all cards: error strip + retry, failure pulse, badge tone. */
@@ -954,6 +987,20 @@
    * http://llm.home:8081/metrics; `fuzzy` is the best-effort match for a server
    * that names the same thing differently.
    */
+  /**
+   * FROZEN (workspace-szw.6): this table is a compatibility shim, not the future.
+   *
+   * Vendor-drift in metric names is resolved in Prometheus from now on — the `llm:*`
+   * recording rules in monitoring/prometheus/recording_rules.yml are the supported
+   * place for "this server spells it differently" (ADR 0001 C3), because a regex in
+   * the browser cannot be tested by promtool, is re-downloaded on every paint, and is
+   * invisible to anyone writing an alert.
+   *
+   * So: add a signal here only for a number the page must show that Grafana cannot yet
+   * show; and when the parity check (workspace-szw.11) confirms a tile's Grafana
+   * equivalent, delete the tile and its arithmetic in the same commit that adds the
+   * deep link. Nothing is deleted before parity; nothing is kept after it.
+   */
   const METRIC_SIGNALS = {
     genRate: { exact: "llamacpp:predicted_tokens_seconds", fuzzy: /(pred|gen|decode)[a-z_:]*tokens_(seconds|per_second)$/i },
     promptRate: { exact: "llamacpp:prompt_tokens_seconds", fuzzy: /prompt[a-z_:]*tokens_(seconds|per_second)$/i },
@@ -1083,23 +1130,32 @@
     return out;
   }
 
-  /** Tiles worth a big number, in reading order; a missing metric skips its tile. */
+  /** Tiles worth a big number, in reading order; a missing metric skips its tile.
+   *
+   * Every label says which of the three kinds of number it is, because they are not
+   * interchangeable and the old page labelled all three the same way:
+   *   instant     a gauge, read as-is right now
+   *   server avg  the server's own "average since my last scrape" gauge
+   *   lifetime    a counter divided by a counter since the process started
+   * Only the first is a statement about this second; the Grafana panels compute
+   * windowed rates, which is the fourth thing none of these can be (ADR 0001).
+   */
   function metricsTiles(summary, genNow) {
     const tiles = [];
     const num = (found) => (found && found.value !== null ? found.value : null);
 
     if (isNum(genNow)) {
       tiles.push({
-        label: "generate tok/s",
+        label: "generate tok/s \u00b7 server avg",
         value: fmtRate(genNow),
         sub: isNum(summary.genLifetime)
-          ? "lifetime avg " + fmtRate(summary.genLifetime)
+          ? "since start " + fmtRate(summary.genLifetime)
           : shortMetricName(summary.genRate ? summary.genRate.name : ""),
       });
     }
     if (num(summary.promptRate) !== null) {
       tiles.push({
-        label: "prompt tok/s",
+        label: "prompt tok/s \u00b7 server avg",
         value: fmtRate(summary.promptRate.value),
         sub:
           num(summary.promptTokens) !== null
@@ -1110,29 +1166,29 @@
     if (num(summary.processing) !== null) {
       const deferred = num(summary.deferred);
       tiles.push({
-        label: "in flight",
+        label: "in flight \u00b7 instant",
         value: fmtInt(summary.processing.value),
-        sub: deferred === null ? "now" : fmtInt(deferred) + " deferred",
+        sub: deferred === null ? "no deferred series" : fmtInt(deferred) + " deferred",
         tone: deferred > 0 ? "t-warn" : "",
       });
     }
     if (num(summary.requests) !== null) {
       tiles.push({
-        label: "requests",
+        label: "requests \u00b7 lifetime",
         value: fmtInt(summary.requests.value),
-        sub: num(summary.structured) !== null ? fmtInt(summary.structured.value) + " under a JSON schema" : "completed",
+        sub: num(summary.structured) !== null ? fmtInt(summary.structured.value) + " under a JSON schema" : "completed since start",
       });
     }
     if (isNum(summary.acceptPct)) {
       tiles.push({
-        label: "draft accept",
+        label: "draft accept \u00b7 lifetime",
         value: pctLabel(summary.acceptPct),
         sub: fmtInt(summary.draftAccepted.value) + " / " + fmtInt(summary.draftTotal.value) + " drafted",
       });
     }
     if (isNum(summary.cacheHitPct)) {
       tiles.push({
-        label: "prompt cache hit",
+        label: "prompt cache hit \u00b7 lifetime",
         value: pctLabel(summary.cacheHitPct),
         sub: fmtInt(summary.cachedPrompt.value) + " cached / " + fmtInt(summary.promptTokens.value) + " processed",
       });
@@ -1430,6 +1486,149 @@
     });
   }
 
+  // --- Grafana deep links and scrape health (ADR 0001 C4 / C6) --------------
+
+  /** `host:port` of the upstream being polled — Grafana's `instance` label. */
+  function upstreamInstance() {
+    const base = state.upstream || state.configUpstream || "";
+    if (!base) return "";
+    try {
+      return new URL(base).host;
+    } catch (_) {
+      return "";
+    }
+  }
+
+  /**
+   * The model id to pass as `var-model`, or "" for "do not filter".
+   *
+   * Only sent when the server serves exactly one model: with two models loaded,
+   * pinning the link to the first one would silently hide the other's history.
+   */
+  function grafanaModelVar() {
+    const card = state.cards.models;
+    const body = card && card.hasGood ? card.lastGood : null;
+    const list = body && Array.isArray(body.data) ? body.data : [];
+    const ids = list
+      .map((entry) => (entry && typeof entry.id === "string" ? entry.id : ""))
+      .filter(Boolean);
+    return ids.length === 1 ? ids[0] : "";
+  }
+
+  /**
+   * ADR 0001 C4 link shape:
+   *   <grafana>/d/llm-server/llm-server?orgId=1&var-instance=<host:port>
+   *            [&var-model=<id>][&viewPanel=<id>][&refresh=30s]
+   * Returns "" when no Grafana is configured — the links are then not rendered at
+   * all, which is a supported configuration, not a broken one.
+   */
+  function grafanaLink(panelId) {
+    if (!state.grafanaUrl) return "";
+    const params = ["orgId=1"];
+    const instance = upstreamInstance();
+    if (instance) params.push("var-instance=" + encodeURIComponent(instance));
+    const model = grafanaModelVar();
+    if (model) params.push("var-model=" + encodeURIComponent(model));
+    if (panelId) params.push("viewPanel=" + encodeURIComponent(String(panelId)));
+    params.push("refresh=30s");
+    return state.grafanaUrl + GRAFANA_DASHBOARD_PATH + "?" + params.join("&");
+  }
+
+  function clearChildren(node) {
+    while (node && node.firstChild) node.removeChild(node.firstChild);
+  }
+
+  /** Config values are text, never markup, and may be absent on an older server. */
+  function asText(value) {
+    return typeof value === "string" ? value : "";
+  }
+
+  /** Rebuild the metrics card's Grafana row, or the honest note that replaces it. */
+  function renderGrafanaLinks() {
+    if (!ui.grafanaNav || !ui.grafanaLinks || !ui.grafanaHint) return;
+    clearChildren(ui.grafanaNav);
+    if (ui.grafanaHome) {
+      const home = grafanaLink(0);
+      ui.grafanaHome.hidden = !home;
+      if (home) ui.grafanaHome.setAttribute("href", home);
+    }
+    if (!state.grafanaUrl) {
+      ui.grafanaLinks.hidden = true;
+      ui.grafanaHint.hidden = false;
+      ui.grafanaHint.textContent =
+        "no Grafana configured for this monitor \u2014 everything on this card is the " +
+        "last scrape, and nothing here has a past. Start serve.py with --grafana-url " +
+        "(or $LLM_MONITOR_GRAFANA_URL) to link the historical panels.";
+      return;
+    }
+    ui.grafanaHint.hidden = true;
+    ui.grafanaHint.textContent = "";
+    ui.grafanaLinks.hidden = false;
+    GRAFANA_PANELS.forEach((entry) => {
+      const link = document.createElement("a");
+      link.className = "grafana-link";
+      link.setAttribute("href", grafanaLink(entry.id));
+      link.setAttribute("rel", "noreferrer noopener");
+      link.setAttribute("target", "_blank");
+      link.textContent = entry.label;
+      link.title = "Grafana panel " + entry.id + " \u2014 " + entry.label;
+      ui.grafanaNav.appendChild(link);
+    });
+  }
+
+  /**
+   * "Is history being recorded?" — read from the monitor's own /api/scrape-health,
+   * never from the browser against Prometheus (that is the CORS problem this proxy
+   * exists to avoid). Unset prometheus_url means "no history layer", which is fine.
+   */
+  function renderScrapeHealth() {
+    if (!ui.scrapeHealth) return;
+    const node = ui.scrapeHealth;
+    node.classList.remove("scrape-health-ok", "scrape-health-bad", "scrape-health-off");
+    if (!state.prometheusUrl) {
+      node.textContent = "history: not configured";
+      node.title =
+        "start serve.py with --prometheus-url (or $LLM_MONITOR_PROMETHEUS_URL) to " +
+        "see whether Prometheus is scraping this box";
+      node.classList.add("scrape-health-off");
+      return;
+    }
+    const health = state.scrapeHealth;
+    if (state.scrapeHealthError || !health || !health.reachable) {
+      node.textContent = "history: Prometheus unreachable";
+      node.title = clip(state.scrapeHealthError || "prometheus did not answer", 160);
+      node.classList.add("scrape-health-bad");
+      return;
+    }
+    const total = health.targets_total || 0;
+    const up = health.targets_up || 0;
+    if (!total) {
+      node.textContent = "history: no targets configured";
+      node.classList.add("scrape-health-bad");
+      return;
+    }
+    const failing = (health.jobs || []).filter((job) => job.health !== "up");
+    node.textContent = "history: " + up + "/" + total + " targets up";
+    node.title = (health.jobs || [])
+      .map((job) => job.job + "/" + job.instance + ": " + job.health +
+        (job.last_error ? " \u2014 " + job.last_error : ""))
+      .join("\n");
+    node.classList.add(failing.length ? "scrape-health-bad" : "scrape-health-ok");
+  }
+
+  async function pollScrapeHealth() {
+    if (!state.prometheusUrl) {
+      state.scrapeHealth = null;
+      state.scrapeHealthError = "";
+      renderScrapeHealth();
+      return;
+    }
+    const env = await fetchEnvelope("api/scrape-health", {});
+    state.scrapeHealth = env && env.scrape_health ? env.scrape_health : null;
+    state.scrapeHealthError = env && env.ok ? "" : env && (env.error || "prometheus unreachable");
+    renderScrapeHealth();
+  }
+
   function statusInfo() {
     const attempted = ENDPOINTS.some((ep) => state.cards[ep.key].attempts > 0);
     if (!attempted) {
@@ -1520,6 +1719,8 @@
     renderStatus();
     renderBanner();
     renderClock();
+    renderGrafanaLinks();
+    renderScrapeHealth();
   }
 
   // --- polling -------------------------------------------------------------
@@ -1606,6 +1807,9 @@
     const results = await Promise.all(
       ENDPOINTS.map(async (ep) => [ep.key, await fetchEnvelope(ep.route, { signal: signal, useUpstream: true })])
     );
+    // Cheap and only when configured: "is history being recorded" rides along with
+    // the poll so the page can say so without a second timer.
+    pollScrapeHealth();
 
     state.busy = false;
     if (state.generation !== generation || (signal && signal.aborted)) return;
@@ -1787,8 +1991,15 @@
     const env = await fetchEnvelope("api/config", {});
     if (env.ok && env.body && typeof env.body === "object") {
       state.configUpstream = env.body.upstream || env.body.default_upstream || "";
+      // Additive keys from /api/config (ADR 0001 C6). Missing keys mean an older
+      // serve.py, which is the same as "not configured": no links, no complaints.
+      state.grafanaUrl = asText(env.body.grafana_url).replace(/\/+$/, "");
+      state.prometheusUrl = asText(env.body.prometheus_url).replace(/\/+$/, "");
+      state.monitorVersion = asText(env.body.version);
     }
     renderTarget();
+    renderGrafanaLinks();
+    renderScrapeHealth();
   }
 
   function init() {

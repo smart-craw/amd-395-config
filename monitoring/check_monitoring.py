@@ -34,12 +34,27 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 PROM_DIR = HERE / "prometheus"
 GRAFANA_DIR = HERE / "grafana"
+DASH_DIR = GRAFANA_DIR / "dashboards"
+
+#: ADR 0001 C4 reserves these panel ids: `monitor/static/app.js` builds
+#: `?viewPanel=<id>` links against them, so renumbering silently breaks the page's
+#: Grafana links. Value = words that must appear in that panel's title.
+RESERVED_PANELS = {
+    1: ("decode",),
+    2: ("prompt",),
+    3: ("first token",),
+    4: ("kv",),
+    5: ("requests",),
+    6: ("prompt-cache",),
+    7: ("scrape health",),
+}
 
 FAILS: list[str] = []
 CHECKS = 0
@@ -324,7 +339,10 @@ def check_dashboard() -> None:
     check(not re.search(r"https?://", raw), "dashboard JSON contains an off-box URL")
     dash = json.loads(raw)
     check(dash.get("title") == "LLM Server", "dashboard title should be 'LLM Server'")
-    check(bool(dash.get("uid")), "dashboard has no uid (deep links need a stable one)")
+    check(
+        dash.get("uid") == "llm-server",
+        "dashboard uid must be 'llm-server' — the page's deep links are /d/llm-server/...",
+    )
     check(isinstance(dash.get("schemaVersion"), int), "dashboard has no schemaVersion")
     check(dash.get("refresh") == "15s", "dashboard refresh should be 15s (the scrape interval)")
     check(
@@ -349,14 +367,40 @@ def check_dashboard() -> None:
         else:
             panels.append(entry)
     check(len(panels) >= 12, f"dashboard looks too small: {len(panels)} panels")
+    ids = [entry.get("id") for entry in dash.get("panels") or []]
+    ids += [p.get("id") for entry in dash.get("panels") or [] if entry.get("type") == "row"
+            for p in entry.get("panels") or []]
+    check(
+        len(ids) == len(set(ids)),
+        "panel ids are not unique dashboard-wide — rows share the id space with panels, "
+        "and a duplicate id is how a deep link lands on the wrong chart",
+    )
+    by_id = {p.get("id"): p for p in panels}
+    for pid, words in RESERVED_PANELS.items():
+        title = str((by_id.get(pid) or {}).get("title", "<missing>"))
+        check(
+            all(word in title.lower() for word in words),
+            f"panel id {pid} is reserved by ADR 0001 C4 for {' + '.join(words)} but is "
+            f"titled {title!r}; deep links with viewPanel={pid} would land wrong",
+        )
     for p in panels:
         title = p.get("title", "<untitled>")
-        targets = p.get("targets") or []
-        check(bool(targets), f"panel {title!r} has no targets")
-        for t in targets:
-            check(bool(str(t.get("expr", "")).strip()), f"panel {title!r} has an empty expr")
+        if p.get("type") == "text":
+            # A text panel has no targets by design; it is documentation that ships
+            # with the dashboard, so it still has to say something.
+            content = str((p.get("options") or {}).get("content", ""))
+            check(len(content.strip()) > 20, f"text panel {title!r} has no content")
+        else:
+            targets = p.get("targets") or []
+            check(bool(targets), f"panel {title!r} has no targets")
+            for t in targets:
+                check(bool(str(t.get("expr", "")).strip()), f"panel {title!r} has an empty expr")
+                check(
+                    bool(str(t.get("legendFormat", "")).strip()),
+                    f"panel {title!r} has a target with no legendFormat (legends go blank)",
+                )
         check(
-            len(str(p.get("description", "")).strip()) > 30,
+            len(str(p.get("description", "").strip())) > 30,
             f"panel {title!r} has no description stating its PromQL",
         )
         ds = p.get("datasource") or {}
@@ -368,6 +412,255 @@ def check_dashboard() -> None:
     joined = json.dumps(dash).lower()
     for token in ("histogram_quantile", "$__rate_interval", "clamp_min", "llm_monitor_scrape"):
         check(token in joined, f"dashboard does not use {token}")
+
+
+#: The rows the dashboard ticket specifies. The dashboard is organised around these
+#: questions and nothing else (a raw per-series dump stays on the proxy page).
+DASHBOARD_ROWS = ("Overview", "Latency", "Cache & KV", "Speculative decode", "Scrape health")
+
+#: Panel types that ship with Grafana. Anything else is a plugin, and plugins are
+#: disabled in compose.yaml (GF_PLUGINS_ALLOW_LOADING: "false"): a panel of another
+#: type is a dashboard that renders as an error on this box.
+PANEL_TYPES = {"row", "timeseries", "stat", "text"}
+
+#: Template variable types Grafana knows. A typo here ("type": "model") makes the
+#: variable vanish in the UI with no error anywhere — the quietest possible failure.
+VARIABLE_TYPES = {"query", "custom", "constant", "datasource", "textbox", "interval", "group", "adhoc"}
+
+
+def flatten_panels(dash: dict) -> list[dict]:
+    """Every panel in the dashboard, wherever it lives.
+
+    A collapsed row nests its children; an expanded row's children are top-level
+    entries with real gridPos. Reading only one of the two shapes silently skips
+    half the dashboard — which is how a panel escapes validation entirely.
+    """
+    out: list[dict] = []
+    for entry in dash.get("panels") or []:
+        out.append(entry)
+        if entry.get("type") == "row":
+            out.extend(entry.get("panels") or [])
+    return out
+
+
+def balanced(expr: str) -> bool:
+    """Cheap sanity on an expression: balanced pairs and an even number of quotes.
+
+    Not a parser (promtool does that, when it is installed) — this is the
+    promtool-independent floor that catches the truncation/typo class, including a
+    generator that ate half a selector.
+    """
+    pairs = (("(", ")"), ("{", "}"), ("[", "]"))
+    return expr.count('"') % 2 == 0 and all(expr.count(a) == expr.count(b) for a, b in pairs)
+
+
+def recorded_aliases() -> set[str]:
+    """Every `record:` name in recording_rules.yml (the aliases panels may use)."""
+    path = PROM_DIR / "recording_rules.yml"
+    if not path.is_file():
+        return set()
+    names = set()
+    for group in (parse_yaml(path.read_text(encoding="utf-8")) or {}).get("groups") or []:
+        for rule in group.get("rules") or []:
+            if rule.get("record"):
+                names.add(str(rule["record"]))
+    return names
+
+
+def check_dashboard_contract() -> None:
+    """The dashboard ticket's acceptance criteria, as checks with no Grafana and no promtool.
+
+    Each one names the failure it stands in front of, because a dashboard can be
+    valid JSON, valid PromQL and still lie: a filter that is declared but never
+    applied, a quantile panel that prints "No data" where it should say "this server
+    has no histograms", an alias no recording rule writes, a hand-copied description
+    that drifted from the query it documents. All of those render happily.
+    """
+    path = DASH_DIR / "llm-server.json"
+    raw = path.read_text(encoding="utf-8")
+    try:
+        dash = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        check(False, f"dashboard JSON does not parse: {exc}")
+        return
+    panels = flatten_panels(dash)
+    charts = [p for p in panels if p.get("type") in ("timeseries", "stat")]
+
+    # --- structure the deep links depend on -------------------------------- #
+    rows = [p for p in panels if p.get("type") == "row"]
+    titles = [r.get("title") for r in rows]
+    for title in DASHBOARD_ROWS:
+        check(title in titles, f"dashboard has no {title!r} row")
+    check(
+        sum(1 for r in rows if r.get("collapsed")) >= 3,
+        "most rows should ship collapsed (Overview / Latency / Cache & KV / Speculative "
+        "decode / Scrape health) — an all-open dashboard opens 40 queries on first paint",
+    )
+
+    # --- nothing that needs a plugin, a CDN or a click --------------------- #
+    for p in panels:
+        check(
+            p.get("type") in PANEL_TYPES,
+            f"panel {p.get('title')!r} uses type {p.get('type')!r}: not a built-in panel, "
+            "and plugins are off in compose.yaml",
+        )
+    check(
+        not re.search(r"https?://", raw),
+        "dashboard JSON references an off-box URL (no CDN assets, nothing leaves the box)",
+    )
+
+    # --- the 15s scrape is the resolution floor ---------------------------- #
+    check(dash.get("interval") == "15s", "dashboard min step should be 15s (the scrape interval)")
+    for p in charts:
+        for t in p.get("targets") or []:
+            check(
+                t.get("interval") in (None, "15s"),
+                f"panel {p.get('title')!r} step {t.get('interval')!r} is finer than the 15s scrape",
+            )
+
+    # --- every panel states its own PromQL, and the statement is true ------ #
+    for p in charts:
+        description = str(p.get("description") or "")
+        title = p.get("title", "<untitled>")
+        check("PromQL" in description, f"panel {title!r} description does not state its PromQL")
+        for t in p.get("targets") or []:
+            expr = str(t.get("expr") or "")
+            check(balanced(expr), f"panel {title!r} has an unbalanced expression: {expr}")
+            check(
+                expr in description,
+                f"panel {title!r}: its description does not contain its own query "
+                f"({t.get('refId')}), so the note is stale or was hand-copied",
+            )
+
+    # --- variables: declared, well-formed, and actually used --------------- #
+    variables = {v.get("name"): v for v in (dash.get("templating") or {}).get("list") or []}
+    for name, variable in variables.items():
+        check(
+            variable.get("type") in VARIABLE_TYPES,
+            f"${name} has type {variable.get('type')!r}, which Grafana silently drops",
+        )
+        if variable.get("type") != "query":
+            continue
+        query = variable.get("query")
+        query = query if isinstance(query, str) else (query or {}).get("query", "")
+        check(bool(query), f"${name} is a query variable with no query")
+        if query.startswith("label_values("):
+            inner = query[len("label_values("):-1]
+            check(
+                inner.count(",") == 1,
+                f"${name}: label_values(<selector>, <label>) with a comma inside the "
+                f"selector does not parse in Grafana (its regex cannot contain one), so "
+                f"the variable silently offers nothing: {query}",
+            )
+    expressions = " ".join(str(t.get("expr") or "") for p in charts for t in p.get("targets") or [])
+    for name in ("job", "instance", "model"):
+        check(f"${name}" in expressions, f"${name} is declared but no panel filters on it")
+
+    # --- graceful degradation, not "No data" ------------------------------- #
+    for p in charts:
+        exprs = " ".join(str(t.get("expr") or "") for t in p.get("targets") or [])
+        if "histogram_quantile" in exprs:
+            check(
+                bool(((p.get("fieldConfig") or {}).get("defaults") or {}).get("noValue")),
+                f"panel {p.get('title')!r} renders quantiles but has no noValue message: a "
+                "server with averages only must read 'no histogram on this server'",
+            )
+        # 0/0 -> NaN -> dropped sample -> a hole that reads as a missing metric.
+        for guard, name in (("draft_tokens_accepted", "draft acceptance"),
+                            ("prompt_tokens_cached", "prompt-cache hit ratio")):
+            if guard in exprs and " / " in exprs:
+                check(
+                    "clamp_min" in exprs,
+                    f"panel {p.get('title')!r}: the {name} division is not clamp_min-guarded",
+                )
+
+    # --- the specific questions this dashboard exists to answer ------------ #
+    joined = json.dumps(dash)
+    coverage = {
+        "decode tokens/s via rate()": "tokens_predicted_total" in joined,
+        "the server's own average gauge overlaid for the migration": "predicted_tokens_seconds" in joined,
+        "prompt tokens/s via rate()": "prompt_tokens_total" in joined,
+        "requests in flight": "requests_processing" in joined,
+        "requests deferred": "requests_deferred" in joined,
+        "structured request share": "structured_requests_total" in joined,
+        "le-bucketed TTFT family": "time_to_first_token_seconds_bucket" in joined,
+        "time per output token": "time_per_output_token_seconds_bucket" in joined,
+        "end-to-end latency": "end_to_end_response_seconds_bucket" in joined,
+        "sum by (le) before the quantile": "sum by (le)" in joined,
+        "kv usage ratio": "kv_cache_usage_ratio" in joined,
+        "kv tokens against the pool": "kv_pool_positions" in joined,
+        "kv reserved tokens": "kv_pool_reserved_tokens" in joined,
+        "up per job": 'up{job=~"$job"' in expressions,
+        "monitor scrape success": "llm_monitor_scrape_success_total" in joined,
+        "monitor scrape latency": "llm_monitor_scrape_latency_ms" in joined,
+        "repeat-by-variable for multi-instance": '"repeat"' in joined,
+        "histogram_quantile": "histogram_quantile" in joined,
+        "$__rate_interval windows": "$__rate_interval" in joined,
+    }
+    for what, holds in coverage.items():
+        check(holds, f"dashboard does not cover: {what}")
+
+    # --- KV bands at 80 % / 90 % drawn, not just mentioned ----------------- #
+    kv = next((p for p in charts if p.get("id") == 4), None)
+    check(kv is not None, "panel id 4 (KV-cache pressure) is missing")
+    if kv:
+        defaults = (kv.get("fieldConfig") or {}).get("defaults") or {}
+        steps = [step.get("value") for step in defaults.get("thresholds", {}).get("steps", [])]
+        check(0.8 in steps and 0.9 in steps, f"panel 4 should band at 0.8 and 0.9, found {steps}")
+        style = defaults.get("custom", {}).get("thresholdsStyle", {}).get("mode")
+        check(style != "off", "panel 4's threshold bands are switched off")
+
+    # --- a subquery needs a step, and it is easy to forget ----------------- #
+    for match in re.finditer(r"avg_over_time\([^)]*\[([^\]]*)\]", expressions):
+        check(
+            ":" in match.group(1),
+            f"avg_over_time over an aggregated expression needs a subquery step "
+            f"([1h:5m], not [1h]): {match.group(0)}",
+        )
+
+    # --- every llm:* alias a panel plots must actually be recorded --------- #
+    # (?<![\w:]) so vLLM's own vllm:* names are not read as llm:* aliases.
+    aliases = set(re.findall(r"(?<![A-Za-z0-9_])llm:[A-Za-z0-9_:]+", expressions))
+    have = recorded_aliases()
+    check(bool(aliases), "no dashboard expression references an llm:* recording-rule alias")
+    for alias in sorted(aliases):
+        check(alias in have, f"dashboard plots {alias} but recording_rules.yml does not record it")
+
+    # --- the live page's deep links land somewhere ------------------------- #
+    # monitor/static/app.js builds viewPanel=<id> links; a link to a panel that no
+    # longer exists opens Grafana on the wrong chart, and only when someone clicks.
+    app_js = ROOT / "monitor" / "static" / "app.js"
+    if app_js.is_file():
+        text = app_js.read_text(encoding="utf-8")
+        block = re.search(r"const GRAFANA_PANELS = \[(.*?)\];", text, re.S)
+        check(block is not None, "could not find GRAFANA_PANELS in monitor/static/app.js")
+        linked = {int(n) for n in re.findall(r"id:\s*(\d+)", block.group(1))} if block else set()
+        present = {p.get("id") for p in flatten_panels(dash)}
+        for panel_id in sorted(linked):
+            check(
+                panel_id in present,
+                f"monitor/static/app.js deep-links viewPanel={panel_id}, which this "
+                "dashboard does not have (ADR 0001 C4 ids are a contract)",
+            )
+
+
+def check_dashboard_generated() -> None:
+    """The committed JSON is what the generator produces (no hand-edits, no drift).
+
+    Runs make_dashboard.py --check rather than importing it: the generator owns its
+    own output, and this file only has to notice when the two disagree.
+    """
+    generator = GRAFANA_DIR / "make_dashboard.py"
+    if not generator.is_file():
+        return
+    result = subprocess.run(
+        [sys.executable, str(generator), "--check"], capture_output=True, text=True, cwd=ROOT
+    )
+    check(
+        result.returncode == 0,
+        "dashboards/llm-server.json is not what make_dashboard.py generates: "
+        + ((result.stdout or "") + (result.stderr or "")).strip(),
+    )
 
 
 def check_provisioning() -> None:
@@ -520,6 +813,56 @@ def maybe_promtool(enabled: bool) -> None:
             result.returncode == 0,
             f"promtool {' '.join(args[:2])} failed:\n{(result.stdout or '') + (result.stderr or '')}",
         )
+    check_dashboard_promql(promtool)
+
+
+def dashboard_expressions() -> list[tuple[str, str]]:
+    """Every PromQL string in the dashboard, as (panel-id + refId, expr) pairs."""
+    path = DASH_DIR / "llm-server.json"
+    if not path.exists():
+        return []
+    dash = json.loads(path.read_text(encoding="utf-8"))
+    out = []
+    for panel in flatten_panels(dash):
+        for tgt in panel.get("targets") or []:
+            expr = (tgt.get("expr") or "").strip()
+            if expr:
+                out.append((f"p{panel.get('id')}{tgt.get('refId', 'A')}", expr))
+    return out
+
+
+def check_dashboard_promql(promtool: str) -> None:
+    """Type-check every dashboard expression by borrowing promtool's parser.
+
+    promtool has no "check this one query" mode, but `check rules` parses any
+    expression handed to it as a recording-rule `expr`. So the panel queries are
+    written to a throwaway rules file — Grafana's `$__rate_interval` replaced by a
+    real duration, because promtool does not know Grafana's template variables — and
+    parsed by the same Prometheus parser that will run the query.
+
+    This catches the class of dashboard bug no JSON schema can: a `rate(x)[5m]` typo,
+    an unbalanced paren, a `sum by (le)` that dropped `le`, an `avg_over_time(max(...))`
+    that would need a subquery step. Label *values* like $job stay as written: to
+    PromQL they are ordinary regex strings, which is how Grafana sends them.
+    """
+    exprs = dashboard_expressions()
+    check(bool(exprs), "dashboard has no panel expressions to validate")
+    lines = ["groups:", "  - name: grafana_panel_expressions", "    rules:"]
+    for tag, expr in exprs:
+        name = "check:" + re.sub(r"[^a-zA-Z0-9_]", "_", tag).lower()
+        lines.append(f"      - record: {name}")
+        # JSON-quoted on one line: YAML block scalars would fold a long expression and
+        # PromQL would then read a mangled query (a folded `clamp_min` is `clamp mp_min`).
+        lines.append(f"        expr: {json.dumps(expr.replace("$__rate_interval", "5m"))}")
+    tmp = Path(tempfile.mkdtemp(prefix="grafana-promql-")) / "panel-expressions.yml"
+    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    result = subprocess.run([promtool, "check", "rules", str(tmp)],
+                            capture_output=True, text=True, cwd=ROOT)
+    check(
+        result.returncode == 0,
+        "a dashboard panel expression is not valid PromQL "
+        f"(rendered to {tmp}):\n{(result.stdout or '') + (result.stderr or '')}",
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -532,6 +875,8 @@ def main(argv: list[str] | None = None) -> int:
     check_unit_tests(alerts)
     check_prometheus_config()
     check_dashboard()
+    check_dashboard_contract()
+    check_dashboard_generated()
     check_provisioning()
     check_compose()
     check_upstream_declaration()

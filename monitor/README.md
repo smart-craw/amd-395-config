@@ -33,9 +33,9 @@ decision and its rejected alternatives are recorded in
      where Prometheus cannot reach the model server directly. Direct scraping of
      the model server remains the preferred path;
   3. the **zero-dependency live status page**, including the raw exposition text for
-     last-mile debugging — plus, as the page gets refocused, deep links into the
-     equivalent Grafana panels (`--grafana-url` already feeds them; the link-out in
-     `static/app.js` is still to come).
+     last-mile debugging, plus deep links into the equivalent Grafana panels
+     (`--grafana-url` / `$LLM_MONITOR_GRAFANA_URL` feeds them; with no Grafana
+     configured the links are not rendered and the card says so instead).
 
 What `serve.py` is *not*: a time-series database, a query language, or the
 historical view. The page keeps ~60 samples in tab memory for sparklines and that
@@ -152,6 +152,20 @@ sudo loginctl enable-linger $USER
   tok/s, prompt tok/s, requests in flight, requests total, draft-accept rate and
   prompt-cache hit rate, a throughput history chart, one row per scraped series
   and the raw exposition text. See “Why `/metrics` is parsed server-side”.
+  Each tile label says which kind of number it is — `· instant`, `· server avg`
+  (the server's own "since my last scrape" gauge), `· lifetime` (counter ÷ counter
+  since start) — because a tile that just says "generate tok/s" gets read as a
+  windowed rate, and none of these are one; a windowed rate is PromQL's job. With
+  `--grafana-url` the card also grows a row of deep links into the equivalent
+  panels (decode, prompt, TTFT p99, KV pressure, queue, cache & spec, scrape
+  health), each carrying `var-instance=<upstream host:port>` so it lands on the
+  same server's history.
+* **history read-out** — the top bar carries `history: N/M targets up`, and with
+  `--prometheus-url` set it is a live digest of `/api/scrape-health`: `history:
+  Prometheus unreachable` when the scraping layer is down, `history: not
+  configured` when there is none. This is the difference between "the server is
+  idle" and "we have stopped looking", which is otherwise invisible on a page with
+  no history.
 * every card has a ~60-sample latency sparkline (min / max / now labelled), an
   error strip with a retry button, stale styling once the last good poll is
   older than 3 intervals, and a full-width banner appears when *all* endpoints
