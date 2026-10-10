@@ -78,6 +78,8 @@ llama-bench -pg 512,128 \
 
 A dependency-free dashboard for whichever model server is running: `monitor/serve.py` hosts the page and proxies `/health`, `/v1/models`, `/metrics`, and `/cache` from the same origin, so no CORS setup is needed.  Point it at any server (defaults to `http://llm.home:8080`) and open `http://localhost:8090/`.
 
+Monitoring is two layers (see [ADR 0001](./docs/adr/0001-prometheus-grafana-owns-metrics.md)): Prometheus + Grafana own `/metrics` -- history, rate math, retention, alerting -- and `monitor/serve.py` owns "right now".  The proxy keeps the live status page for the JSON endpoints (`/health`, `/v1/models`, `/cache`, which are not Prometheus metrics), answers `GET /metrics` as a raw scrape passthrough for Prometheus when the model server is not directly reachable, and grows deep links into the matching Grafana panels.  Nothing in the stack talks to anything outside the box; the Prometheus/Grafana compose stack lives in `monitoring/` once landed.
+
 ```sh
 python3 monitor/serve.py --url http://llm.home:8080 --port 8090
 ```

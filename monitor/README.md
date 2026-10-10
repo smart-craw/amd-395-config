@@ -14,6 +14,34 @@ It polls the four read-only endpoints the model server already exposes —
 `/health`, `/v1/models`, `/cache` and `/metrics` — through a tiny local proxy, so
 the page and its API share one origin.
 
+## Two layers: what this page is, and what it is not
+
+Monitoring on this box has two layers with a hard boundary between them; the
+decision and its rejected alternatives are recorded in
+[ADR 0001](../docs/adr/0001-prometheus-grafana-owns-metrics.md).
+
+* **Prometheus + Grafana own `/metrics` — history.** Anything derived from the
+  Prometheus exposition format (throughput, latency quantiles, KV-cache pressure,
+  cache and speculative-decode ratios, retention, alerting) is PromQL + a
+  provisioned Grafana dashboard, described in `monitoring/` once that stack lands.
+* **`serve.py` owns "right now"** — and its scope is deliberately frozen to what
+  only it can do:
+  1. a **same-origin proxy** for `/health`, `/v1/models` and `/cache`, which are
+     ad-hoc JSON and *not* Prometheus metrics;
+  2. a **raw scrape passthrough** — `GET /metrics` answers the upstream exposition
+     body verbatim plus this proxy's own `llm_monitor_*` series — for the case
+     where Prometheus cannot reach the model server directly. Direct scraping of
+     the model server remains the preferred path;
+  3. the **zero-dependency live status page**, including the raw exposition text for
+     last-mile debugging — plus, as the page gets refocused, deep links into the
+     equivalent Grafana panels (`--grafana-url` already feeds them; the link-out in
+     `static/app.js` is still to come).
+
+What `serve.py` is *not*: a time-series database, a query language, or the
+historical view. The page keeps ~60 samples in tab memory for sparklines and that
+is all the history it has — reload and it is gone. Anything older than a few minutes
+is a Grafana question.
+
 ## Quick start
 
 ```sh
@@ -141,22 +169,35 @@ change.
 
 ## The API surface
 
-| route             | upstream                | notes                                    |
-| ----------------- | ----------------------- | ---------------------------------------- |
-| `GET /api/health` | `<upstream>/health`     | proxied                                  |
-| `GET /api/models` | `<upstream>/v1/models`  | proxied                                  |
-| `GET /api/cache`  | `<upstream>/cache`      | proxied                                  |
-| `GET /api/metrics`| `<upstream>/metrics`    | proxied, **plus** `metrics` (parsed)      |
-| `GET /api/config` | *(no upstream call)*    | active upstream + the endpoints to offer |
+| route                    | upstream                | notes                                    |
+| ------------------------ | ----------------------- | ---------------------------------------- |
+| `GET /api/health`        | `<upstream>/health`     | proxied                                  |
+| `GET /api/models`        | `<upstream>/v1/models`  | proxied                                  |
+| `GET /api/cache`         | `<upstream>/cache`      | proxied                                  |
+| `GET /api/metrics`       | `<upstream>/metrics`    | proxied, **plus** `metrics` (parsed)      |
+| `GET /api/config`        | *(no upstream call)*    | active upstream + the endpoints to offer |
+| `GET /api/scrape-health` | `<prometheus>/api/v1/targets` | proxied digest; only useful with `--prometheus-url` |
+| `GET /metrics`           | `<upstream>/metrics`    | **plain text, not an envelope**: the scrape passthrough Prometheus pulls through |
 
 Any other `/api/...` path answers 404, a malformed `?url=` answers 400, and
 everything that is not under `/api/` is served out of `static/` (directory
-listings are disabled). Each proxy route takes an optional `?url=<http(s) base>`
-that overrides the upstream for that single request.
+listings are disabled) — except `/metrics`, which is claimed by the passthrough and
+never falls through to a static file. Each proxy route takes an optional
+`?url=<http(s) base>` that overrides the upstream for that single request, including
+on `/metrics`, so one proxy can be scraped as several distinct targets.
+
+`GET /metrics` is the scrape passthrough (ADR 0001, contract C1): the upstream text
+comes back byte for byte with
+`Content-Type: text/plain; version=0.0.4; charset=utf-8` and the proxy's own
+`llm_monitor_*` series appended — nothing renamed, nothing wrapped in JSON. A
+non-2xx or unreachable upstream answers **HTTP 502** with a one-line plain-text
+reason, because a scrape that silently returns garbage is worse than a failed
+scrape. Exposing it past loopback is an information-disclosure decision: the whole
+exposition (model ids, traffic shape, prompt-cache behaviour) is in that body.
 
 ## The envelope
 
-All five `/api/*` routes answer with the same shape, and always with HTTP 200
+All six `/api/*` routes answer with the same shape, and always with HTTP 200
 even when the upstream is on fire (upstream trouble lives inside the envelope,
 not in the transport status):
 
@@ -181,13 +222,27 @@ A dead, slow or angry upstream is still HTTP 200 with `ok:false` and a populated
 `error` — never a 500 that takes the dashboard down — and no request ever waits
 longer than 5s for the upstream.
 
-`/api/metrics` is the only route with a key beyond the seven above: `metrics`, the
-parsed form of `body` (see “Why `/metrics` is parsed server-side”).
+`/api/metrics` adds one key beyond the seven above: `metrics`, the parsed form of
+`body` (see “Why `/metrics` is parsed server-side”). `/api/scrape-health` likewise
+adds `scrape_health`; nothing else departs from the envelope, and `GET /metrics` (no
+`/api/` prefix) departs from it entirely.
 
 `/api/config` is the odd one out: it never calls the upstream, and its `body` is
-`{"upstream": ..., "endpoints": ["/health", "/v1/models", "/cache"],
-"default_upstream": ...}`, with those three keys also copied onto the top level
-of the envelope so `body.upstream` and `upstream` both work.
+`{"upstream": ..., "endpoints": ["/health", "/v1/models", "/cache", "/metrics"],
+"default_upstream": ..., "grafana_url": ..., "prometheus_url": ..., "version":
+...}`, with those three keys also copied onto the top level of the envelope so
+`body.upstream` and `upstream` both work. `grafana_url` / `prometheus_url` come from
+`--grafana-url` / `$LLM_MONITOR_GRAFANA_URL` and `--prometheus-url` /
+`$LLM_MONITOR_PROMETHEUS_URL`; empty means "no Grafana / Prometheus on this box", a
+supported configuration rather than a broken one — the scrape-health read-out (and,
+once they land, the Grafana deep links) simply are not rendered.
+
+`GET /api/scrape-health` is the monitor's view of the monitor: it proxies
+`<prometheus>/api/v1/targets` and adds a `scrape_health` digest (`configured`,
+`reachable`, `targets_total`, `targets_up`, and one `{job, instance, health,
+last_error}` row per target). The browser never talks to Prometheus directly — that
+would reintroduce the CORS problem this proxy exists to solve — and a down
+Prometheus is an `ok:false` envelope, never a 500.
 
 ## Why `/metrics` is parsed server-side
 
@@ -220,6 +275,14 @@ falls back to a name pattern, and a tile whose metric is missing is simply not
 rendered. Two figures are derived rather than read: draft acceptance
 (`draft_tokens_accepted_total / draft_tokens_total`) and prompt-cache hit rate
 (`prompt_tokens_cached_total / (prompt_tokens_total + prompt_tokens_cached_total)`).
+
+That parsing exists so the page can render *right now* without shipping a second
+parser to the browser; it is explicitly **not** the system of record. Dividing two
+instantaneous counter snapshots is not a rate — no window, no `rate()`, no
+counter-reset handling — so those two derived tiles are transitional and are removed
+once the Grafana panels cover them (ADR 0001, "Migration path for the bespoke
+math"). Vendor name drift is meant to shrink here too: a new server family gets an
+entry in the recording-rules file, not a new regex in `app.js`.
 
 ## Why `/cache` is parsed defensively
 
