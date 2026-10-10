@@ -342,6 +342,22 @@ def mean_from_histogram(stems: str) -> str:
     return "%s / clamp_min(%s, 1)" % (total, count)
 
 
+def family_count(tail: str, *stems: str) -> str:
+    """How many `<stem><tail>` series each scraped instance publishes, as a total.
+
+    The census panel's building block: it asks the exposition what it contains,
+    which is the only way a latency panel can explain its own emptiness. One `count`
+    over the union of families — adding three `count`s with `or` would keep the
+    left-hand value per instance instead of summing the families, because `or`
+    dedupes by label set and all three group to the same (instance, job).
+
+    Filtered by $job/$instance like every other panel (model=False: a bucket series
+    may carry neither model spelling, and this panel is about the server, not the
+    model).
+    """
+    return "count by (instance, job) (%s)" % sel(suffix("|".join(stems), tail), model=False)
+
+
 def ratio(numerator: str, denominator: str) -> str:
     """`numerator / clamp_min(denominator, 1)` — the house ratio shape."""
     return "%s / clamp_min(%s, 1)" % (numerator, denominator)
@@ -908,16 +924,11 @@ def latency_row():
             "the stem to the `_TTFT` / `_TPOT` / `_E2E` constants in make_dashboard.py. "
             "Nothing here at all means the server publishes no latency families.",
             [
-                target("count by (instance, job) (%s)"
-                       % bare(suffix(_TTFT, "_bucket") + "|" + suffix(_TPOT, "_bucket")
-                              + "|" + suffix(_E2E, "_bucket")),
-                       "bucket series"),
-                target("count by (instance, job) (%s)"
-                       % bare(suffix(_TTFT, "_count") + "|" + suffix(_TPOT, "_count")
-                              + "|" + suffix(_E2E, "_count")),
-                       "summary/histogram _count series"),
-                target("count by (instance, job) (%s)" % bare(suffix(_TTFT, "_bucket")),
-                       "TTFT buckets"),
+                target(family_count("_bucket", _TTFT, _TPOT, _E2E),
+                       "bucket series, all latency families"),
+                target(family_count("_count", _TTFT, _TPOT, _E2E),
+                       "_count series (a mean is possible)"),
+                target(family_count("_bucket", _TTFT), "buckets on the TTFT family"),
             ],
             w=24, h=5, legend=LEGEND_LIST,
             no_value="no latency families on this server",

@@ -1887,7 +1887,7 @@
           "id": 33,
           "type": "timeseries",
           "title": "Latency families this server publishes",
-          "description": "Not a metric about the model \u2014 a census of what the exposition actually contains, counted per instance: how many `_bucket` series (quantiles are possible), how many `_count` series (a mean is possible) and how many TTFT buckets there are (a one-bucket histogram quantiles to that bucket, so a suspiciously round p99 is usually this panel's fault, not the model's).\n\nRead it when a latency panel above is empty: counts here but no quantile means the server uses a family name this dashboard does not know yet \u2014 add the stem to the `_TTFT` / `_TPOT` / `_E2E` constants in make_dashboard.py. Nothing here at all means the server publishes no latency families.\n\nPromQL sent by this panel:\n\n```promql\nA: count by (instance, job) ({__name__=~\"llama:time_to_first_token_seconds_bucket|llamacpp:time_to_first_token_seconds_bucket|llamacpp:ttft_seconds_bucket|vllm:time_to_first_token_seconds_bucket|llama:time_per_output_token_seconds_bucket|llamacpp:time_per_output_token_seconds_bucket|llamacpp:time_per_token_seconds_bucket|vllm:time_per_output_token_seconds_bucket|llama:end_to_end_response_seconds_bucket|llamacpp:end_to_end_response_seconds_bucket|llamacpp:requests_seconds_bucket|llamacpp:request_seconds_bucket|vllm:e2e_request_latency_seconds_bucket\"})\nA: count by (instance, job) ({__name__=~\"llama:time_to_first_token_seconds_count|llamacpp:time_to_first_token_seconds_count|llamacpp:ttft_seconds_count|vllm:time_to_first_token_seconds_count|llama:time_per_output_token_seconds_count|llamacpp:time_per_output_token_seconds_count|llamacpp:time_per_token_seconds_count|vllm:time_per_output_token_seconds_count|llama:end_to_end_response_seconds_count|llamacpp:end_to_end_response_seconds_count|llamacpp:requests_seconds_count|llamacpp:request_seconds_count|vllm:e2e_request_latency_seconds_count\"})\nA: count by (instance, job) ({__name__=~\"llama:time_to_first_token_seconds_bucket|llamacpp:time_to_first_token_seconds_bucket|llamacpp:ttft_seconds_bucket|vllm:time_to_first_token_seconds_bucket\"})\n```",
+          "description": "Not a metric about the model \u2014 a census of what the exposition actually contains, counted per instance: how many `_bucket` series (quantiles are possible), how many `_count` series (a mean is possible) and how many TTFT buckets there are (a one-bucket histogram quantiles to that bucket, so a suspiciously round p99 is usually this panel's fault, not the model's).\n\nRead it when a latency panel above is empty: counts here but no quantile means the server uses a family name this dashboard does not know yet \u2014 add the stem to the `_TTFT` / `_TPOT` / `_E2E` constants in make_dashboard.py. Nothing here at all means the server publishes no latency families.\n\nPromQL sent by this panel:\n\n```promql\nA: count by (instance, job) ({__name__=~\"llama:time_to_first_token_seconds_bucket|llamacpp:time_to_first_token_seconds_bucket|llamacpp:ttft_seconds_bucket|vllm:time_to_first_token_seconds_bucket|llama:time_per_output_token_seconds_bucket|llamacpp:time_per_output_token_seconds_bucket|llamacpp:time_per_token_seconds_bucket|vllm:time_per_output_token_seconds_bucket|llama:end_to_end_response_seconds_bucket|llamacpp:end_to_end_response_seconds_bucket|llamacpp:requests_seconds_bucket|llamacpp:request_seconds_bucket|vllm:e2e_request_latency_seconds_bucket\",job=~\"$job\",instance=~\"$instance\"})\nA: count by (instance, job) ({__name__=~\"llama:time_to_first_token_seconds_count|llamacpp:time_to_first_token_seconds_count|llamacpp:ttft_seconds_count|vllm:time_to_first_token_seconds_count|llama:time_per_output_token_seconds_count|llamacpp:time_per_output_token_seconds_count|llamacpp:time_per_token_seconds_count|vllm:time_per_output_token_seconds_count|llama:end_to_end_response_seconds_count|llamacpp:end_to_end_response_seconds_count|llamacpp:requests_seconds_count|llamacpp:request_seconds_count|vllm:e2e_request_latency_seconds_count\",job=~\"$job\",instance=~\"$instance\"})\nA: count by (instance, job) ({__name__=~\"llama:time_to_first_token_seconds_bucket|llamacpp:time_to_first_token_seconds_bucket|llamacpp:ttft_seconds_bucket|vllm:time_to_first_token_seconds_bucket\",job=~\"$job\",instance=~\"$instance\"})\n```",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -1905,8 +1905,8 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "count by (instance, job) ({__name__=~\"llama:time_to_first_token_seconds_bucket|llamacpp:time_to_first_token_seconds_bucket|llamacpp:ttft_seconds_bucket|vllm:time_to_first_token_seconds_bucket|llama:time_per_output_token_seconds_bucket|llamacpp:time_per_output_token_seconds_bucket|llamacpp:time_per_token_seconds_bucket|vllm:time_per_output_token_seconds_bucket|llama:end_to_end_response_seconds_bucket|llamacpp:end_to_end_response_seconds_bucket|llamacpp:requests_seconds_bucket|llamacpp:request_seconds_bucket|vllm:e2e_request_latency_seconds_bucket\"})",
-              "legendFormat": "bucket series",
+              "expr": "count by (instance, job) ({__name__=~\"llama:time_to_first_token_seconds_bucket|llamacpp:time_to_first_token_seconds_bucket|llamacpp:ttft_seconds_bucket|vllm:time_to_first_token_seconds_bucket|llama:time_per_output_token_seconds_bucket|llamacpp:time_per_output_token_seconds_bucket|llamacpp:time_per_token_seconds_bucket|vllm:time_per_output_token_seconds_bucket|llama:end_to_end_response_seconds_bucket|llamacpp:end_to_end_response_seconds_bucket|llamacpp:requests_seconds_bucket|llamacpp:request_seconds_bucket|vllm:e2e_request_latency_seconds_bucket\",job=~\"$job\",instance=~\"$instance\"})",
+              "legendFormat": "bucket series, all latency families",
               "range": true,
               "refId": "A",
               "interval": "15s",
@@ -1918,8 +1918,8 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "count by (instance, job) ({__name__=~\"llama:time_to_first_token_seconds_count|llamacpp:time_to_first_token_seconds_count|llamacpp:ttft_seconds_count|vllm:time_to_first_token_seconds_count|llama:time_per_output_token_seconds_count|llamacpp:time_per_output_token_seconds_count|llamacpp:time_per_token_seconds_count|vllm:time_per_output_token_seconds_count|llama:end_to_end_response_seconds_count|llamacpp:end_to_end_response_seconds_count|llamacpp:requests_seconds_count|llamacpp:request_seconds_count|vllm:e2e_request_latency_seconds_count\"})",
-              "legendFormat": "summary/histogram _count series",
+              "expr": "count by (instance, job) ({__name__=~\"llama:time_to_first_token_seconds_count|llamacpp:time_to_first_token_seconds_count|llamacpp:ttft_seconds_count|vllm:time_to_first_token_seconds_count|llama:time_per_output_token_seconds_count|llamacpp:time_per_output_token_seconds_count|llamacpp:time_per_token_seconds_count|vllm:time_per_output_token_seconds_count|llama:end_to_end_response_seconds_count|llamacpp:end_to_end_response_seconds_count|llamacpp:requests_seconds_count|llamacpp:request_seconds_count|vllm:e2e_request_latency_seconds_count\",job=~\"$job\",instance=~\"$instance\"})",
+              "legendFormat": "_count series (a mean is possible)",
               "range": true,
               "refId": "A",
               "interval": "15s",
@@ -1931,8 +1931,8 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "count by (instance, job) ({__name__=~\"llama:time_to_first_token_seconds_bucket|llamacpp:time_to_first_token_seconds_bucket|llamacpp:ttft_seconds_bucket|vllm:time_to_first_token_seconds_bucket\"})",
-              "legendFormat": "TTFT buckets",
+              "expr": "count by (instance, job) ({__name__=~\"llama:time_to_first_token_seconds_bucket|llamacpp:time_to_first_token_seconds_bucket|llamacpp:ttft_seconds_bucket|vllm:time_to_first_token_seconds_bucket\",job=~\"$job\",instance=~\"$instance\"})",
+              "legendFormat": "buckets on the TTFT family",
               "range": true,
               "refId": "A",
               "interval": "15s",
