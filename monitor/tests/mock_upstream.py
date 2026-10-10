@@ -22,6 +22,9 @@ Modes:
     free        /cache reports free space instead of used space
     nometrics   everything is healthy except /metrics, which 404s (a server that
                 does not expose metrics at all)
+    huge        /metrics answers thousands of series (to exercise the series and
+                body-size caps of the scrape passthrough)
+    unicode     /metrics as healthy, plus non-ASCII label values
     empty       every route answers 204 with no body
     plain       every route answers text/plain (a stock llama.cpp /health)
     broken      every route answers 500
@@ -153,8 +156,35 @@ totally unparsable here
 """,
 }
 
+def huge_metrics_body(series: int = 2600) -> str:
+    """A /metrics body with more series than ``serve.MAX_SERIES`` and, at
+    default sizes, more bytes than a test wants to patch down to."""
+    lines = [
+        '# HELP huge:generated_series_total A synthetic per-something counter.',
+        '# TYPE huge:generated_series_total counter',
+    ]
+    lines += [
+        'huge:generated_series_total{index="%d",model="qwen3-27b"} %d' % (i, i * 3)
+        for i in range(series)
+    ]
+    return "\n".join(lines) + "\n"
+
+
 #: Content-Type of a real /metrics response (nginx reports version 0.0.4).
 METRICS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
+
+# Same as "healthy" plus label values that are not ASCII. Legal exposition text
+# (label *values* are free-form; metric names are not), and the case where a
+# passthrough that decodes and re-encodes instead of copying bytes shows up:
+# everything non-ASCII silently becomes U+FFFD.
+METRICS_BODIES["unicode"] = METRICS_BODIES["healthy"] + "\n".join(
+    [
+        "# HELP llamacpp:request_prompt_chars Prompt characters, by language.",
+        "# TYPE llamacpp:request_prompt_chars counter",
+        'llamacpp:request_prompt_chars{lang="日本語",note="naïve ✓"} 42',
+        'llamacpp:request_prompt_chars{lang="español"} 7',
+    ]
+) + "\n"
 
 
 class MockUpstreamHandler(BaseHTTPRequestHandler):
@@ -227,6 +257,13 @@ class MockUpstreamHandler(BaseHTTPRequestHandler):
                 # A server that simply does not have the route (vLLM, old llama.cpp).
                 self._reply(404, {"error": "this server does not expose /metrics"})
                 return
+            if mode == "huge":
+                self._reply(
+                    200,
+                    huge_metrics_body(getattr(self.server, "huge_series", 2600)),
+                    METRICS_CONTENT_TYPE,
+                )
+                return
             self._reply(
                 200,
                 METRICS_BODIES.get(mode, METRICS_BODIES["healthy"]),
@@ -275,7 +312,7 @@ def main() -> int:
         default="healthy",
         choices=sorted(
             set(list(CACHE_BODIES) + list(METRICS_BODIES))
-            | {"broken", "plain", "empty", "wedged", "nometrics"}
+            | {"broken", "plain", "empty", "wedged", "nometrics", "huge"}
         ),
     )
     args = parser.parse_args()

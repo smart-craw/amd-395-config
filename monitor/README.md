@@ -195,6 +195,36 @@ reason, because a scrape that silently returns garbage is worse than a failed
 scrape. Exposing it past loopback is an information-disclosure decision: the whole
 exposition (model ids, traffic shape, prompt-cache behaviour) is in that body.
 
+### The `llm_monitor_*` self-metrics
+
+Every successful passthrough appends the monitor's own series (ADR 0001, C2) —
+underscores because they are ours, next to the upstream's untouched colon-names:
+
+| series | type | meaning |
+| ------------------------ | ------- | ---------------------------------------- |
+| `llm_monitor_scrape_success_total{upstream}`  | counter | passthrough scrapes of that upstream that returned exposition text |
+| `llm_monitor_scrape_ok{upstream}`             | gauge   | 1 when the most recent scrape of it succeeded |
+| `llm_monitor_scrape_latency_ms{upstream}`     | gauge   | round-trip time of the most recent scrape |
+| `llm_monitor_scrape_upstream_status{upstream}`| gauge   | upstream HTTP status of it (`0` = no answer) |
+| `llm_monitor_parse_errors_total{upstream}`    | counter | exposition lines this proxy could not parse |
+| `llm_monitor_parse_truncated{upstream}`       | gauge   | 1 when the series cap (`MAX_SERIES`) cut the last scrape short |
+| `llm_monitor_series_count{upstream}`          | gauge   | series kept from the last successful scrape |
+| `llm_monitor_build_info{version}`             | gauge   | constant 1; labels carry the monitor version |
+
+Counters are process-lifetime (a monitor restart *is* a counter reset, which
+PromQL handles), and a scrape of `/metrics?url=A` renders **only** A's row, so
+`sum(llm_monitor_*)` across targets never double-counts.
+`rate(llm_monitor_scrape_success_total[5m])` is the canonical "is the monitor
+actually scraping" signal.
+
+Bounds: the upstream body is capped at `MAX_BODY_BYTES` (4 MiB) exactly as the
+other routes are, and a body that hits the cap says so — a
+`# llm-monitor: upstream body truncated at … bytes; this scrape is incomplete`
+comment line is appended rather than a torn scrape being handed over as if it were
+whole. The parsed self-metrics reflect the `MAX_SERIES` (2000) cap via
+`llm_monitor_parse_truncated` / `llm_monitor_series_count`; the body itself is
+still the upstream's own bytes.
+
 ## The envelope
 
 All six `/api/*` routes answer with the same shape, and always with HTTP 200
@@ -343,8 +373,9 @@ banner.
 
 `tests/mock_upstream.py` is that stand-in, kept as a script so it can be used
 both by the tests and by hand, with modes for the pathological cases
-(`healthy`, `weird`, `free`, `plain`, `empty`, `broken`, `wedged`, and `nometrics`
-for a server whose `/metrics` answers 404):
+(`healthy`, `weird`, `free`, `plain`, `empty`, `broken`, `wedged`, `nometrics`
+for a server whose `/metrics` answers 404, `huge` for a `/metrics` with thousands
+of series, and `unicode` for one whose label values are not ASCII):
 
 ```sh
 python3 monitor/tests/mock_upstream.py --port 8001 --mode healthy
@@ -362,7 +393,7 @@ node --test "monitor/tests/*.test.mjs"                         # the dashboard U
 
 | file                      | what it pins down                                                            |
 | ------------------------- | ---------------------------------------------------------------------------- |
-| `tests/test_serve.py`     | the JSON envelope, `?url=` override + validation, the 5 s cap per upstream request, dead / 5xx / non-JSON upstreams, the Prometheus parser (labels, NaN/Inf, garbage lines, the series cap), static hosting (bodies really get copied), traversal-proofing |
+| `tests/test_serve.py`     | the JSON envelope, `?url=` override + validation, the 5 s cap per upstream request, dead / 5xx / non-JSON upstreams, the Prometheus parser (labels, NaN/Inf, garbage lines, the series cap), static hosting (bodies really get copied), traversal-proofing, and the `/metrics` scrape passthrough (verbatim bytes + Content-Type, `llm_monitor_*` self-metrics, 502 on a failed scrape, `?url=` rejection, the size/series caps, a stalled scrape not blocking the UI polls) |
 | `tests/test_static.py`    | contracts no browser would warn about: every id app.js looks up exists, every class it toggles is styled, no off-box asset, upstream data never reaches `innerHTML` |
 | `tests/test_app.test.mjs` | the real app.js in a headless DOM against a live `serve.py`: first paint, retargeting without a reload, an unknown `/cache` shape, the metrics tiles/gauge/chart, a server without `/metrics`, the unreachable-upstream path, zero uncaught errors |
 | `tests/frontend_dom.mjs`  | the miniature DOM the last file needs (parses `index.html`, runs `app.js` unmodified) |

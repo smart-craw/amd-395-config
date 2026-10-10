@@ -18,7 +18,9 @@ byte, with ``Content-Type: text/plain; version=0.0.4; charset=utf-8`` and the
 proxy's own ``llm_monitor_*`` series appended, so a real Prometheus can pull
 through here when it cannot reach the model server directly. See
 ``monitoring/README.md`` for the two-layer architecture (Prometheus/Grafana owns
-history; this page is the "right now" view).
+history; this page is the "right now" view). A body over ``MAX_BODY_BYTES`` is
+capped like every other upstream response and the truncation is said out loud in a
+comment line rather than hidden.
 
 The proxy exists because the model server (llama.cpp / vLLM style) does not send
 CORS headers, so a page served from another origin could not poll it directly.
@@ -523,13 +525,20 @@ def describe_bytes(raw: bytes, content_type: str) -> object:
         return text
 
 
-def read_body(response, *, deadline: float, timeout: float) -> bytes:
+def read_body(
+    response, *, deadline: float, timeout: float, cut: list | None = None
+) -> bytes:
     """Drain ``response`` honouring ``deadline`` and :data:`MAX_BODY_BYTES`.
 
     ``urlopen(timeout=...)`` bounds every *single* socket operation, not the
     request as a whole, so a server that trickles a byte every few seconds could
     keep a request open forever. Reading in chunks and re-checking the wall-clock
     deadline between reads keeps the per-request cap honest.
+
+    ``cut`` (optional) is a list the size cap appends ``True`` to, so a caller can
+    tell "the whole body" from "the first :data:`MAX_BODY_BYTES` of it" -- the
+    passthrough uses that to say so out loud instead of handing out a torn body
+    that looks complete.
     """
     # read1() returns as soon as *any* data is available; read(n) happily blocks
     # until it has n bytes (or the stream ends), which for a chunked body that
@@ -546,6 +555,8 @@ def read_body(response, *, deadline: float, timeout: float) -> bytes:
         chunks.append(chunk)
         total += len(chunk)
         if total >= MAX_BODY_BYTES:
+            if cut is not None:
+                cut.append(True)
             return b"".join(chunks)[:MAX_BODY_BYTES]
 
 
@@ -705,6 +716,7 @@ def fetch_raw(url: str, *, deadline: float, timeout: float = UPSTREAM_TIMEOUT_SE
     envelope would wrap it in JSON, and Prometheus could eat neither.
     """
     started = time.monotonic()
+    cut: list[bool] = []
 
     def elapsed_ms() -> float:
         return (time.monotonic() - started) * 1000.0
@@ -728,13 +740,14 @@ def fetch_raw(url: str, *, deadline: float, timeout: float = UPSTREAM_TIMEOUT_SE
             "content_type": content_type,
             "body": raw or b"",
             "error": error,
+            "truncated": bool(cut),
         }
 
     try:
         with urlrequest.urlopen(req, timeout=timeout) as resp:
             status = int(resp.status)
             content_type = resp.headers.get("Content-Type") or ""
-            raw = read_body(resp, deadline=deadline, timeout=timeout)
+            raw = read_body(resp, deadline=deadline, timeout=timeout, cut=cut)
         if 200 <= status < 400:
             return outcome(
                 ok=True, status=status, raw=raw, error=None, content_type=content_type
@@ -791,6 +804,7 @@ def proxy_raw(url: str, *, timeout: float = UPSTREAM_TIMEOUT_SECONDS) -> dict:
                 "content_type": "",
                 "body": b"",
                 "error": f"{type(exc).__name__}: {exc}",
+                "truncated": False,
             }
 
     thread = threading.Thread(target=worker, name="llm-monitor-scrape", daemon=True)
@@ -807,6 +821,7 @@ def proxy_raw(url: str, *, timeout: float = UPSTREAM_TIMEOUT_SECONDS) -> dict:
         "content_type": "",
         "body": b"",
         "error": f"timed out after {timeout:g}s",
+        "truncated": False,
     }
 
 
@@ -838,6 +853,15 @@ def render_passthrough(result: dict, stats: "ScrapeStats", upstream: str) -> byt
     )
     if raw and not raw.endswith(b"\n"):
         raw += b"\n"
+    if result.get("truncated"):
+        # A body cut off at the cap is not the exposition: say so in a comment
+        # line (which every Prometheus parser ignores) rather than let a torn
+        # scrape look complete.
+        raw += (
+            b"# llm-monitor: upstream body truncated at "
+            + str(MAX_BODY_BYTES).encode("ascii")
+            + b" bytes; this scrape is incomplete\n"
+        )
     marker = (
         b"# llm-monitor "
         + VERSION.encode("ascii")
@@ -1268,12 +1292,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Scrape passthrough (plain text, NOT an envelope):\n"
             "  GET /metrics -> <upstream>/metrics verbatim + llm_monitor_*\n"
             "     self-metrics; a non-2xx upstream answers 502 with a one-line\n"
-            "     reason so Prometheus records a scrape failure.\n\n"
+            "     reason so Prometheus records a scrape failure.\n"
+            "     Appended: llm_monitor_scrape_success_total, llm_monitor_scrape_ok,\n"
+            "     llm_monitor_scrape_latency_ms,\n"
+            "     llm_monitor_scrape_upstream_status,\n"
+            "     llm_monitor_parse_errors_total, llm_monitor_parse_truncated,\n"
+            "     llm_monitor_series_count, llm_monitor_build_info{version=\"...\"}.\n\n"
             "Each proxy route accepts ?url=<http(s) base> to override the\n"
             "upstream for that one request (so /metrics?url=A and\n"
             "/metrics?url=B can be scraped as separate targets).\n\n"
             f"Upstream precedence: --url > ${ENV_UPSTREAM} > {DEFAULT_UPSTREAM}\n\n"
-            "Information disclosure: ?url= lets a caller make this server fetch\n"
+            "INFORMATION DISCLOSURE: ?url= lets a caller make this server fetch\n"
             "an arbitrary URL, and GET /metrics hands out the whole exposition\n"
             "(model ids, traffic shape, prompt-cache behaviour). That is why the\n"
             "bind address defaults to loopback; --host 0.0.0.0 is a deliberate\n"
@@ -1310,7 +1339,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--host",
         default=DEFAULT_HOST,
-        help=f"bind address (default {DEFAULT_HOST})",
+        help=(
+            f"bind address (default {DEFAULT_HOST}, loopback; --host 0.0.0.0 is an "
+            "information-disclosure decision -- see INFORMATION DISCLOSURE below)"
+        ),
     )
     parser.add_argument(
         "--port",

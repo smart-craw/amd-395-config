@@ -84,6 +84,8 @@ Monitoring is two layers (see [ADR 0001](./docs/adr/0001-prometheus-grafana-owns
 python3 monitor/serve.py --url http://llm.home:8080 --port 8090
 ```
 
+Prometheus can scrape through the proxy instead of reaching the model server directly: point a job at the proxy with `metrics_path: /metrics`, and use `/metrics?url=http://llm.home:8001` to front several servers from one proxy.  The body is the upstream exposition text verbatim plus the proxy's own `llm_monitor_*` series (scrape success, latency, upstream status, parse errors, series count, build info), so "is the monitor actually scraping?" is a PromQL question.  Like `?url=`, that route is an information-disclosure decision -- it hands out model ids, traffic shape and prompt-cache behaviour -- which is why the default bind address is loopback and `--host 0.0.0.0` stays deliberate.
+
 There is a `llm-monitor.service` systemd user unit for it, installed the same way as `llm-server.service`.  See [monitor/README.md](monitor/README.md).
 
 ## Other altneratives
