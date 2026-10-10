@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="en">
+  <head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="description" content="Local dashboard for a vLLM / llama.cpp style LLM server: health, models and cache.">
+  <title>llm monitor</title>
+  <!-- Inline favicon: keeps the page free of any request outside its own origin. -->
+  <link rel="icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHZpZXdCb3g9JzAgMCAzMiAzMic+PHJlY3Qgd2lkdGg9JzMyJyBoZWlnaHQ9JzMyJyByeD0nNycgZmlsbD0nJTIzMTUxYTIxJy8+PHBhdGggZD0nTTUgMjFsNi04IDUgNSA0LTYgNyA5JyBmaWxsPSdub25lJyBzdHJva2U9JyUyMzRjYzJmZicgc3Ryb2tlLXdpZHRoPScyLjUnIHN0cm9rZS1saW5lam9pbj0ncm91bmQnIHN0cm9rZS1saW5lY2FwPSdyb3VuZCcvPjwvc3ZnPg==">
+  <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+  <a class="skip-link" href="#cards">Skip to metrics</a>
+
+  <!--
+    Everything below is plain HTML/CSS/JS. Data comes from the same-origin proxy
+    in monitor/serve.py (api/health, api/models, api/cache, api/config), so there
+    is no cross-origin call and no asset loaded from anywhere but this directory.
+  -->
+
+  <header class="topbar">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+        <rect width="32" height="32" rx="7" class="brand-plate"></rect>
+        <path d="M5 21l6-8 5 5 4-6 7 9" class="brand-line"></path>
+      </svg>
+      <span class="brand-name">llm&nbsp;monitor</span>
+      <span class="brand-sub">vLLM / llama.cpp</span>
+    </div>
+
+    <div class="status-cluster">
+      <p id="status-pill" class="pill pill-pending" role="status" aria-live="polite">
+        <span class="pill-dot" aria-hidden="true"></span>
+        <span id="status-text">starting…</span>
+      </p>
+      <p class="target-line">
+        <span class="target-key">upstream</span>
+        <code id="target-upstream" class="target-value" title="currently polled upstream base URL">—</code>
+      </p>
+      <p class="clock-line">
+        <span id="last-updated">never updated</span>
+        <span class="dot-sep" aria-hidden="true">·</span>
+        <span id="next-poll">—</span>
+      </p>
+    </div>
+  </header>
+
+  <main class="page">
+    <section class="controls" aria-label="Monitor controls">
+      <form id="upstream-form" class="control control-upstream" novalidate>
+        <label class="control-label" for="upstream-input">Upstream endpoint</label>
+        <div class="field-row">
+          <input
+            id="upstream-input"
+            name="upstream"
+            type="text"
+            class="text-input"
+            spellcheck="false"
+            autocapitalize="off"
+            autocomplete="off"
+            autocorrect="off"
+            dir="ltr"
+            placeholder="host:port of the model server"
+            aria-describedby="upstream-help"
+          >
+          <button id="apply-upstream" type="submit" class="btn btn-primary">Apply</button>
+        </div>
+        <p id="upstream-error" class="field-error" role="alert" hidden></p>
+        <p id="upstream-help" class="field-help">
+          Saved in this browser, then re-polled immediately — no reload needed.
+        </p>
+        <div id="preset-row" class="presets" role="group" aria-label="Preset upstreams"></div>
+      </form>
+
+      <div class="control control-poll">
+        <span class="control-label" id="poll-label">Poll interval</span>
+        <div id="poll-interval" class="segmented" role="group" aria-labelledby="poll-label"></div>
+        <button id="refresh-now" type="button" class="btn btn-ghost">Refresh now</button>
+      </div>
+    </section>
+
+    <div id="banner" class="banner" role="alert" hidden>
+      <strong id="banner-title">Every endpoint failed.</strong>
+      <span id="banner-text"></span>
+    </div>
+
+    <section id="cards" class="cards" aria-label="Endpoint metrics">
+      <!-- health ---------------------------------------------------------- -->
+      <article class="card" id="card-health" aria-labelledby="health-title">
+        <header class="card-head">
+          <div class="card-heading">
+            <h2 id="health-title">Health</h2>
+            <code class="card-path">/health</code>
+          </div>
+          <span id="health-badge" class="badge badge-neutral">—</span>
+        </header>
+
+        <div class="card-body">
+          <div class="metric-grid">
+            <div class="metric">
+              <span class="metric-label">status</span>
+              <span id="health-status" class="metric-value">—</span>
+            </div>
+            <div class="metric">
+              <span class="metric-label">http code</span>
+              <span id="health-code" class="metric-value num">—</span>
+            </div>
+            <div class="metric">
+              <span class="metric-label">latency</span>
+              <span id="health-latency" class="metric-value num">—</span>
+            </div>
+            <div class="metric">
+              <span class="metric-label">last check</span>
+              <span id="health-last" class="metric-value num">—</span>
+            </div>
+            <div class="metric metric-wide">
+              <span class="metric-label">uptime</span>
+              <span id="health-uptime" class="metric-value num" title="how long this dashboard has been getting healthy polls">—</span>
+            </div>
+          </div>
+          <dl class="kv" id="health-extra"></dl>
+        </div>
+
+        <footer class="card-foot">
+          <div class="chart">
+            <div class="chart-head">
+              <span class="chart-title">latency</span>
+              <span id="health-spark-stats" class="chart-stats num">awaiting data</span>
+            </div>
+            <svg id="health-spark" class="spark" viewBox="0 0 300 60" preserveAspectRatio="none"
+                 role="img" aria-label="rolling latency history for /health"></svg>
+          </div>
+          <div class="card-foot-row">
+            <span id="health-stale" class="chip chip-stale" hidden>stale</span>
+            <span id="health-error" class="card-error" hidden>
+              <span id="health-error-text" class="card-error-text"></span>
+              <button type="button" class="btn btn-retry" data-endpoint="health">Retry</button>
+            </span>
+          </div>
+        </footer>
+      </article>
+
+      <!-- models ---------------------------------------------------------- -->
+      <article class="card" id="card-models" aria-labelledby="models-title">
+        <header class="card-head">
+          <div class="card-heading">
+            <h2 id="models-title">Models</h2>
+            <code class="card-path">/v1/models</code>
+          </div>
+          <span id="models-badge" class="badge badge-neutral">—</span>
+        </header>
+
+        <div class="card-body">
+          <div class="table-wrap">
+            <table class="table" id="models-table">
+              <caption class="sr-only">Models reported by the upstream /v1/models endpoint</caption>
+              <thead>
+                <tr>
+                  <th scope="col">id</th>
+                  <th scope="col">object</th>
+                  <th scope="col">owned_by</th>
+                  <th scope="col">created</th>
+                </tr>
+              </thead>
+              <tbody id="models-body"></tbody>
+            </table>
+          </div>
+          <p id="models-empty" class="empty-state" hidden>no models served</p>
+        </div>
+
+        <footer class="card-foot">
+          <div class="chart">
+            <div class="chart-head">
+              <span class="chart-title">latency</span>
+              <span id="models-spark-stats" class="chart-stats num">awaiting data</span>
+            </div>
+            <svg id="models-spark" class="spark" viewBox="0 0 300 60" preserveAspectRatio="none"
+                 role="img" aria-label="rolling latency history for /v1/models"></svg>
+          </div>
+          <div class="card-foot-row">
+            <span id="models-stale" class="chip chip-stale" hidden>stale</span>
+            <span id="models-error" class="card-error" hidden>
+              <span id="models-error-text" class="card-error-text"></span>
+              <button type="button" class="btn btn-retry" data-endpoint="models">Retry</button>
+            </span>
+          </div>
+        </footer>
+      </article>
+
+      <!-- cache ----------------------------------------------------------- -->
+      <article class="card" id="card-cache" aria-labelledby="cache-title">
+        <header class="card-head">
+          <div class="card-heading">
+            <h2 id="cache-title">Cache</h2>
+            <code class="card-path">/cache</code>
+          </div>
+          <span id="cache-badge" class="badge badge-neutral">—</span>
+        </header>
+
+        <div class="card-body">
+          <div class="gauge">
+            <div class="gauge-top">
+              <span id="cache-gauge-label" class="gauge-label">utilization</span>
+              <span id="cache-gauge-value" class="gauge-value num">—</span>
+            </div>
+            <div id="cache-bar" class="bar" role="progressbar"
+                 aria-label="cache utilization" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+              <div id="cache-bar-fill" class="bar-fill"></div>
+            </div>
+            <p id="cache-gauge-sub" class="gauge-sub">awaiting /cache data</p>
+          </div>
+          <dl class="kv" id="cache-kv"></dl>
+          <details class="raw" id="cache-raw" hidden>
+            <summary>raw response</summary>
+            <pre id="cache-raw-json" class="raw-json num"></pre>
+          </details>
+        </div>
+
+        <footer class="card-foot">
+          <div class="chart">
+            <div class="chart-head">
+              <span class="chart-title">latency</span>
+              <span id="cache-spark-stats" class="chart-stats num">awaiting data</span>
+            </div>
+            <svg id="cache-spark" class="spark" viewBox="0 0 300 60" preserveAspectRatio="none"
+                 role="img" aria-label="rolling latency history for /cache"></svg>
+          </div>
+          <div class="card-foot-row">
+            <span id="cache-stale" class="chip chip-stale" hidden>stale</span>
+            <span id="cache-error" class="card-error" hidden>
+              <span id="cache-error-text" class="card-error-text"></span>
+              <button type="button" class="btn btn-retry" data-endpoint="cache">Retry</button>
+            </span>
+          </div>
+        </footer>
+      </article>
+    </section>
+
+    <footer class="page-foot">
+      <span>served by <code>monitor/serve.py</code> — same-origin proxy, no external assets</span>
+      <span id="foot-uptime" class="num"></span>
+    </footer>
+  </main>
+
+  <script src="app.js"></script>
+  </body>
+</html>

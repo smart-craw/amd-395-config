@@ -374,7 +374,7 @@ class MonitorHandler(SimpleHTTPRequestHandler):
                     include_body,
                 )
             else:
-                self._serve_static()
+                self._serve_static(include_body)
         except BrokenPipeError:
             pass  # client went away mid-response; nothing useful to do
         except Exception as exc:  # noqa: BLE001 - never kill the worker thread
@@ -455,18 +455,25 @@ class MonitorHandler(SimpleHTTPRequestHandler):
 
     # -- static --------------------------------------------------------------
 
-    def _serve_static(self) -> None:
+    def _serve_static(self, include_body: bool) -> None:
         if not STATIC_DIR.is_dir():
             self.send_error(
                 HTTPStatus.NOT_FOUND,
                 "No static files (monitor/static/ does not exist yet)",
             )
             return
-        # send_head() serves the file, sets Content-Type/Length, and returns
-        # without a body for HEAD requests.
+        # send_head() only writes the status line + headers and hands back the
+        # open file; the body has to be copied by the caller (that is what
+        # SimpleHTTPRequestHandler.do_GET does). Skipping that step answers 200
+        # with a Content-Length but zero bytes, and the client then hangs until
+        # it times out. HEAD gets the headers only, which is correct.
         fobj = self.send_head()
         if fobj is not None:
-            fobj.close()
+            try:
+                if include_body:
+                    self.copyfile(fobj, self.wfile)
+            finally:
+                fobj.close()
 
     def list_directory(self, path):  # noqa: ANN201 - directory listings off
         """Never expose a directory listing; 404 instead."""
