@@ -16,9 +16,10 @@ proxies a handful of read-only GETs to the model server:
 JSON envelope: it answers the exposition body the model server sent, byte for
 byte, with ``Content-Type: text/plain; version=0.0.4; charset=utf-8`` and the
 proxy's own ``llm_monitor_*`` series appended, so a real Prometheus can pull
-through here when it cannot reach the model server directly. See
-``monitoring/README.md`` for the two-layer architecture (Prometheus/Grafana owns
-history; this page is the "right now" view). A body over ``MAX_BODY_BYTES`` is
+through here when it cannot reach the model server directly. The two-layer
+architecture (Prometheus/Grafana owns history; this page is the "right now" view)
+is decided in ``docs/adr/0001-prometheus-grafana-owns-metrics.md``, and the scrape
+job itself lives under ``monitoring/``. A body over ``MAX_BODY_BYTES`` is
 capped like every other upstream response and the truncation is said out loud in a
 comment line rather than hidden.
 
