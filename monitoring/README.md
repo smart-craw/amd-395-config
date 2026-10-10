@@ -580,7 +580,12 @@ so the checker never becomes the reason a box can't verify itself.
 * **A committed `.env`.** It holds the admin password; only `.env.example` is in
   git, and `.gitignore` keeps the real one out.
 * **Monitoring of the box itself** (CPU, RAM, GPU, disk). This stack watches the
-  model server; node metrics are a separate decision with its own memory cost.
+  model server. The host/GPU half was spiked in `workspace-szw.10` —
+  see [`../spikes/amd-gpu-metrics/FINDINGS.md`](../spikes/amd-gpu-metrics/FINDINGS.md),
+  which picks `node_exporter --collector.drm` (no ROCm, ~24 MiB, 13 GPU series)
+  and measures it against the footprint budget. Deploying it is
+  `workspace-szw.13`; until that ticket closes, GPU and host metrics are
+  deliberately *not* here.
 
 ## <a name="runbook"></a>Runbook
 

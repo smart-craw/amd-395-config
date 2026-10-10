@@ -70,6 +70,12 @@ jobs:
       - name: Structure and cross-file checks
         run: python3 monitoring/check_monitoring.py --promtool
 
+      # The AMD GPU spike's sysfs reader is stdlib-only and ships a fixture, so its
+      # "an unreadable attribute is absent, never zero" rule stays enforced rather
+      # than becoming folklore. Needs no GPU and no network.
+      - name: GPU spike — sysfs reader tests
+        run: python3 -m unittest discover -s spikes/amd-gpu-metrics -p "test_*.py"
+
       - name: promtool — config, rules, alert unit tests
         run: |
           set -euo pipefail
