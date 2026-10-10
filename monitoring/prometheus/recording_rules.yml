@@ -1,0 +1,52 @@
+# Recording rules: the neutral `llm:*` aliases the ADR (workspace-szw.1) promises
+# as the place vendor name-drift is absorbed.
+#
+# These exist so hand-written queries and future alert rules can say
+# `llm:decode_tokens_per_second` instead of guessing between
+# `llamacpp:*`, `halogen:*`, `llama:*` and `vllm:*` once more than one serving
+# stack is on the box. They are written every evaluation_interval, so they appear
+# in the TSDB ~15s after the source counter is first scraped.
+#
+# The provisioned dashboard does NOT depend on them (its panels spell the raw
+# expressions out, so it renders on a server that has never seen these rules) —
+# see monitoring/README.md "Recording rules vs raw PromQL in panels".
+#
+# Not generated; no thresholds involved. Committed and validated by
+# `promtool check rules monitoring/prometheus/recording_rules.yml`.
+
+groups:
+  - name: llm-aliases
+    interval: 30s
+    rules:
+      # Generation throughput, windowed — the correct version of the server's own
+      # "average since last scrape" gauge llamacpp:predicted_tokens_seconds.
+      # The {__name__=~...} selector is the vendor-drift seam: add the next
+      # stack's counter name here once, not in every panel and alert.
+      - record: llm:decode_tokens_per_second
+        expr: >-
+          sum(rate({__name__=~"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total"}[5m]))
+
+      - record: llm:prompt_tokens_per_second
+        expr: 'sum(rate({__name__=~"llamacpp:prompt_tokens_total|vllm:prompt_tokens_total"}[5m]))'
+
+      - record: llm:requests_per_second
+        expr: 'sum(rate({__name__=~"halogen:requests_total|llamacpp:requests_total"}[5m]))'
+
+      # Prompt-cache hit ratio over 5m. The `+ cached` in the denominator is the
+      # llama.cpp convention: processed counts only the tokens that missed.
+      - record: llm:prompt_cache_hit_ratio
+        expr: >-
+          sum(rate(halogen:prompt_tokens_cached_total[5m]))
+          /
+          clamp_min(sum(rate(llamacpp:prompt_tokens_total[5m])) + sum(rate(halogen:prompt_tokens_cached_total[5m])), 1)
+
+      # Speculative-decode acceptance over 5m. clamp_min kills the 0/0 -> NaN
+      # spike a restart leaves behind.
+      - record: llm:draft_acceptance_ratio
+        expr: >-
+          sum(rate(halogen:draft_tokens_accepted_total[5m]))
+          /
+          clamp_min(sum(rate(halogen:draft_tokens_total[5m])), 1)
+
+      - record: llm:kv_cache_usage_ratio
+        expr: 'max(llamacpp:kv_cache_usage_ratio)'

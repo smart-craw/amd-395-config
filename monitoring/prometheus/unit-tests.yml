@@ -1,0 +1,286 @@
+# promtool unit tests for the alert rules — `promtool test rules` runs this file.
+#
+#   promtool test rules monitoring/prometheus/unit-tests.yml      # from repo root
+#   make -C monitoring test-alerts                                # ditto, via the helper
+#
+# Every alert has at least one firing and one non-firing scenario, so a threshold
+# that is edited into nonsense (or a metric name that drifts) fails CI instead of
+# quietly never firing at 03:00. rule_files points at the GENERATED rules.yml: if
+# rules.yml is stale relative to alert_thresholds.env, the render check in CI
+# fails first.
+
+rule_files:
+  - rules.yml
+  - recording_rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  # ---------------------------------------------------------------- availability
+  - interval: 1m
+    input_series:
+      - series: 'up{job="llm-server", instance="llm.home:8001"}'
+        values: '1 1 1 1 0 0 0 0 0 0 0 0 0 0 0'
+    alert_rule_test:
+      # up goes to 0 at 4m; SERVER_DOWN_FOR is 2m -> pending at 4m, firing at 6m.
+      - eval_time: 3m
+        alertname: LLMServerDown
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: LLMServerDown
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: LLMServerDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              team: llm
+              job: llm-server
+              instance: llm.home:8001
+            exp_annotations:
+              summary: "The model server is not answering /metrics: every request to it will fail or queue until it comes back. Check systemctl --user status llm-server, then whether the port in monitoring/prometheus/targets/llm-servers.json is the one the server actually listens on."
+
+  - interval: 1m
+    input_series:
+      # A healthy server whose metrics are present: LLMMetricsAbsent must stay dark.
+      - series: 'llamacpp:tokens_predicted_total{job="llm-server", instance="llm.home:8001"}'
+        values: '0+100x12'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: LLMMetricsAbsent
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      # The shape of mock mode "nometrics": the target is up, no model metrics.
+      - series: 'up{job="llm-server", instance="llm.home:8001"}'
+        values: '1x12'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: LLMMetricsAbsent
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: LLMMetricsAbsent
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: llm
+            exp_annotations:
+              summary: "No model-server metrics have been scraped for 5m, so Grafana will read \"No data\" even if the server is healthy. The monitor page is still fully usable \u2014 it reads /health, /v1/models and /cache, which are not Prometheus metrics. Usual causes: the server has no /metrics route at all (stock llama.cpp build, mock mode \"nometrics\"), it answers /metrics with JSON or 404, or the scrape job is mispointed. A server that never exposes /metrics is a supported configuration: silence this alert rather than distrust the dashboard."
+
+  # ------------------------------------------------------------------- monitor
+  - interval: 1m
+    input_series:
+      - series: 'llm_monitor_scrape_ok{upstream="http://llm.home:8001"}'
+        values: '1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'llm_monitor_build_info{version="1.1.0"}'
+        values: '1x16'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: LLMScrapeFailing
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: LLMScrapeFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: llm
+              upstream: http://llm.home:8001
+            exp_annotations:
+              summary: "The monitor is up but its own scrape of the model server has been failing for 5m: the live page and the passthrough are serving stale or empty data, so a flat-lined Grafana panel right now means \"the monitor is blind\", not \"the model is idle\". Look at journalctl --user -u llm-monitor and curl the proxy's /metrics."
+
+  - interval: 1m
+    input_series:
+      - series: 'llm_monitor_build_info{version="1.1.0"}'
+        values: '1 1 1 1 1 1 1 1 1 1'
+    alert_rule_test:
+      # build_info is being scraped -> nothing is "absent".
+      - eval_time: 4m
+        alertname: LLMMonitorAbsent
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      # Nothing at all is scraped through the passthrough in this group.
+      - series: 'up{job="prometheus", instance="localhost:9090"}'
+        values: '1x30'
+    alert_rule_test:
+      # Nothing scraped the proxy for MONITOR_ABSENT_FOR (10m): that is a
+      # monitoring outage, not a model-server outage. (The non-firing case lives
+      # in the group above, where llm_monitor_build_info is being scraped.)
+      - eval_time: 12m
+        alertname: LLMMonitorAbsent
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: llm
+            exp_annotations:
+              summary: "Nothing has scraped the monitor's /metrics passthrough for 10m, so scrape health has no history: serve.py is not running, or the llm-server-via-proxy job is missing or mispointed (see the llm_upstream label in prometheus.yml)."
+
+  - interval: 1m
+    input_series:
+      - series: 'llm_monitor_parse_errors_total{upstream="http://llm.home:8001"}'
+        values: '0 0 0 1 1 1 1 1'
+      - series: 'llm_monitor_parse_errors_total{upstream="http://quiet.example:8001"}'
+        values: '0x8'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: LLMScrapeParseErrors
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: LLMScrapeParseErrors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: llm
+              upstream: http://llm.home:8001
+            exp_annotations:
+              summary: "The monitor could not parse part of the model server's /metrics in the last 10m: a metric family may be silently missing from the parsed views and from the KV/queueing alerts that read it. The unparsable lines are listed on the monitor page's metrics card (serve.py reports them as metrics.errors)."
+
+  # -------------------------------------------------------------------- pressure
+  - interval: 1m
+    input_series:
+      - series: 'llamacpp:kv_cache_usage_ratio{instance="llm.home:8001"}'
+        values: '0.5 0.5 0.98 0.98 0.98 0.98 0.98 0.98 0.98 0.98'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: LLMKVCachePressureWarn
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: LLMKVCachePressureCritical
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: LLMKVCachePressureWarn
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: llm
+              instance: llm.home:8001
+            exp_annotations:
+              summary: "The KV cache has been over 0.90 for 5m: new requests are about to wait for context space and long prompts start evicting cached prefixes, so latency climbs before anything actually fails."
+      - eval_time: 8m
+        alertname: LLMKVCachePressureCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              team: llm
+              instance: llm.home:8001
+            exp_annotations:
+              summary: "The KV cache is effectively full (over 0.97 for 2m): the server is in an eviction storm, prefills are being redone and throughput collapses under queueing. Shorten the context, lower the slot count, or stop the largest client."
+
+  - interval: 1m
+    input_series:
+      # Under the warn threshold: neither pressure rule may fire.
+      - series: 'llamacpp:kv_cache_usage_ratio{instance="llm.home:8001"}'
+        values: '0.4 0.6 0.85 0.85 0.85 0.85 0.85 0.85'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: LLMKVCachePressureWarn
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: LLMKVCachePressureCritical
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      - series: 'llamacpp:requests_deferred{instance="llm.home:8001"}'
+        values: '0 0 1 1 1 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: LLMQueueing
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: LLMQueueing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: llm
+              instance: llm.home:8001
+            exp_annotations:
+              summary: "Requests have been deferred for 5m: arrivals are waiting for a slot instead of generating, which is the \"why is it slow\" half of the picture; read it together with the KV-cache alerts."
+
+  # ------------------------------------------------------------------ behaviour
+  - interval: 1m
+    input_series:
+      # 100 tok/s for 40 minutes, then a ~100x drop: collapse vs its own baseline.
+      - series: 'llamacpp:tokens_predicted_total{instance="llm.home:8001"}'
+        values: '0+6000x40 240000+60x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: LLMDecodeThroughputCollapse
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: LLMDecodeThroughputCollapse
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: llm
+            exp_annotations:
+              summary: "Decode throughput has stayed below 0.5 of its own 1h baseline for 10m: generation is roughly twice as slow as this box just demonstrated, with no change in load. Usual suspects on this hardware: thermal or GTT pressure, a second model taking shared memory, or a speculative-decode path that stopped helping."
+
+  - interval: 1m
+    input_series:
+      # Steady 100 tok/s the whole time: no collapse.
+      - series: 'llamacpp:tokens_predicted_total{instance="llm.home:8001"}'
+        values: '0+6000x60'
+    alert_rule_test:
+      - eval_time: 55m
+        alertname: LLMDecodeThroughputCollapse
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      # 100 prompt tok/s of which ~2.4 tok/s are cache hits -> ratio ~0.02.
+      - series: 'llamacpp:prompt_tokens_total{instance="llm.home:8001"}'
+        values: '0+6000x25'
+      - series: 'halogen:prompt_tokens_cached_total{instance="llm.home:8001"}'
+        values: '0+144x25'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: LLMPromptCacheCold
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: LLMPromptCacheCold
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: llm
+              instance: llm.home:8001
+            exp_annotations:
+              summary: "The prompt cache is missing more than 0.20 of prompt tokens while traffic is flowing: something restarted, the cache is too small for the working set, or slots are evicting each other's prefixes \u2014 time-to-first-token is paying for it. halogen:* names only exist on the halogen front door, so on a plain llama.cpp server this rule has no data and stays dark."
+
+  - interval: 1m
+    input_series:
+      # Traffic is flowing and the cache is warm: must stay dark.
+      - series: 'llamacpp:prompt_tokens_total{instance="llm.home:8001"}'
+        values: '0+6000x30'
+      - series: 'halogen:prompt_tokens_cached_total{instance="llm.home:8001"}'
+        values: '0+60000x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: LLMPromptCacheCold
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      # The database stops taking samples from a target while it stays "up".
+      - series: 'up{job="llm-server", instance="stale.example:8001"}'
+        values: '1 1 1'
+      # Keeps the test window open: promtool ends a test group at the last sample
+      # of any series, and the eval times below are after this target goes quiet.
+      - series: 'prometheus_build_info{job="prometheus", instance="localhost:9090"}'
+        values: '1x11'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: LLMStaleTarget
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: LLMStaleTarget
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: llm
+              job: llm-server
+              instance: stale.example:8001
+            exp_annotations:
+              summary: "Samples from this target have stopped advancing: whatever is answering is replaying old data, so every panel reading it shows history as if it were now."

@@ -1,0 +1,2285 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "refresh": "15s",
+  "schemaVersion": 39,
+  "tags": [
+    "llm",
+    "llama.cpp",
+    "vllm",
+    "llm-monitor"
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "label": "Data source",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "query": "prometheus",
+        "current": {
+          "selected": true,
+          "text": "Prometheus",
+          "value": "prometheus"
+        },
+        "includeAll": false,
+        "multi": false,
+        "options": [],
+        "refresh": 1,
+        "regex": "",
+        "sort": 1,
+        "hide": 0,
+        "description": "The provisioned Prometheus (monitoring/grafana/provisioning/datasources)."
+      },
+      {
+        "name": "job",
+        "type": "query",
+        "label": "Job",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "query": "label_values(up, job)",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "options": [],
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "hide": 0,
+        "description": "llm-server scrapes the model server directly; llm-server-via-proxy scrapes it through monitor/serve.py and, by default, contributes only the monitor's own llm_monitor_* series \u2014 so leaving both selected does not double-count model-server series. If you change prometheus.yml so both carry the server's metrics, pick exactly one job here."
+      },
+      {
+        "name": "instance",
+        "type": "query",
+        "label": "Instance",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "query": "label_values(up{job=~\"$job\"}, instance)",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "options": [],
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "hide": 0,
+        "description": "Every scraped target. An empty result (no data yet) still means All = .* rather than an errored panel."
+      },
+      {
+        "name": "model",
+        "type": "query",
+        "label": "Model",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "query": "label_values({__name__=~\"llamacpp:kv_cache_tokens|llamacpp:prompt_tokens_total|vllm:prompt_tokens_total\",job=~\"$job\"}, model)",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "options": [],
+        "refresh": 2,
+        "regex": "",
+        "sort": 1,
+        "hide": 0,
+        "description": "Taken from the server's own model / model_name label where it has one. A server that labels nothing returns no values, All (=.*) is then the only option, and every panel still renders (grouped under 'unknown')."
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "15s",
+      "30s",
+      "1m",
+      "5m",
+      "15m",
+      "1h"
+    ],
+    "time_options": [
+      "1h",
+      "6h",
+      "24h",
+      "7d",
+      "30d"
+    ]
+  },
+  "timezone": "browser",
+  "title": "LLM Server",
+  "uid": "llm-server",
+  "version": 1,
+  "weekStart": "",
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Overview",
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": [
+        {
+          "id": 1,
+          "type": "stat",
+          "title": "Decode tok/s",
+          "description": "PromQL: sum(rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total\"}[$__rate_interval]))\n\nThe windowed rate over the counter \u2014 the correct version of the server's own llamacpp:predicted_tokens_seconds gauge, which is an average since the last scrape and restarts with the process.\n\nRate windows are $__rate_interval (at least 4 scrape intervals, so 15s scrapes get ~1m): short enough to see a collapse, long enough that a single dropped scrape is not a cliff. Counter resets and restarts are handled by rate(); gaps are drawn as gaps, never as 0.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 6,
+            "x": 0,
+            "y": 2
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum(rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))",
+              "legendFormat": "decode tok/s",
+              "range": true,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisLabel": "",
+                "drawStyle": "line",
+                "fillOpacity": 8,
+                "gradientMode": "none",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 4,
+                "showPoints": "auto",
+                "spanNulls": false,
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto"
+          }
+        },
+        {
+          "id": 2,
+          "type": "stat",
+          "title": "Prompt tok/s",
+          "description": "PromQL: sum(rate({__name__=~\"llamacpp:prompt_tokens_total|vllm:prompt_tokens_total\"}[$__rate_interval]))\n\nPrefill throughput. llama.cpp counts only the prompt tokens that MISSED the prompt cache in this counter, which is why the cache panel computes cached / (processed + cached) rather than cached / processed.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 6,
+            "x": 6,
+            "y": 2
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum(rate({__name__=~\"llamacpp:prompt_tokens_total|vllm:prompt_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))",
+              "legendFormat": "prompt tok/s",
+              "range": true,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisLabel": "",
+                "drawStyle": "line",
+                "fillOpacity": 8,
+                "gradientMode": "none",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 4,
+                "showPoints": "auto",
+                "spanNulls": false,
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto"
+          }
+        },
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "Requests in flight",
+          "description": "PromQL: sum(llamacpp:requests_processing) and sum(llamacpp:requests_deferred) \u2014 instant gauges, deliberately no rate(). deferred > 0 means the slot/KV budget is full and arrivals are waiting.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 6,
+            "x": 12,
+            "y": 2
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum({__name__=~\"llamacpp:requests_processing|vllm:num_requests_running\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})",
+              "legendFormat": "processing",
+              "range": true,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum({__name__=~\"llamacpp:requests_deferred|vllm:num_requests_waiting\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})",
+              "legendFormat": "deferred",
+              "range": true,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisLabel": "",
+                "drawStyle": "line",
+                "fillOpacity": 8,
+                "gradientMode": "none",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 4,
+                "showPoints": "auto",
+                "spanNulls": false,
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto"
+          }
+        },
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "KV cache used",
+          "description": "PromQL: max(llamacpp:kv_cache_usage_ratio) \u2014 a 0..1 ratio shown as a percentage. The same series the LLMKVCachePressure alerts read, so this tile and the alerts can never disagree.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 6,
+            "x": 18,
+            "y": 2
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "max({__name__=~\"llamacpp:kv_cache_usage_ratio|vllm:gpu_cache_usage_perc\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})",
+              "legendFormat": "usage",
+              "range": true,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisLabel": "",
+                "drawStyle": "line",
+                "fillOpacity": 8,
+                "gradientMode": "none",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 4,
+                "showPoints": "auto",
+                "spanNulls": false,
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 0.8
+                  },
+                  {
+                    "color": "red",
+                    "value": 0.9
+                  }
+                ]
+              },
+              "unit": "percentunit",
+              "decimals": 1,
+              "min": 0,
+              "max": 1
+            },
+            "overrides": []
+          },
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto"
+          }
+        },
+        {
+          "id": 5,
+          "type": "timeseries",
+          "title": "Throughput \u2014 decode vs prompt (this is the 7-day panel)",
+          "description": "PromQL: sum(rate(<tokens_total>[$__rate_interval])) in both directions, plus sum(llamacpp:predicted_tokens_seconds) overlaid \u2014 the server's own 'average since the last scrape' figure, left in on purpose while the bespoke page is being retired: where the two disagree, rate() is the one that survives a restart or a counter reset, so drop the overlay once you stop reading it.\n\nThe old page could only show ~60 samples held in one browser tab; this panel answers 'what was decode throughput at 03:00' for as long as retention allows (PROMETHEUS_RETENTION_TIME).\n\nRate windows are $__rate_interval (at least 4 scrape intervals, so 15s scrapes get ~1m): short enough to see a collapse, long enough that a single dropped scrape is not a cliff. Counter resets and restarts are handled by rate(); gaps are drawn as gaps, never as 0.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 9,
+            "w": 12,
+            "x": 0,
+            "y": 7
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum(rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))",
+              "legendFormat": "decode tok/s",
+              "range": true,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum(rate({__name__=~\"llamacpp:prompt_tokens_total|vllm:prompt_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))",
+              "legendFormat": "prompt tok/s",
+              "range": true,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum({__name__=~\"llamacpp:predicted_tokens_seconds\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})",
+              "legendFormat": "server average gauge",
+              "range": true,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisLabel": "",
+                "drawStyle": "line",
+                "fillOpacity": 8,
+                "gradientMode": "none",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 4,
+                "showPoints": "auto",
+                "spanNulls": false,
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 6,
+          "type": "timeseries",
+          "title": "Per-model decode tok/s",
+          "description": "PromQL: sum by (model) (label_replace(label_replace(rate(<tokens_total>[$__rate_interval]), \"model\", \"$1\", \"model_name\", \"(.*)\"), \"model\", \"unknown\", \"model\", \"^$\"))\n\nThe two label_replace calls map llama.cpp (a ``model`` label from file_sd, or none) and vLLM (``model_name``) onto one name, and turn 'no model label at all' into the literal 'unknown' so the legend is never blank. $model filters it; All (=.*) matches the empty label too.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 9,
+            "w": 12,
+            "x": 12,
+            "y": 7
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (model) (label_replace(label_replace(rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]), \"model\", \"$1\", \"model_name\", \"(.*)\"), \"model\", \"unknown\", \"model\", \"^$\"))",
+              "legendFormat": "{{model}}",
+              "range": true,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisLabel": "",
+                "drawStyle": "line",
+                "fillOpacity": 8,
+                "gradientMode": "none",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 4,
+                "showPoints": "auto",
+                "spanNulls": false,
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 7,
+          "type": "timeseries",
+          "title": "Requests / s and structured share",
+          "description": "PromQL: sum(rate({__name__=~\"halogen:requests_total|llamacpp:requests_total\"}[$__rate_interval])), and halogen:structured_requests_total / clamp_min(halogen:requests_total, 1).\n\nclamp_min keeps a restart's 0/0 from rendering NaN. halogen:* only exists on the halogen front door; on a plain llama.cpp server the second series is absent rather than wrong.\n\nNo data on this panel means this server never exposed the metric \u2014 that is the supported 'this build has no such family' case, not an outage. The raw series list on monitor/serve.py's metrics card is the place to see what a server actually answers.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 16
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum(rate({__name__=~\"halogen:requests_total|llamacpp:requests_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))",
+              "legendFormat": "requests/s",
+              "range": true,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum(rate({__name__=~\"halogen:structured_requests_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])) / clamp_min(sum(rate({__name__=~\"halogen:requests_total|llamacpp:requests_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])), 1)",
+              "legendFormat": "share under a JSON schema",
+              "range": true,
+              "refId": "B",
+              "interval": "15s",
+              "intervalFactor": 1
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisLabel": "",
+                "drawStyle": "line",
+                "fillOpacity": 8,
+                "gradientMode": "none",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 4,
+                "showPoints": "auto",
+                "spanNulls": false,
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 8,
+          "type": "timeseries",
+          "title": "Lifetime tok/s \u2014 what the old tile actually showed",
+          "description": "PromQL: sum(llamacpp:tokens_predicted_total) / clamp_min(sum(llamacpp:tokens_predicted_seconds_total), 1)\n\nThis is the arithmetic the bespoke page did in JavaScript: two raw counters, no window, no reset handling. Kept deliberately, as a floor to sanity-check the windowed rates against \u2014 it cannot tell you WHEN anything was slow, which is what the panels above are for.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 16
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}) / clamp_min(sum({__name__=~\"llamacpp:tokens_predicted_seconds_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}), 1)",
+              "legendFormat": "tokens/s since server start",
+              "range": true,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisLabel": "",
+                "drawStyle": "line",
+                "fillOpacity": 8,
+                "gradientMode": "none",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 4,
+                "showPoints": "auto",
+                "spanNulls": false,
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "row",
+      "title": "Latency",
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 1
+      },
+      "panels": [
+        {
+          "id": 9,
+          "type": "stat",
+          "title": "Latency histograms on this server?",
+          "description": "PromQL: count({__name__=~\"..._bucket\" for TTFT / TPOT / end-to-end}) or vector(0).\n\nRead this panel first: 0 means this build answers /metrics with averages only (several llama.cpp builds do), so the quantile panels below have nothing to compute and will say No data \u2014 that is a server capability, not a monitoring outage. Use the lifetime panel in the Overview row and the raw exposition on the monitor page in that case.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 2,
+            "w": 24,
+            "x": 0,
+            "y": 1
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "count({__name__=~\"llama:time_to_first_token_seconds_bucket|llamacpp:time_to_first_token_seconds_bucket|vllm:request_time_to_first_token_seconds_bucket|llama:time_per_output_token_seconds_bucket|llamacpp:time_per_output_token_seconds_bucket|llama:end_to_end_response_seconds_bucket|llamacpp:end_to_end_response_seconds_bucket|vllm:request_e2e_request_latency_seconds_bucket\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}) or vector(0)",
+              "legendFormat": "bucket series found",
+              "range": true,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisLabel": "",
+                "drawStyle": "line",
+                "fillOpacity": 8,
+                "gradientMode": "none",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 4,
+                "showPoints": "auto",
+                "spanNulls": false,
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": null
+                  },
+                  {
+                    "color": "green",
+                    "value": 1
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "auto"
+          }
+        },
+        {
+          "id": 10,
+          "type": "timeseries",
+          "title": "Time to first token (TTFT)",
+          "description": "PromQL: histogram_quantile(0.5|0.9|0.99, sum by (le) (rate({__name__=~\"llama:time_to_first_token_seconds_bucket|llamacpp:time_to_first_token_seconds_bucket|vllm:request_time_to_first_token_seconds_bucket\"}[$__rate_interval])))\n\nThe panel the old page could not render at all: p99 TTFT over a week. sum by (le) is required \u2014 quantiles must never be taken per-label-set and averaged afterwards.\n\nNo data on this panel means this server never exposed the metric \u2014 that is the supported 'this build has no such family' case, not an outage. The raw series list on monitor/serve.py's metrics card is the place to see what a server actually answers.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 9,
+            "w": 8,
+            "x": 0,
+            "y": 3
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.5, sum by (le) (rate({__name__=~\"llama:time_to_first_token_seconds_bucket|llamacpp:time_to_first_token_seconds_bucket|vllm:request_time_to_first_token_seconds_bucket\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])))",
+              "legendFormat": "p50",
+              "range": true,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.9, sum by (le) (rate({__name__=~\"llama:time_to_first_token_seconds_bucket|llamacpp:time_to_first_token_seconds_bucket|vllm:request_time_to_first_token_seconds_bucket\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])))",
+              "legendFormat": "p90",
+              "range": true,
+              "refId": "B",
+              "interval": "15s",
+              "intervalFactor": 1
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.99, sum by (le) (rate({__name__=~\"llama:time_to_first_token_seconds_bucket|llamacpp:time_to_first_token_seconds_bucket|vllm:request_time_to_first_token_seconds_bucket\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])))",
+              "legendFormat": "p99",
+              "range": true,
+              "refId": "C",
+              "interval": "15s",
+              "intervalFactor": 1
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisLabel": "",
+                "drawStyle": "line",
+                "fillOpacity": 8,
+                "gradientMode": "none",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 4,
+                "showPoints": "auto",
+                "spanNulls": false,
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "s",
+              "decimals": 3
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 11,
+          "type": "timeseries",
+          "title": "Time per output token (TPOT)",
+          "description": "PromQL: histogram_quantile over llama:time_per_output_token_seconds_bucket (and the llamacpp: spelling) with sum by (le).\n\nThis is decode latency per token: multiply by the decode rate to see what a batch is really paying. If it rises while decode tok/s falls, it is queueing or KV pressure, not the model.\n\nNo data on this panel means this server never exposed the metric \u2014 that is the supported 'this build has no such family' case, not an outage. The raw series list on monitor/serve.py's metrics card is the place to see what a server actually answers.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 9,
+            "w": 8,
+            "x": 8,
+            "y": 3
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.5, sum by (le) (rate({__name__=~\"llama:time_per_output_token_seconds_bucket|llamacpp:time_per_output_token_seconds_bucket\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])))",
+              "legendFormat": "p50",
+              "range": true,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.9, sum by (le) (rate({__name__=~\"llama:time_per_output_token_seconds_bucket|llamacpp:time_per_output_token_seconds_bucket\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])))",
+              "legendFormat": "p90",
+              "range": true,
+              "refId": "B",
+              "interval": "15s",
+              "intervalFactor": 1
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.99, sum by (le) (rate({__name__=~\"llama:time_per_output_token_seconds_bucket|llamacpp:time_per_output_token_seconds_bucket\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])))",
+              "legendFormat": "p99",
+              "range": true,
+              "refId": "C",
+              "interval": "15s",
+              "intervalFactor": 1
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisLabel": "",
+                "drawStyle": "line",
+                "fillOpacity": 8,
+                "gradientMode": "none",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 4,
+                "showPoints": "auto",
+                "spanNulls": false,
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "s",
+              "decimals": 3
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 12,
+          "type": "timeseries",
+          "title": "End-to-end response time",
+          "description": "PromQL: histogram_quantile over llama:end_to_end_response_seconds_bucket (llamacpp: and vllm: spellings) with sum by (le).\n\nTTFT + generation time: what a caller experiences. Compare with TTFT to separate 'slow to start' (prefill, cache misses, queueing) from 'slow to finish' (decode throughput).\n\nNo data on this panel means this server never exposed the metric \u2014 that is the supported 'this build has no such family' case, not an outage. The raw series list on monitor/serve.py's metrics card is the place to see what a server actually answers.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 9,
+            "w": 8,
+            "x": 16,
+            "y": 3
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.5, sum by (le) (rate({__name__=~\"llama:end_to_end_response_seconds_bucket|llamacpp:end_to_end_response_seconds_bucket|vllm:request_e2e_request_latency_seconds_bucket\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])))",
+              "legendFormat": "p50",
+              "range": true,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.9, sum by (le) (rate({__name__=~\"llama:end_to_end_response_seconds_bucket|llamacpp:end_to_end_response_seconds_bucket|vllm:request_e2e_request_latency_seconds_bucket\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])))",
+              "legendFormat": "p90",
+              "range": true,
+              "refId": "B",
+              "interval": "15s",
+              "intervalFactor": 1
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "histogram_quantile(0.99, sum by (le) (rate({__name__=~\"llama:end_to_end_response_seconds_bucket|llamacpp:end_to_end_response_seconds_bucket|vllm:request_e2e_request_latency_seconds_bucket\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])))",
+              "legendFormat": "p99",
+              "range": true,
+              "refId": "C",
+              "interval": "15s",
+              "intervalFactor": 1
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisLabel": "",
+                "drawStyle": "line",
+                "fillOpacity": 8,
+                "gradientMode": "none",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 4,
+                "showPoints": "auto",
+                "spanNulls": false,
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "s",
+              "decimals": 2
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "row",
+      "title": "Cache & KV",
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 2
+      },
+      "panels": [
+        {
+          "id": 13,
+          "type": "timeseries",
+          "title": "KV cache usage \u2014 was it saturated overnight?",
+          "description": "PromQL: max by (instance) (llamacpp:kv_cache_usage_ratio), with avg_over_time(...[1h]) as the 'was it full overnight, or just spiky' answer. Bands at 80% (warn) and 90% (critical) match the alert thresholds in alert_thresholds.env. Set the range to 12h/24h: this is the exact question the old page could not answer.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 9,
+            "w": 12,
+            "x": 0,
+            "y": 0
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "max by (instance) ({__name__=~\"llamacpp:kv_cache_usage_ratio|vllm:gpu_cache_usage_perc\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})",
+              "legendFormat": "usage",
+              "range": true,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "avg by (instance) (avg_over_time({__name__=~\"llamacpp:kv_cache_usage_ratio|vllm:gpu_cache_usage_perc\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[1h]))",
+              "legendFormat": "1h average",
+              "range": true,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisLabel": "",
+                "drawStyle": "line",
+                "fillOpacity": 8,
+                "gradientMode": "none",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 4,
+                "showPoints": "auto",
+                "spanNulls": false,
+                "thresholdsStyle": {
+                  "mode": "line"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 0.8
+                  },
+                  {
+                    "color": "red",
+                    "value": 0.9
+                  }
+                ]
+              },
+              "unit": "percentunit",
+              "decimals": 1,
+              "min": 0,
+              "max": 1
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            },
+            "thresholds": {
+              "steps": [
+                {
+                  "color": "green",
+                  "value": null
+                },
+                {
+                  "color": "yellow",
+                  "value": 0.8
+                },
+                {
+                  "color": "red",
+                  "value": 0.9
+                }
+              ],
+              "style": "line"
+            }
+          },
+          "repeat": "instance",
+          "repeatDirection": "h",
+          "maxPerRow": 2,
+          "repeatMerge": false
+        },
+        {
+          "id": 14,
+          "type": "timeseries",
+          "title": "KV tokens vs pool size",
+          "description": "PromQL: sum(llamacpp:kv_cache_tokens) against max(halogen:kv_pool_positions | halogen:kv_pool_reserved_tokens).\n\nTokens in the cache versus the pool that was configured: the flat top of the pool line is the ceiling the ratio is measured against, and reserved above used means slots have claimed space they are not using.\n\nNo data on this panel means this server never exposed the metric \u2014 that is the supported 'this build has no such family' case, not an outage. The raw series list on monitor/serve.py's metrics card is the place to see what a server actually answers.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 9,
+            "w": 12,
+            "x": 12,
+            "y": 0
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum({__name__=~\"llamacpp:kv_cache_tokens\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})",
+              "legendFormat": "kv_cache_tokens",
+              "range": true,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "max({__name__=~\"halogen:kv_pool_positions|halogen:kv_pool_reserved_tokens\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})",
+              "legendFormat": "pool (positions / reserved)",
+              "range": true,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisLabel": "",
+                "drawStyle": "line",
+                "fillOpacity": 8,
+                "gradientMode": "none",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 4,
+                "showPoints": "auto",
+                "spanNulls": false,
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 15,
+          "type": "timeseries",
+          "title": "Prompt-cache hit ratio",
+          "description": "PromQL: rate(halogen:prompt_tokens_cached_total) / clamp_min(rate(llamacpp:prompt_tokens_total) + rate(halogen:prompt_tokens_cached_total), 1)\n\nMoved out of JavaScript and into PromQL, so it is now windowed, counter-reset-safe and comparable across restarts. The + cached in the denominator is llama.cpp's convention: prompt_tokens_total counts only the tokens that missed the cache. clamp_min kills the 0/0 spike a restart leaves behind (the JS version hid it with a divide() guard).\n\nNo data on this panel means this server never exposed the metric \u2014 that is the supported 'this build has no such family' case, not an outage. The raw series list on monitor/serve.py's metrics card is the place to see what a server actually answers.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 9
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum(rate({__name__=~\"halogen:prompt_tokens_cached_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])) / clamp_min(sum(rate({__name__=~\"llamacpp:prompt_tokens_total|vllm:prompt_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])) + sum(rate({__name__=~\"halogen:prompt_tokens_cached_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])), 1)",
+              "legendFormat": "hit ratio",
+              "range": true,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisLabel": "",
+                "drawStyle": "line",
+                "fillOpacity": 8,
+                "gradientMode": "none",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 4,
+                "showPoints": "auto",
+                "spanNulls": false,
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "percentunit",
+              "decimals": 1,
+              "min": 0,
+              "max": 1
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 16,
+          "type": "timeseries",
+          "title": "Prompt-cache hit ratio, per model",
+          "description": "PromQL: the same ratio, grouped by model with the label_replace chain described in the Overview row.\n\nCaveat: at token level this is a sum across models only when the server labels its counters per model; llama.cpp does not, so on a single-model server every series lands under 'unknown' and this panel duplicates the one to its left. That is the honest rendering of a server that cannot answer the question.\n\nNo data on this panel means this server never exposed the metric \u2014 that is the supported 'this build has no such family' case, not an outage. The raw series list on monitor/serve.py's metrics card is the place to see what a server actually answers.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 9
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (model) (label_replace(label_replace(rate({__name__=~\"halogen:prompt_tokens_cached_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]) / clamp_min(rate({__name__=~\"llamacpp:prompt_tokens_total|vllm:prompt_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]) + rate({__name__=~\"halogen:prompt_tokens_cached_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]), 1), \"model\", \"$1\", \"model_name\", \"(.*)\"), \"model\", \"unknown\", \"model\", \"^$\"))",
+              "legendFormat": "{{model}}",
+              "range": true,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisLabel": "",
+                "drawStyle": "line",
+                "fillOpacity": 8,
+                "gradientMode": "none",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 4,
+                "showPoints": "auto",
+                "spanNulls": false,
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "percentunit",
+              "decimals": 1,
+              "min": 0,
+              "max": 1
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "type": "row",
+      "title": "Speculative decode",
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 3
+      },
+      "panels": [
+        {
+          "id": 17,
+          "type": "timeseries",
+          "title": "Draft acceptance ratio",
+          "description": "PromQL: rate(halogen:draft_tokens_accepted_total) / clamp_min(rate(halogen:draft_tokens_total), 1)\n\nSpeculative-decode acceptance, computed with rate() instead of the ratio of two instantaneous counters the old tile showed. clamp_min is deliberate: without it a restart's 0/0 renders as NaN and the panel goes blank in the worst possible moment.\n\nNo data on this panel means this server never exposed the metric \u2014 that is the supported 'this build has no such family' case, not an outage. The raw series list on monitor/serve.py's metrics card is the place to see what a server actually answers.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": -1
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum(rate({__name__=~\"halogen:draft_tokens_accepted_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])) / clamp_min(sum(rate({__name__=~\"halogen:draft_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])), 1)",
+              "legendFormat": "accepted / drafted",
+              "range": true,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisLabel": "",
+                "drawStyle": "line",
+                "fillOpacity": 8,
+                "gradientMode": "none",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 4,
+                "showPoints": "auto",
+                "spanNulls": false,
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "percentunit",
+              "decimals": 1,
+              "min": 0,
+              "max": 1
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 18,
+          "type": "timeseries",
+          "title": "Drafted vs accepted tokens / s",
+          "description": "PromQL: rate(halogen:draft_tokens_total) and rate(halogen:draft_tokens_accepted_total).\n\nThe raw pair behind the ratio: drafted collapsing to 0 while decode continues means the draft head stopped contributing (MTP off, or a build change), which the ratio alone cannot distinguish from 'drafting and always wrong'.\n\nNo data on this panel means this server never exposed the metric \u2014 that is the supported 'this build has no such family' case, not an outage. The raw series list on monitor/serve.py's metrics card is the place to see what a server actually answers.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": -1
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum(rate({__name__=~\"halogen:draft_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))",
+              "legendFormat": "drafted",
+              "range": true,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum(rate({__name__=~\"halogen:draft_tokens_accepted_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))",
+              "legendFormat": "accepted",
+              "range": true,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisLabel": "",
+                "drawStyle": "line",
+                "fillOpacity": 8,
+                "gradientMode": "none",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 4,
+                "showPoints": "auto",
+                "spanNulls": false,
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "type": "row",
+      "title": "Scrape health",
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 4
+      },
+      "panels": [
+        {
+          "id": 19,
+          "type": "timeseries",
+          "title": "Scrape success (up) per job",
+          "description": "PromQL: up \u2014 1 when Prometheus successfully scraped the target on its last attempt. A 0 here with a healthy-looking model server means the monitoring path broke, not the model. The llm-server-via-proxy row is the monitor's own passthrough.\n\nRate windows are $__rate_interval (at least 4 scrape intervals, so 15s scrapes get ~1m): short enough to see a collapse, long enough that a single dropped scrape is not a cliff. Counter resets and restarts are handled by rate(); gaps are drawn as gaps, never as 0.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": -2
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "up",
+              "legendFormat": "{{job}} / {{instance}}",
+              "range": true,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisLabel": "",
+                "drawStyle": "line",
+                "fillOpacity": 8,
+                "gradientMode": "none",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 4,
+                "showPoints": "auto",
+                "spanNulls": false,
+                "thresholdsStyle": {
+                  "mode": "line"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": null
+                  },
+                  {
+                    "color": "green",
+                    "value": 1
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            },
+            "thresholds": {
+              "steps": [
+                {
+                  "color": "red",
+                  "value": null
+                },
+                {
+                  "color": "green",
+                  "value": 1
+                }
+              ],
+              "style": "line"
+            }
+          }
+        },
+        {
+          "id": 20,
+          "type": "timeseries",
+          "title": "Monitor scrape health (llm_monitor_*)",
+          "description": "PromQL: the proxy's own series, appended by monitor/serve.py to its GET /metrics passthrough. This is what makes 'the monitor is broken' visible as a broken monitor instead of a flat-lined model server: scrape success rate, scrape latency, series count and parse errors, all in PromQL rather than only in the page.\n\nAbsent on this panel = nothing is scraping the passthrough (the llm-server-via-proxy job is off or mispointed), which is what LLMMonitorAbsent alerts on.\n\nRate windows are $__rate_interval (at least 4 scrape intervals, so 15s scrapes get ~1m): short enough to see a collapse, long enough that a single dropped scrape is not a cliff. Counter resets and restarts are handled by rate(); gaps are drawn as gaps, never as 0.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": -2
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "rate(llm_monitor_scrape_success_total[5m])",
+              "legendFormat": "scrapes/s served by the proxy",
+              "range": true,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "llm_monitor_scrape_latency_ms",
+              "legendFormat": "last scrape latency (ms)",
+              "range": true,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "llm_monitor_series_count",
+              "legendFormat": "series in last scrape",
+              "range": true,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "increase(llm_monitor_parse_errors_total[10m])",
+              "legendFormat": "parse errors (10m)",
+              "range": true,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisLabel": "",
+                "drawStyle": "line",
+                "fillOpacity": 8,
+                "gradientMode": "none",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 4,
+                "showPoints": "auto",
+                "spanNulls": false,
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 21,
+          "type": "timeseries",
+          "title": "Scraped series per target",
+          "description": "PromQL: scrape_samples_scraped and scrape_samples_post_metric_relabeling \u2014 Prometheus's own view of how much each target contributes. This is the input to the retention sizing in monitoring/README.md; a jump here is the first sign a server started emitting a new (expensive) family.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 7,
+            "w": 12,
+            "x": 0,
+            "y": 6
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "scrape_samples_scraped",
+              "legendFormat": "{{job}} / {{instance}}",
+              "range": true,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "scrape_samples_post_metric_relabeling",
+              "legendFormat": "post-relabel {{job}}",
+              "range": true,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisLabel": "",
+                "drawStyle": "line",
+                "fillOpacity": 8,
+                "gradientMode": "none",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 4,
+                "showPoints": "auto",
+                "spanNulls": false,
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 22,
+          "type": "timeseries",
+          "title": "Scrape duration vs the 5s budget",
+          "description": "PromQL: scrape_duration_seconds against scrape_timeout_seconds. A model server that takes longer than 5s to answer /metrics is too busy to serve and too busy to be watched, and the scrape_timeout matches serve.py's own 5s upstream cap so the two layers fail the same way.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 7,
+            "w": 12,
+            "x": 12,
+            "y": 6
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "scrape_duration_seconds",
+              "legendFormat": "{{job}} / {{instance}}",
+              "range": true,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "scrape_timeout_seconds",
+              "legendFormat": "budget",
+              "range": true,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisLabel": "",
+                "drawStyle": "line",
+                "fillOpacity": 8,
+                "gradientMode": "none",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 4,
+                "showPoints": "auto",
+                "spanNulls": false,
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "s",
+              "decimals": 2
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull",
+                "max"
+              ],
+              "displayMode": "table",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

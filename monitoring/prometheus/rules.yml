@@ -1,0 +1,134 @@
+# GENERATED FILE — do not edit. Edit alert_thresholds.env and run:
+#
+#     python3 monitoring/render_rules.py
+#
+# Template for monitoring/prometheus/rules.yml. Dollar-brace placeholders get
+# their values from alert_thresholds.env (monitoring/.env wins if it defines
+# them), so the numbers below are tuned per box without touching PromQL.
+#
+# House style for every rule here:
+#   * `for:` and labels.severity are mandatory;
+#   * annotations.summary names the CONSEQUENCE (what the user feels), not the
+#     metric;
+#   * annotations stay static — no {{ $labels.* }} templating — so that
+#     `promtool test rules` (monitoring/prometheus/unit-tests.yml) can pin the
+#     exact operator-facing sentence, and so the same text survives whatever
+#     Alertmanager template is wired up later. Which target fired rides on the
+#     labels (instance / job / upstream), which is where Alertmanager routes on it
+#     anyway. See monitoring/README.md#alerts.
+
+groups:
+  - name: llm-availability
+    rules:
+      - alert: LLMServerDown
+        expr: 'up{job=~"llm-server.*"} == 0'
+        for: 2m
+        labels:
+          severity: critical
+          team: llm
+        annotations:
+          summary: "The model server is not answering /metrics: every request to it will fail or queue until it comes back. Check systemctl --user status llm-server, then whether the port in monitoring/prometheus/targets/llm-servers.json is the one the server actually listens on."
+
+      - alert: LLMMetricsAbsent
+        expr: 'absent(llamacpp:tokens_predicted_total)'
+        for: 5m
+        labels:
+          severity: warning
+          team: llm
+        annotations:
+          summary: "No model-server metrics have been scraped for 5m, so Grafana will read \"No data\" even if the server is healthy. The monitor page is still fully usable — it reads /health, /v1/models and /cache, which are not Prometheus metrics. Usual causes: the server has no /metrics route at all (stock llama.cpp build, mock mode \"nometrics\"), it answers /metrics with JSON or 404, or the scrape job is mispointed. A server that never exposes /metrics is a supported configuration: silence this alert rather than distrust the dashboard."
+
+  - name: llm-monitor-health
+    rules:
+      - alert: LLMScrapeFailing
+        expr: 'min_over_time(llm_monitor_scrape_ok[1m]) == 0'
+        for: 5m
+        labels:
+          severity: warning
+          team: llm
+        annotations:
+          summary: "The monitor is up but its own scrape of the model server has been failing for 5m: the live page and the passthrough are serving stale or empty data, so a flat-lined Grafana panel right now means \"the monitor is blind\", not \"the model is idle\". Look at journalctl --user -u llm-monitor and curl the proxy's /metrics."
+
+      - alert: LLMMonitorAbsent
+        expr: 'absent_over_time(llm_monitor_build_info[10m])'
+        for: 0m
+        labels:
+          severity: warning
+          team: llm
+        annotations:
+          summary: "Nothing has scraped the monitor's /metrics passthrough for 10m, so scrape health has no history: serve.py is not running, or the llm-server-via-proxy job is missing or mispointed (see the llm_upstream label in prometheus.yml)."
+
+      - alert: LLMScrapeParseErrors
+        expr: 'increase(llm_monitor_parse_errors_total[10m]) > 0'
+        for: 0m
+        labels:
+          severity: warning
+          team: llm
+        annotations:
+          summary: "The monitor could not parse part of the model server's /metrics in the last 10m: a metric family may be silently missing from the parsed views and from the KV/queueing alerts that read it. The unparsable lines are listed on the monitor page's metrics card (serve.py reports them as metrics.errors)."
+
+  - name: llm-server-pressure
+    rules:
+      - alert: LLMKVCachePressureWarn
+        expr: 'llamacpp:kv_cache_usage_ratio > 0.90'
+        for: 5m
+        labels:
+          severity: warning
+          team: llm
+        annotations:
+          summary: "The KV cache has been over 0.90 for 5m: new requests are about to wait for context space and long prompts start evicting cached prefixes, so latency climbs before anything actually fails."
+
+      - alert: LLMKVCachePressureCritical
+        expr: 'llamacpp:kv_cache_usage_ratio > 0.97'
+        for: 2m
+        labels:
+          severity: critical
+          team: llm
+        annotations:
+          summary: "The KV cache is effectively full (over 0.97 for 2m): the server is in an eviction storm, prefills are being redone and throughput collapses under queueing. Shorten the context, lower the slot count, or stop the largest client."
+
+      - alert: LLMQueueing
+        expr: 'llamacpp:requests_deferred > 0'
+        for: 5m
+        labels:
+          severity: warning
+          team: llm
+        annotations:
+          summary: "Requests have been deferred for 5m: arrivals are waiting for a slot instead of generating, which is the \"why is it slow\" half of the picture; read it together with the KV-cache alerts."
+
+  - name: llm-server-behaviour
+    rules:
+      # Baseline-guarded: fires only against the metric's own recent average, and
+      # only while that baseline is real traffic, so an idle box that stops
+      # generating does not "collapse" to zero.
+      - alert: LLMDecodeThroughputCollapse
+        expr: 'sum(rate(llamacpp:tokens_predicted_total[15m])) < 0.5 * avg_over_time(sum(rate(llamacpp:tokens_predicted_total[15m]))[1h:5m]) and on() avg_over_time(sum(rate(llamacpp:tokens_predicted_total[15m]))[1h:5m]) > 1'
+        for: 10m
+        labels:
+          severity: warning
+          team: llm
+        annotations:
+          summary: "Decode throughput has stayed below 0.5 of its own 1h baseline for 10m: generation is roughly twice as slow as this box just demonstrated, with no change in load. Usual suspects on this hardware: thermal or GTT pressure, a second model taking shared memory, or a speculative-decode path that stopped helping."
+
+      - alert: LLMPromptCacheCold
+        expr: 'rate(halogen:prompt_tokens_cached_total[15m]) / clamp_min(rate(llamacpp:prompt_tokens_total[15m]) + rate(halogen:prompt_tokens_cached_total[15m]), 1) < 0.20 and on() rate(llamacpp:prompt_tokens_total[15m]) > 1'
+        for: 15m
+        labels:
+          severity: warning
+          team: llm
+        annotations:
+          summary: "The prompt cache is missing more than 0.20 of prompt tokens while traffic is flowing: something restarted, the cache is too small for the working set, or slots are evicting each other's prefixes — time-to-first-token is paying for it. halogen:* names only exist on the halogen front door, so on a plain llama.cpp server this rule has no data and stays dark."
+
+      # Belt and braces: a wedged target normally shows up as LLMServerDown or
+      # LLMMetricsAbsent, because Prometheus marks a failed scrape stale
+      # immediately. This one catches the rarer case where the scrape succeeds
+      # but the samples stop advancing (a caching proxy in front of the server,
+      # or an exporter replaying a buffered response).
+      - alert: LLMStaleTarget
+        expr: 'time() - timestamp(up{job=~"llm-server.*"}) > 120'
+        for: 0m
+        labels:
+          severity: warning
+          team: llm
+        annotations:
+          summary: "Samples from this target have stopped advancing: whatever is answering is replaying old data, so every panel reading it shows history as if it were now."

@@ -1,0 +1,9 @@
+[
+  {
+    "targets": ["llm.home:8001"],
+    "labels": {
+      "model": "qwen3-27b",
+      "env": "home"
+    }
+  }
+]

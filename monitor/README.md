@@ -23,7 +23,7 @@ decision and its rejected alternatives are recorded in
 * **Prometheus + Grafana own `/metrics` — history.** Anything derived from the
   Prometheus exposition format (throughput, latency quantiles, KV-cache pressure,
   cache and speculative-decode ratios, retention, alerting) is PromQL + a
-  provisioned Grafana dashboard, described in `monitoring/` once that stack lands.
+  provisioned Grafana dashboard, in [`monitoring/`](../monitoring/README.md).
 * **`serve.py` owns "right now"** — and its scope is deliberately frozen to what
   only it can do:
   1. a **same-origin proxy** for `/health`, `/v1/models` and `/cache`, which are

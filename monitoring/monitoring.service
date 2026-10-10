@@ -1,0 +1,45 @@
+# systemd **user** unit for the monitoring stack, same shape as
+# monitor/llm-monitor.service and ../llm-server.service: the model server, the
+# monitor page and the monitoring stack all start the same way after a reboot.
+#
+# Put this in ~/.config/systemd/user/ (create the folder if needed), edit the
+# %h path to your actual checkout, then:
+#
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now monitoring
+#
+# Start/at-boot without a login:
+#
+#   sudo loginctl enable-linger $USER
+#
+# Prefer to let Docker own restarts? Then do not enable this unit: compose's
+# `restart: unless-stopped` already brings both containers back after a reboot, as
+# long as dockerd starts. Having both is harmless but confusing — pick one.
+
+[Unit]
+Description=LLM monitoring stack (Prometheus + Grafana)
+Documentation=file:%h/service/monitoring/README.md
+# Best-effort only: docker.service lives in the *system* manager and a user unit
+# may not Require it (see README, "Keeping it up across reboots"). If dockerd is
+# not up yet, the ExecStart fails and Restart= below retries it.
+Wants=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=%h/service/monitoring
+# `up -d` returns; `down` on stop so `systemctl --user stop llm-monitoring` is a
+# clean, single-command teardown (history stays in the named volume).
+ExecStart=/usr/bin/docker compose -f %h/service/monitoring/compose.yaml up -d
+ExecStop=/usr/bin/docker compose -f %h/service/monitoring/compose.yaml down
+# `systemctl --user reload monitoring` re-applies compose.yaml + .env after a
+# `git pull`; config and rule files are mounted read-only from the checkout, so
+# that is the whole deploy.
+ExecReload=/usr/bin/docker compose -f %h/service/monitoring/compose.yaml up -d
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

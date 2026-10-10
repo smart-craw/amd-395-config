@@ -1,1 +1,4 @@
 __pycache__
+
+# machine-local deployment state: ports, the Grafana admin password
+monitoring/.env
