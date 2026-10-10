@@ -1,0 +1,26 @@
+on: push
+
+jobs:
+  run_ui_tests:
+    name: Run UI tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.1.0"
+      - name: run tests
+        run: node --test "monitor/tests/*.test.mjs"
+
+  run_server_tests:
+    name: Run server tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.1.0"
+      - name: run server tests
+        run: |
+            python3 -m unittest discover -s monitor/tests -p "test_*.py"   # the proxy
