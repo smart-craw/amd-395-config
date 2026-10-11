@@ -95,7 +95,46 @@ scrape_configs:
         action: keep
 
   # ---------------------------------------------------------------- #
-  # 3. Prometheus itself: scrape health is only visible if it is scraped.
+  # 3. The box itself: node_exporter running ON THE HOST as a systemd user
+  #    unit, loopback-bound, with --collector.drm for the amdgpu GPU
+  #    (GTT / VRAM bytes, gpu_busy_percent; hwmon is default-on and carries
+  #    the temps and the package power). No ROCm anywhere — the Vulkan path
+  #    reads the same sysfs the ROCm path would, so installing ROCm to read
+  #    these numbers would be paying for a stack to read what the kernel
+  #    already gives away. See monitoring/node-exporter.service and
+  #    spikes/amd-gpu-metrics/FINDINGS.md (workspace-szw.10) for the matrix.
+  #
+  #    Reachability, because this is the one bit that crosses namespaces:
+  #    the exporter binds 127.0.0.1:9100 on the HOST and must not bind
+  #    anywhere else (it publishes this machine's hardware inventory), so the
+  #    Prometheus container has to come to the host's loopback. The target
+  #    here is therefore `host.docker.internal` — the same host-gateway path
+  #    the llm-server-via-proxy job already uses to reach serve.py on
+  #    127.0.0.1:8090 (extra_hosts in compose.yaml). With rootless docker
+  #    (the topology every *user* unit in this repo assumes) that gateway
+  #    forwards to the host's loopback scope, which is what makes a
+  #    loopback-only exporter scrapeable at all. With rootful docker it does
+  #    not: the target then sits in `host.docker.internal`'s bridge scope and
+  #    the scrape fails with "connection refused". Two fixes, both documented
+  #    in monitoring/README.md ("Host + GPU telemetry"): give the prometheus
+  #    service `network_mode: host` (keeps everything on loopback, and it is
+  #    the option that changes no exposure at all), or bind the exporter to a
+  #    specific bridge address as well — which is an exposure decision of the
+  #    same class as workspace-szw.12, not a default.
+  #
+  #    No metric_relabel_configs: nothing is dropped, so the series count in
+  #    the footprint table (monitoring/README.md#footprint) is exactly the set
+  #    this job ingests, and `process_resident_memory_bytes{job="host"}` stays
+  #    available to check the exporter's own budget from inside Prometheus.
+  # ---------------------------------------------------------------- #
+  - job_name: host
+    file_sd_configs:
+      - files:
+          - targets/host.json
+        refresh_interval: 60s
+
+  # ---------------------------------------------------------------- #
+  # 4. Prometheus itself: scrape health is only visible if it is scraped.
   # ---------------------------------------------------------------- #
   - job_name: prometheus
     static_configs:

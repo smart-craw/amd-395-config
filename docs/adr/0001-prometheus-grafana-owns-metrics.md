@@ -288,6 +288,19 @@ that mapping is what lets a link from the page land on the right series.
 If the measured footprint does not fit, the retention size comes down before the
 memory limit goes up.
 
+> **Amended by `workspace-szw.13` (host + GPU telemetry).** The budget carries a third
+> line rather than growing beside itself:
+>
+> | | limit |
+> | --- | --- |
+> | node_exporter (host, `--collector.drm`, systemd user unit) | **≤ 32 MiB**, ≤ 0.05 CPU — measured **23.6 MiB PSS / 0.8 % CPU** for the deployed flag set; the unit's `MemoryMax=40M` / `CPUQuota=10%` are misbehaviour guards, not targets |
+> | prometheus growth from scraping it | **+1 263 series**, **≤ 5 MiB** head (two runs: +2.4 MiB at 15 s, +4.4 MiB at 5 s), ~11 MB/day of TSDB |
+> | **total added RSS** | **≤ 800 MiB** measured (was 768), same rule: retention.size comes down first, and the model server's shared-memory headroom must still be unchanged |
+>
+> The go/no-go in `monitoring/README.md#go-no-go` moved to 800 MiB with this line and
+> `measure_footprint.sh`'s default budget moved with it, so the number that decides the
+> outcome is written down in one place instead of three.
+
 ### C6 — config surface added by this decision
 
 | surface | meaning |
@@ -329,7 +342,7 @@ rather than only inside Grafana.
 
 **Deliberately not solved here:** auth/IAM, multi-host federation, per-request
 tracing, LAN exposure of Grafana (`workspace-szw.12`), host/GPU exporters
-(`workspace-szw.10`).
+(`workspace-szw.10` spike → deployed by `workspace-szw.13`, see the C5 amendment).
 
 **Migration path for the bespoke math:** the derived tiles stay in `app.js` until
 Grafana reaches parity for each one (`workspace-szw.11` parity-check), then the
@@ -425,3 +438,16 @@ measured footprint against the C5 budget (`workspace-szw.9`).
 > * **Host/GPU exporters** (AMD sysfs, node_exporter) were judged a separate memory
 >   and label-cardinality decision, not a free addition to this stack:
 >   `workspace-szw.10`.
+>
+> Update (`workspace-szw.13`): that separate decision has been taken and deployed.
+> `node_exporter --collector.drm` now runs on the **host** as a systemd *user* unit
+> (`monitoring/node-exporter.service`, pinned version + checksum-verified installer),
+> is scraped as the `host` job through `prometheus/targets/host.json`, binds loopback
+> only (nothing published beyond it), and needs no ROCm — every GPU signal it publishes
+> is an amdgpu **kernel driver** attribute that the Vulkan path llama.cpp already
+> reads. With it came the dashboard's **GPU & host** row, the `Node*` alert set, the
+> `host:*` baseline recording rules (so a threshold can be set from two days of
+> recorded history rather than a guess), and the measured footprint rows in the C5
+> amendment above. It is deliberately **not** in `compose.yaml`: host telemetry does not
+> belong behind a container something else can restart, so it sits outside the
+> port-and-limit story while remaining inside the budget.

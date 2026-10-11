@@ -284,3 +284,253 @@ tests:
               instance: stale.example:8001
             exp_annotations:
               summary: "Samples from this target have stopped advancing: whatever is answering is replaying old data, so every panel reading it shows history as if it were now."
+
+  # ------------------------------------------------------- host + GPU telemetry
+  # workspace-szw.13: node_exporter --collector.drm on the host, scraped as the
+  # `host` job. Two shapes of test below: the "is the telemetry there at all"
+  # alerts, which are about absence, and the pressure alerts, whose numbers come
+  # from alert_thresholds.env (GTT ratio, hottest GPU sensor, memory PSI).
+  - interval: 1m
+    input_series:
+      # Nothing is scraped from the host at all: a box where the exporter unit is
+      # not installed, or where the container cannot reach the host's loopback.
+      # The filler series keeps the evaluation window open past the absent window.
+      - series: 'prometheus_build_info{job="prometheus", instance="localhost:9090"}'
+        values: '1x24'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: NodeExporterAbsent
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: host
+              job: host
+            exp_annotations:
+              summary: "Nothing has scraped the host exporter for 10m, so every GPU and host panel reads \"No data\" while the model server is likely fine: check systemctl --user status node-exporter, then curl http://127.0.0.1:9100/metrics on the host, then whether the target in prometheus/targets/host.json can reach it from the container network (the runbook's Host + GPU telemetry section is the decision tree for that last one)."
+
+  - interval: 1m
+    input_series:
+      - series: 'node_exporter_build_info{job="host", instance="host.docker.internal:9100", version="1.12.1"}'
+        values: '1x24'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: NodeExporterAbsent
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      # The drm collector failing (the /sys-mount trap: card0/device dangling).
+      - series: 'node_scrape_collector_success{collector="drm", job="host", instance="host.docker.internal:9100"}'
+        values: '1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: NodeExporterCollectorFailing
+        exp_alerts: []
+      - eval_time: 13m
+        alertname: NodeExporterCollectorFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: host
+              collector: drm
+              job: host
+              instance: host.docker.internal:9100
+            exp_annotations:
+              summary: "A node_exporter collector has been failing for 10m (the collector label says which): that collector's series are missing or stale, so whatever panel reads them is showing history or nothing. If collector=\"drm\": the exporter was started without --collector.drm, or it is containerised with only /sys/class/drm mounted \u2014 the card0/device symlink dangles and the whole card disappears from the scrape. Mount all of /sys read-only, or run it on the host as monitoring/node-exporter.service does."
+
+  - interval: 1m
+    input_series:
+      - series: 'node_scrape_collector_success{collector="drm", job="host", instance="host.docker.internal:9100"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 13m
+        alertname: NodeExporterCollectorFailing
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      # Exporter healthy, but no GPU series at all: a collector that finds no card
+      # reports success, so only the absence rule can see this.
+      - series: 'node_memory_MemAvailable_bytes{job="host", instance="host.docker.internal:9100"}'
+        values: '70000000000x24'
+    alert_rule_test:
+      - eval_time: 17m
+        alertname: NodeGpuTelemetryAbsent
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: host
+              job: host
+            exp_annotations:
+              summary: "No GPU memory series have been scraped for 15m even though the exporter may be healthy: the drm collector found no amdgpu card at all, which it reports as success, so this is the only rule that can see it. Usual causes: kernel or BIOS change, the module reloaded late, or the exporter pointed at an incomplete /sys. python3 spikes/amd-gpu-metrics/amdgpu_sysfs_probe.py probe prints the whole capability matrix in one command."
+
+  - interval: 1m
+    input_series:
+      - series: 'node_drm_memory_gtt_used_bytes{card="card0", job="host", instance="host.docker.internal:9100"}'
+        values: '36936790016x24'
+    alert_rule_test:
+      - eval_time: 17m
+        alertname: NodeGpuTelemetryAbsent
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      # 97 % of the GTT budget, held: warn fires after GTT_PRESSURE_WARN_FOR.
+      # The ceiling is this box's amdgpu.gttsize=120000 (root README) in bytes.
+      - series: 'node_drm_memory_gtt_size_bytes{card="card0", job="host", instance="host.docker.internal:9100"}'
+        values: '125829120000x36'
+      - series: 'node_drm_memory_gtt_used_bytes{card="card0", job="host", instance="host.docker.internal:9100"}'
+        values: '122054246400x36'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: NodeGttPressureHigh
+        exp_alerts: []
+      - eval_time: 17m
+        alertname: NodeGttPressureHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: host
+              card: card0
+              job: host
+              instance: host.docker.internal:9100
+            exp_annotations:
+              summary: "GPU (GTT) memory has been over 0.95 of this box's budget for 15m: the next allocation the driver tries may fail \u2014 that is an allocation error in the model server's log, not a slowdown, and the runbook entry \"the box ran out of GTT\" says what to cut first. Re-tune this threshold against host:gtt_usage_ratio:max_2d once two days of real traffic have been recorded; the recorded baseline is in Prometheus, not in a notebook."
+
+  - interval: 1m
+    input_series:
+      # Half the budget: the pressure rule stays dark, and so does the exhaustion
+      # rule (a flat line projects to itself, below the ceiling).
+      - series: 'node_drm_memory_gtt_size_bytes{card="card0", job="host", instance="host.docker.internal:9100"}'
+        values: '125829120000x36'
+      - series: 'node_drm_memory_gtt_used_bytes{card="card0", job="host", instance="host.docker.internal:9100"}'
+        values: '62914560000x36'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: NodeGttPressureHigh
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: NodeGttExhausting
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      # 90 GB of a 125.8 GB budget, growing 8 GB/min: no room left inside the
+      # prediction horizon, so the baseline-free rule catches it.
+      - series: 'node_drm_memory_gtt_size_bytes{card="card0", job="host", instance="host.docker.internal:9100"}'
+        values: '125829120000x30'
+      - series: 'node_drm_memory_gtt_used_bytes{card="card0", job="host", instance="host.docker.internal:9100"}'
+        values: '90000000000+8000000000x30'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: NodeGttExhausting
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: NodeGttExhausting
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              team: host
+              card: card0
+              job: host
+              instance: host.docker.internal:9100
+            exp_annotations:
+              summary: "GPU (GTT) memory is growing fast enough to exceed this box's whole GTT budget within 600s at the rate of the last 30m: something is loading or growing while there is no room left. Stop the second model or the largest context first; lowering the KV pool or the slot count is the smaller lever, and the amdgpu.gttsize= kernel parameter is the last one (it needs a reboot)."
+
+  - interval: 1m
+    input_series:
+      # The hotspot sensor at 106 C: critical first (5m), then warn (10m). The
+      # selector is max() over the chip's sensors because gfx1151's sensor names
+      # are only known on the box.
+      - series: 'node_hwmon_temp_celsius{chip="amdgpu", sensor="temp2", job="host", instance="host.docker.internal:9100"}'
+        values: '60 60 106 106 106 106 106 106 106 106 106 106 106 106'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: NodeGpuTempCritical
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: NodeGpuTempCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              team: host
+              job: host
+              instance: host.docker.internal:9100
+            exp_annotations:
+              summary: "The hottest GPU sensor has been over 100 C for 5m: at or past the junction maximum, where the driver throttles hard and a sustained soak can shorten the part's life. Stop the load now \u2014 unload the model, do not just idle the client."
+      - eval_time: 9m
+        alertname: NodeGpuTempHigh
+        exp_alerts: []
+      - eval_time: 13m
+        alertname: NodeGpuTempHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: host
+              job: host
+              instance: host.docker.internal:9100
+            exp_annotations:
+              summary: "The hottest GPU sensor has been over 95 C for 10m: this part is about to start thermal throttling, so decode throughput will drop with no change in load (it also shows up as LLMDecodeThroughputCollapse). Check airflow and whether a fan curve is being ignored; this is the second cause of a slow box after GTT pressure."
+
+  - interval: 1m
+    input_series:
+      # Idle-but-warm card. Note the trap this pins: node_exporter exports an
+      # unreadable sensor as 0, so "low" is never a firing condition here.
+      - series: 'node_hwmon_temp_celsius{chip="amdgpu", sensor="temp1", job="host", instance="host.docker.internal:9100"}'
+        values: '55.111x24'
+      - series: 'node_hwmon_temp_celsius{chip="amdgpu", sensor="temp2", job="host", instance="host.docker.internal:9100"}'
+        values: '61x24'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: NodeGpuTempHigh
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: NodeGpuTempCritical
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      # Memory PSI: 18 seconds of stall per 60 s of wall clock = 0.30 of the time
+      # with a task waiting on memory. Critical (0.25) first, warn (0.10) after.
+      - series: 'node_pressure_memory_waiting_seconds_total{job="host", instance="host.docker.internal:9100"}'
+        values: '0+18x30'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: NodeMemoryPressureCritical
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: NodeMemoryPressureCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              team: host
+              job: host
+              instance: host.docker.internal:9100
+            exp_annotations:
+              summary: "Tasks have been stalled on memory for more than 0.25 of the wall clock for 5m: the box is thrashing, everything is slow including the model server's own scheduling, and the OOM killer is the next event. Free memory now (unload the smallest model first, then stop the Grafana container per the go/no-go) before touching anything else."
+      - eval_time: 8m
+        alertname: NodeMemoryPressureHigh
+        exp_alerts: []
+      - eval_time: 13m
+        alertname: NodeMemoryPressureHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: host
+              job: host
+              instance: host.docker.internal:9100
+            exp_annotations:
+              summary: "Tasks have been stalled on memory for more than 0.10 of the wall clock for 10m: reclaim or swap-in is on the critical path, which on this box usually means the GPU (GTT) budget has been squeezed rather than a runaway process. Look at the GPU & host row's Memory pools panel and the swap series beside it."
+
+  - interval: 1m
+    input_series:
+      # 2 s of stall per 60 s = 0.033: memory is not the problem.
+      - series: 'node_pressure_memory_waiting_seconds_total{job="host", instance="host.docker.internal:9100"}'
+        values: '0+2x30'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: NodeMemoryPressureHigh
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: NodeMemoryPressureCritical
+        exp_alerts: []

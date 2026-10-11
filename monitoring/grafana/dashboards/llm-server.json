@@ -3966,6 +3966,1746 @@
           }
         }
       ]
+    },
+    {
+      "id": 105,
+      "type": "row",
+      "title": "GPU & host",
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 32
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "panels": [
+        {
+          "id": 51,
+          "type": "text",
+          "title": "Read this before the charts: GPU memory on this box",
+          "description": "This box is a shared-memory APU (gfx1151), so there is no separate pool of graphics memory in any useful sense:\n\n* **GTT is the pool the model grows.** Weights, KV cache and activations are GTT (TTM) allocations; `node_drm_memory_gtt_size_bytes` is the `amdgpu.gttsize=120000` from the root README, and the used/size ratio is the pressure the stack was blind to before this row existed.\n* **VRAM is the BIOS carve-out**, deliberately minimised in the BIOS (*Dedicated Graphics Memory*). It barely moves and it is **never** an alert \u2014 it is plotted so a mistake in the BIOS or the driver shows up as a flat line, not as a mystery.\n* **GTT is system RAM**, so GPU exhaustion and host exhaustion are the same event: the *Host companion* panel (memory PSI, swap, load) is not a bonus, it is the other half of the question.\n* Nothing here needs ROCm: these are amdgpu **kernel driver** attributes, and the Vulkan path llama.cpp uses reads the same sysfs the ROCm path would. No `/dev/kfd`, no root, and the exporter is bound to loopback only.\n\nAbsent is not zero. node_exporter publishes an attribute it could not read as `0` rather than omitting it (the findings note \u00a71.1 explains why: the driver refuses to answer rather than waking a runtime-suspended card), so `0 %` busy or a `0` sensor can mean *could not ask*. A high number is always real; a low one may not be. `python3 spikes/amd-gpu-metrics/amdgpu_sysfs_probe.py probe` prints the same attributes with the honest ok/missing/denied/busy status.\n\nEvery `node_*` series on this row comes from the `host` scrape job (node_exporter on the host, `prometheus/targets/host.json`). If this panel is empty while the model panels are fine, the exporter or the scrape path is the problem, not the GPU: `NodeExporterAbsent` / `NodeGpuTelemetryAbsent` say which, and monitoring/README.md has the decision tree. Pinning `$job` to a model job also empties this row on purpose \u2014 a host has no model job.",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 24,
+            "x": 0,
+            "y": 33
+          },
+          "options": {
+            "code": {
+              "language": "plaintext",
+              "showLineNumbers": false
+            },
+            "content": "This box is a shared-memory APU (gfx1151), so there is no separate pool of graphics memory in any useful sense:\n\n* **GTT is the pool the model grows.** Weights, KV cache and activations are GTT (TTM) allocations; `node_drm_memory_gtt_size_bytes` is the `amdgpu.gttsize=120000` from the root README, and the used/size ratio is the pressure the stack was blind to before this row existed.\n* **VRAM is the BIOS carve-out**, deliberately minimised in the BIOS (*Dedicated Graphics Memory*). It barely moves and it is **never** an alert \u2014 it is plotted so a mistake in the BIOS or the driver shows up as a flat line, not as a mystery.\n* **GTT is system RAM**, so GPU exhaustion and host exhaustion are the same event: the *Host companion* panel (memory PSI, swap, load) is not a bonus, it is the other half of the question.\n* Nothing here needs ROCm: these are amdgpu **kernel driver** attributes, and the Vulkan path llama.cpp uses reads the same sysfs the ROCm path would. No `/dev/kfd`, no root, and the exporter is bound to loopback only.\n\nAbsent is not zero. node_exporter publishes an attribute it could not read as `0` rather than omitting it (the findings note \u00a71.1 explains why: the driver refuses to answer rather than waking a runtime-suspended card), so `0 %` busy or a `0` sensor can mean *could not ask*. A high number is always real; a low one may not be. `python3 spikes/amd-gpu-metrics/amdgpu_sysfs_probe.py probe` prints the same attributes with the honest ok/missing/denied/busy status.\n\nEvery `node_*` series on this row comes from the `host` scrape job (node_exporter on the host, `prometheus/targets/host.json`). If this panel is empty while the model panels are fine, the exporter or the scrape path is the problem, not the GPU: `NodeExporterAbsent` / `NodeGpuTelemetryAbsent` say which, and monitoring/README.md has the decision tree. Pinning `$job` to a model job also empties this row on purpose \u2014 a host has no model job.",
+            "mode": "markdown"
+          }
+        },
+        {
+          "id": 52,
+          "type": "stat",
+          "title": "GTT used",
+          "description": "`max(GTT used / GTT size)` \u2014 the pressure ratio NodeGttPressureHigh alerts on, as a share of this box's whole GPU budget (the `amdgpu.gttsize=` ceiling, weights included). Bands at 80 %/95 %; the alert number lives in `prometheus/alert_thresholds.env` and should be re-tuned from `host:gtt_usage_ratio:max_2d` after two days of real use.\n\nPromQL sent by this panel:\n\n```promql\nA: max({__name__=~\"node_drm_memory_gtt_used_bytes\",job=~\"$job\",instance=~\"$instance\"} / {__name__=~\"node_drm_memory_gtt_size_bytes\",job=~\"$job\",instance=~\"$instance\"})\n```",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 4,
+            "x": 0,
+            "y": 38
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "max({__name__=~\"node_drm_memory_gtt_used_bytes\",job=~\"$job\",instance=~\"$instance\"} / {__name__=~\"node_drm_memory_gtt_size_bytes\",job=~\"$job\",instance=~\"$instance\"})",
+              "legendFormat": "of the GTT budget",
+              "range": false,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1,
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {},
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 0.8
+                  },
+                  {
+                    "color": "red",
+                    "value": 0.95
+                  }
+                ]
+              },
+              "unit": "percentunit",
+              "decimals": 1,
+              "min": 0,
+              "max": 1,
+              "noValue": "no GPU telemetry (host job down?)"
+            },
+            "overrides": []
+          },
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "value_and_name",
+            "wideLayout": true
+          }
+        },
+        {
+          "id": 53,
+          "type": "stat",
+          "title": "GTT headroom",
+          "description": "`min(GTT size - GTT used)` \u2014 the bytes left before an allocation fails, which is the number that decides whether the next request or the next model fits. Absolute, because 'how much is enough' depends on what you are about to load, not on a percentage.\n\nPromQL sent by this panel:\n\n```promql\nA: min({__name__=~\"node_drm_memory_gtt_size_bytes\",job=~\"$job\",instance=~\"$instance\"} - {__name__=~\"node_drm_memory_gtt_used_bytes\",job=~\"$job\",instance=~\"$instance\"})\n```",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 4,
+            "x": 4,
+            "y": 38
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "min({__name__=~\"node_drm_memory_gtt_size_bytes\",job=~\"$job\",instance=~\"$instance\"} - {__name__=~\"node_drm_memory_gtt_used_bytes\",job=~\"$job\",instance=~\"$instance\"})",
+              "legendFormat": "bytes free",
+              "range": false,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1,
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {},
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 4000000000
+                  },
+                  {
+                    "color": "green",
+                    "value": 16000000000
+                  }
+                ]
+              },
+              "unit": "bytes",
+              "decimals": 0,
+              "noValue": "no GPU telemetry (host job down?)"
+            },
+            "overrides": []
+          },
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "value_and_name",
+            "wideLayout": true
+          }
+        },
+        {
+          "id": 54,
+          "type": "stat",
+          "title": "GPU busy",
+          "description": "`max(node_drm_gpu_busy_percent)` \u2014 the driver's own load figure (SMU average gfx activity on this part). Read it against decode tok/s on the Overview row: busy high and tok/s low is a thermally or memory-throttled box, busy low and tok/s low is an idle one.\n\nPromQL sent by this panel:\n\n```promql\nA: max({__name__=~\"node_drm_gpu_busy_percent\",job=~\"$job\",instance=~\"$instance\"})\n```",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 4,
+            "x": 8,
+            "y": 38
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "max({__name__=~\"node_drm_gpu_busy_percent\",job=~\"$job\",instance=~\"$instance\"})",
+              "legendFormat": "busy %",
+              "range": false,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1,
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {},
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "percent",
+              "decimals": 0,
+              "min": 0,
+              "max": 100,
+              "noValue": "no gpu_busy_percent (see panel note: absent is not 0)"
+            },
+            "overrides": []
+          },
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "value_and_name",
+            "wideLayout": true
+          }
+        },
+        {
+          "id": 55,
+          "type": "stat",
+          "title": "hottest GPU sensor",
+          "description": "`max(node_hwmon_temp_celsius{chip=\"amdgpu\"})` \u2014 the hottest of the GPU's sensors, whichever the kernel names them (gfx1151's sensor names are only knowable on the box; `node_hwmon_chip_names` is the lookup). On this class of part the junction maximum is about 100 \u00b0C, which is why the bands match the two alerts.\n\nPromQL sent by this panel:\n\n```promql\nA: max(node_hwmon_temp_celsius{chip=\"amdgpu\",job=~\"$job\",instance=~\"$instance\"})\n```",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 4,
+            "x": 12,
+            "y": 38
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "max(node_hwmon_temp_celsius{chip=\"amdgpu\",job=~\"$job\",instance=~\"$instance\"})",
+              "legendFormat": "\u00b0C",
+              "range": false,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1,
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {},
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 95
+                  },
+                  {
+                    "color": "red",
+                    "value": 100
+                  }
+                ]
+              },
+              "unit": "celsius",
+              "decimals": 0,
+              "noValue": "no amdgpu hwmon temp exposed"
+            },
+            "overrides": []
+          },
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "value_and_name",
+            "wideLayout": true
+          }
+        },
+        {
+          "id": 56,
+          "type": "stat",
+          "title": "memory PSI",
+          "description": "`max(rate(node_pressure_memory_waiting_seconds_total[...]))` \u2014 the share of wall clock with at least one task stalled on memory. This is the same expression NodeMemoryPressure{High,Critical} alert on, and on a box whose GPU memory *is* system RAM it is the earliest warning either half produces.\n\nPromQL sent by this panel:\n\n```promql\nA: max(rate({__name__=~\"node_pressure_memory_waiting_seconds_total\",job=~\"$job\",instance=~\"$instance\"}[$__rate_interval]))\n```",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 4,
+            "x": 16,
+            "y": 38
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "max(rate({__name__=~\"node_pressure_memory_waiting_seconds_total\",job=~\"$job\",instance=~\"$instance\"}[$__rate_interval]))",
+              "legendFormat": "stalled fraction",
+              "range": false,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1,
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {},
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 0.1
+                  },
+                  {
+                    "color": "red",
+                    "value": 0.25
+                  }
+                ]
+              },
+              "unit": "percentunit",
+              "decimals": 2,
+              "min": 0,
+              "noValue": "no PSI on this kernel"
+            },
+            "overrides": []
+          },
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "value_and_name",
+            "wideLayout": true
+          }
+        },
+        {
+          "id": 57,
+          "type": "stat",
+          "title": "drm collector",
+          "description": "`node_scrape_collector_success{collector=\"drm\"}` \u2014 1 means the GPU half of this row was actually collected on the last scrape. It is on this row and not only on Scrape health because the failure mode here is silent: a containerised exporter with a partial `/sys` mount, or a kernel that stopped binding the card, takes the whole row down without taking node_exporter down.\n\nPromQL sent by this panel:\n\n```promql\nA: {__name__=~\"node_scrape_collector_success\",collector=\"drm\",job=~\"$job\",instance=~\"$instance\"}\n```",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 5,
+            "w": 4,
+            "x": 20,
+            "y": 38
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "{__name__=~\"node_scrape_collector_success\",collector=\"drm\",job=~\"$job\",instance=~\"$instance\"}",
+              "legendFormat": "drm ok",
+              "range": false,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1,
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {},
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": null
+                  },
+                  {
+                    "color": "green",
+                    "value": 1
+                  }
+                ]
+              },
+              "unit": "short",
+              "min": 0,
+              "max": 1,
+              "noValue": "no host scrape at all"
+            },
+            "overrides": []
+          },
+          "options": {
+            "colorMode": "value",
+            "graphMode": "area",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "value_and_name",
+            "wideLayout": true
+          }
+        },
+        {
+          "id": 58,
+          "type": "timeseries",
+          "title": "GPU memory pressure vs KV cache",
+          "description": "The payoff of this row: does KV-cache growth turn into GPU memory pressure on this box? Left axis, each series as a fraction of **its own** ceiling:\n\n* **GTT used** \u2014 `node_drm_memory_gtt_used_bytes / node_drm_memory_gtt_size_bytes`: the model's side, the pool that weights and KV are actually allocated from, out of the `amdgpu.gttsize` budget;\n* **KV cache** \u2014 `llamacpp:kv_cache_usage_ratio`, what the *server* says about its KV pool (the same series LLMKVCachePressure alerts read) and the `llm:kv_cache_usage_ratio` alias beside it;\n* right axis, bytes: the flat **GTT budget**, so the absolute scale of the claim is on the chart rather than in a footnote.\n\n**Read the shape, not the levels \u2014 and if the shape does not correlate, that is the answer.** The denominators are different on purpose (KV is a share of the KV pool; GTT is a share of a ~117 GiB budget that also holds the weights), so a KV cache going empty \u2192 full can move GTT by a few percent only. Two curves climbing together means KV growth is what consumes the pool; KV swinging while GTT sits flat means the budget is dominated by something else (a second model, a static context reservation, fragmentation) \u2014 in which case this panel has told you something worth knowing and the *Memory pools* panel says what.\n\nNot yet verified over a real traffic window from a development container with no GPU in it: on the box, `monitoring/collect_host_baseline.sh` prints the same two ratios over the last 24 h so the correlation is checked rather than assumed.\n\nAbsent is not zero. node_exporter publishes an attribute it could not read as `0` rather than omitting it (the findings note \u00a71.1 explains why: the driver refuses to answer rather than waking a runtime-suspended card), so `0 %` busy or a `0` sensor can mean *could not ask*. A high number is always real; a low one may not be. `python3 spikes/amd-gpu-metrics/amdgpu_sysfs_probe.py probe` prints the same attributes with the honest ok/missing/denied/busy status.\n\nEvery `node_*` series on this row comes from the `host` scrape job (node_exporter on the host, `prometheus/targets/host.json`). If this panel is empty while the model panels are fine, the exporter or the scrape path is the problem, not the GPU: `NodeExporterAbsent` / `NodeGpuTelemetryAbsent` say which, and monitoring/README.md has the decision tree. Pinning `$job` to a model job also empties this row on purpose \u2014 a host has no model job.\n\nPromQL sent by this panel:\n\n```promql\nA: {__name__=~\"node_drm_memory_gtt_used_bytes\",job=~\"$job\",instance=~\"$instance\"} / {__name__=~\"node_drm_memory_gtt_size_bytes\",job=~\"$job\",instance=~\"$instance\"}\nB: host:gtt_usage_ratio{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\nC: max({__name__=~\"llamacpp:kv_cache_usage_ratio|llamacpp:kv_cache_usage\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\nD: llm:kv_cache_usage_ratio{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\nE: {__name__=~\"node_drm_memory_gtt_size_bytes\",job=~\"$job\",instance=~\"$instance\"}\n```",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 10,
+            "w": 24,
+            "x": 0,
+            "y": 43
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "{__name__=~\"node_drm_memory_gtt_used_bytes\",job=~\"$job\",instance=~\"$instance\"} / {__name__=~\"node_drm_memory_gtt_size_bytes\",job=~\"$job\",instance=~\"$instance\"}",
+              "legendFormat": "GTT used (fraction of the GTT budget)",
+              "range": true,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "host:gtt_usage_ratio{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}",
+              "legendFormat": "host:gtt_usage_ratio (rule)",
+              "range": true,
+              "refId": "B",
+              "interval": "15s",
+              "intervalFactor": 1
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "max({__name__=~\"llamacpp:kv_cache_usage_ratio|llamacpp:kv_cache_usage\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})",
+              "legendFormat": "KV cache used (fraction of the KV pool)",
+              "range": true,
+              "refId": "C",
+              "interval": "15s",
+              "intervalFactor": 1
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "llm:kv_cache_usage_ratio{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}",
+              "legendFormat": "llm:kv_cache_usage_ratio (rule)",
+              "range": true,
+              "refId": "D",
+              "interval": "15s",
+              "intervalFactor": 1
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "{__name__=~\"node_drm_memory_gtt_size_bytes\",job=~\"$job\",instance=~\"$instance\"}",
+              "legendFormat": "GTT budget (bytes) \u2014 right axis",
+              "range": true,
+              "refId": "E",
+              "interval": "15s",
+              "intervalFactor": 1
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisLabel": "",
+                "drawStyle": "line",
+                "fillOpacity": 8,
+                "gradientMode": "none",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 4,
+                "showPoints": "auto",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "percentunit",
+              "decimals": 1,
+              "noValue": "no GPU telemetry (host job down?)"
+            },
+            "overrides": [
+              {
+                "id": "byFrameRefID",
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "A"
+                },
+                "properties": [
+                  {
+                    "id": "min",
+                    "value": 0
+                  },
+                  {
+                    "id": "max",
+                    "value": 1
+                  }
+                ]
+              },
+              {
+                "id": "byFrameRefID",
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "B"
+                },
+                "properties": [
+                  {
+                    "id": "min",
+                    "value": 0
+                  },
+                  {
+                    "id": "max",
+                    "value": 1
+                  }
+                ]
+              },
+              {
+                "id": "byFrameRefID",
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "C"
+                },
+                "properties": [
+                  {
+                    "id": "min",
+                    "value": 0
+                  },
+                  {
+                    "id": "max",
+                    "value": 1
+                  }
+                ]
+              },
+              {
+                "id": "byFrameRefID",
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "D"
+                },
+                "properties": [
+                  {
+                    "id": "min",
+                    "value": 0
+                  },
+                  {
+                    "id": "max",
+                    "value": 1
+                  }
+                ]
+              },
+              {
+                "id": "byFrameRefID",
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "E"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "bytes"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  },
+                  {
+                    "id": "custom.axisPlacement",
+                    "value": "right"
+                  },
+                  {
+                    "id": "custom.axisLabel",
+                    "value": "GTT budget (bytes)"
+                  },
+                  {
+                    "id": "min",
+                    "value": 0
+                  },
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "dash": [
+                        10,
+                        10
+                      ],
+                      "fill": "dash"
+                    }
+                  },
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "dark-yellow",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "displayMode": "list",
+              "placement": "right",
+              "showLast": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 59,
+          "type": "timeseries",
+          "title": "Memory pools, bytes",
+          "description": "The four pools behind the ratio above, in bytes, so an absolute claim can be checked without arithmetic:\n\n* **GTT used** (left) against the dashed **GTT budget** \u2014 the ceiling is flat by construction (a boot parameter), so any slope is the model;\n* **VRAM used** and **visible VRAM used** (left, dashed): the BIOS carve-out. Flat and small is the *correct* shape on this box \u2014 see the note at the top of the row, and do not alert on these;\n* **MemAvailable** on the right axis, because GTT is carved from it: when GTT climbs, this is what falls. Two axes because 117 GiB of system RAM and a 30 MiB VRAM used on one scale would be a chart with one line on it.\n\nPromQL sent by this panel:\n\n```promql\nA: {__name__=~\"node_drm_memory_gtt_used_bytes\",job=~\"$job\",instance=~\"$instance\"}\nB: {__name__=~\"node_drm_memory_gtt_size_bytes\",job=~\"$job\",instance=~\"$instance\"}\nC: {__name__=~\"node_drm_memory_vram_used_bytes\",job=~\"$job\",instance=~\"$instance\"}\nD: {__name__=~\"node_drm_memory_vis_vram_used_bytes\",job=~\"$job\",instance=~\"$instance\"}\nE: {__name__=~\"node_memory_MemAvailable_bytes\",job=~\"$job\",instance=~\"$instance\"}\n```",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 53
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "{__name__=~\"node_drm_memory_gtt_used_bytes\",job=~\"$job\",instance=~\"$instance\"}",
+              "legendFormat": "GTT used",
+              "range": true,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "{__name__=~\"node_drm_memory_gtt_size_bytes\",job=~\"$job\",instance=~\"$instance\"}",
+              "legendFormat": "GTT budget (amdgpu.gttsize)",
+              "range": true,
+              "refId": "B",
+              "interval": "15s",
+              "intervalFactor": 1
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "{__name__=~\"node_drm_memory_vram_used_bytes\",job=~\"$job\",instance=~\"$instance\"}",
+              "legendFormat": "VRAM used (BIOS carve-out)",
+              "range": true,
+              "refId": "C",
+              "interval": "15s",
+              "intervalFactor": 1
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "{__name__=~\"node_drm_memory_vis_vram_used_bytes\",job=~\"$job\",instance=~\"$instance\"}",
+              "legendFormat": "visible VRAM used",
+              "range": true,
+              "refId": "D",
+              "interval": "15s",
+              "intervalFactor": 1
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "{__name__=~\"node_memory_MemAvailable_bytes\",job=~\"$job\",instance=~\"$instance\"}",
+              "legendFormat": "MemAvailable (system RAM) \u2014 right axis",
+              "range": true,
+              "refId": "E",
+              "interval": "15s",
+              "intervalFactor": 1
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisLabel": "",
+                "drawStyle": "line",
+                "fillOpacity": 8,
+                "gradientMode": "none",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 4,
+                "showPoints": "auto",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "bytes",
+              "decimals": 0,
+              "noValue": "no GPU telemetry (host job down?)"
+            },
+            "overrides": [
+              {
+                "id": "byFrameRefID",
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "B"
+                },
+                "properties": [
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "dash": [
+                        10,
+                        10
+                      ],
+                      "fill": "dash"
+                    }
+                  },
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "dark-yellow",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "byFrameRefID",
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "C"
+                },
+                "properties": [
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "dash": [
+                        10,
+                        10
+                      ],
+                      "fill": "dash"
+                    }
+                  },
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "purple",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "byFrameRefID",
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "D"
+                },
+                "properties": [
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "dash": [
+                        10,
+                        10
+                      ],
+                      "fill": "dash"
+                    }
+                  },
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "super-light-purple",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "byFrameRefID",
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "E"
+                },
+                "properties": [
+                  {
+                    "id": "custom.axisPlacement",
+                    "value": "right"
+                  },
+                  {
+                    "id": "custom.axisLabel",
+                    "value": "MemAvailable (bytes)"
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "displayMode": "list",
+              "placement": "right",
+              "showLast": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 60,
+          "type": "timeseries",
+          "title": "GPU busy %, temps and power",
+          "description": "Utilisation, thermals and power in one panel, because the interesting questions are causal chains between them (throttling: busy % flat or falling while the temperature sits on the band and power is at its cap).\n\n* **GPU busy %** (left axis, 0-100) and **memory busy %** \u2014 the driver's gfx/mem activity. On an APU `mem_busy_percent` counts LPDDR-side activity and is worth reading with care, not as 'HBM is full';\n* **temps** on the **right axis in \u00b0C**, one line per amdgpu hwmon sensor (the hottest one is what the alerts read);\n* **power** has **no axis of its own** \u2014 it is drawn on its own hidden scale in watts, so read the legend/tooltip for its value. A third visible axis would be unreadable, and plotting watts against a \u00b0C axis would be a lie with better typography.\n\nThe findings note warns that on an APU the power sensor reports *package* power, not 'GPU power' \u2014 label it honestly in any screenshot.\n\nAbsent is not zero. node_exporter publishes an attribute it could not read as `0` rather than omitting it (the findings note \u00a71.1 explains why: the driver refuses to answer rather than waking a runtime-suspended card), so `0 %` busy or a `0` sensor can mean *could not ask*. A high number is always real; a low one may not be. `python3 spikes/amd-gpu-metrics/amdgpu_sysfs_probe.py probe` prints the same attributes with the honest ok/missing/denied/busy status.\n\nPromQL sent by this panel:\n\n```promql\nA: max({__name__=~\"node_drm_gpu_busy_percent\",job=~\"$job\",instance=~\"$instance\"})\nB: max({__name__=~\"node_drm_mem_busy_percent\",job=~\"$job\",instance=~\"$instance\"})\nC: node_hwmon_temp_celsius{chip=\"amdgpu\",job=~\"$job\",instance=~\"$instance\"}\nD: node_hwmon_power_average_watt{chip=\"amdgpu\",job=~\"$job\",instance=~\"$instance\"}\nE: node_hwmon_power_cap_watt{chip=\"amdgpu\",job=~\"$job\",instance=~\"$instance\"}\n```",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 53
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "max({__name__=~\"node_drm_gpu_busy_percent\",job=~\"$job\",instance=~\"$instance\"})",
+              "legendFormat": "GPU busy %",
+              "range": true,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "max({__name__=~\"node_drm_mem_busy_percent\",job=~\"$job\",instance=~\"$instance\"})",
+              "legendFormat": "memory busy %",
+              "range": true,
+              "refId": "B",
+              "interval": "15s",
+              "intervalFactor": 1
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "node_hwmon_temp_celsius{chip=\"amdgpu\",job=~\"$job\",instance=~\"$instance\"}",
+              "legendFormat": "{{sensor}} {{chip}} \u00b0C",
+              "range": true,
+              "refId": "C",
+              "interval": "15s",
+              "intervalFactor": 1
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "node_hwmon_power_average_watt{chip=\"amdgpu\",job=~\"$job\",instance=~\"$instance\"}",
+              "legendFormat": "{{sensor}} avg power (W, no axis)",
+              "range": true,
+              "refId": "D",
+              "interval": "15s",
+              "intervalFactor": 1
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "node_hwmon_power_cap_watt{chip=\"amdgpu\",job=~\"$job\",instance=~\"$instance\"}",
+              "legendFormat": "{{sensor}} power cap (W, no axis)",
+              "range": true,
+              "refId": "E",
+              "interval": "15s",
+              "intervalFactor": 1
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisLabel": "",
+                "drawStyle": "line",
+                "fillOpacity": 8,
+                "gradientMode": "none",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 4,
+                "showPoints": "auto",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "percent",
+              "decimals": 1,
+              "min": 0,
+              "noValue": "no amdgpu busy % / hwmon sensors"
+            },
+            "overrides": [
+              {
+                "id": "byFrameRefID",
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "A"
+                },
+                "properties": [
+                  {
+                    "id": "min",
+                    "value": 0
+                  },
+                  {
+                    "id": "max",
+                    "value": 100
+                  }
+                ]
+              },
+              {
+                "id": "byFrameRefID",
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "B"
+                },
+                "properties": [
+                  {
+                    "id": "min",
+                    "value": 0
+                  },
+                  {
+                    "id": "max",
+                    "value": 100
+                  },
+                  {
+                    "id": "color",
+                    "value": {
+                      "fixedColor": "orange",
+                      "mode": "fixed"
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "byFrameRefID",
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "C"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "celsius"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 1
+                  },
+                  {
+                    "id": "custom.axisPlacement",
+                    "value": "right"
+                  },
+                  {
+                    "id": "custom.axisLabel",
+                    "value": "\u00b0C"
+                  },
+                  {
+                    "id": "min",
+                    "value": 20
+                  },
+                  {
+                    "id": "max",
+                    "value": 110
+                  }
+                ]
+              },
+              {
+                "id": "byFrameRefID",
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "D"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "watt"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 1
+                  },
+                  {
+                    "id": "custom.axisPlacement",
+                    "value": "hidden"
+                  },
+                  {
+                    "id": "min",
+                    "value": 0
+                  },
+                  {
+                    "id": "max",
+                    "value": 150
+                  },
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "dash": [
+                        10,
+                        10
+                      ],
+                      "fill": "dash"
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "byFrameRefID",
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "E"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "watt"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 1
+                  },
+                  {
+                    "id": "custom.axisPlacement",
+                    "value": "hidden"
+                  },
+                  {
+                    "id": "min",
+                    "value": 0
+                  },
+                  {
+                    "id": "max",
+                    "value": 150
+                  },
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "dash": [
+                        10,
+                        10
+                      ],
+                      "fill": "dash"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "displayMode": "list",
+              "placement": "right",
+              "showLast": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 61,
+          "type": "timeseries",
+          "title": "Host companion: memory PSI, swap, load",
+          "description": "Because the GTT pool is system RAM, the same exhaustion event is visible from the host side \u2014 usually *earlier*, because the kernel starts stalling tasks before the driver refuses an allocation:\n\n* **memory PSI** (left axis, fraction of wall clock with \u22651 task stalled on memory) \u2014 the expression NodeMemoryPressure{High,Critical} alert on;\n* **swap used** on the **right axis in bytes**, against the dashed swap total: on this box swap is the pressure valve after GTT, so a climbing swap line with a flat GTT line is a different problem than both climbing;\n* **load1 / load5** have **no axis** (own hidden scale): how many tasks were runnable, which is what 'the box feels slow' actually measures.\n\nRead together with the GPU panels above: GTT pressure + PSI + load rising together is the box running out of memory; GTT alone is a sizing problem in the model config.\n\nPromQL sent by this panel:\n\n```promql\nA: max(rate({__name__=~\"node_pressure_memory_waiting_seconds_total\",job=~\"$job\",instance=~\"$instance\"}[$__rate_interval]))\nB: sum({__name__=~\"node_memory_SwapTotal_bytes\",job=~\"$job\",instance=~\"$instance\"}) - sum({__name__=~\"node_memory_SwapFree_bytes\",job=~\"$job\",instance=~\"$instance\"})\nC: sum({__name__=~\"node_memory_SwapTotal_bytes\",job=~\"$job\",instance=~\"$instance\"})\nD: {__name__=~\"node_load1\",job=~\"$job\",instance=~\"$instance\"}\nE: {__name__=~\"node_load5\",job=~\"$job\",instance=~\"$instance\"}\n```",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 61
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "max(rate({__name__=~\"node_pressure_memory_waiting_seconds_total\",job=~\"$job\",instance=~\"$instance\"}[$__rate_interval]))",
+              "legendFormat": "memory PSI (stalled fraction)",
+              "range": true,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum({__name__=~\"node_memory_SwapTotal_bytes\",job=~\"$job\",instance=~\"$instance\"}) - sum({__name__=~\"node_memory_SwapFree_bytes\",job=~\"$job\",instance=~\"$instance\"})",
+              "legendFormat": "swap used \u2014 right axis",
+              "range": true,
+              "refId": "B",
+              "interval": "15s",
+              "intervalFactor": 1
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "sum({__name__=~\"node_memory_SwapTotal_bytes\",job=~\"$job\",instance=~\"$instance\"})",
+              "legendFormat": "swap total \u2014 right axis",
+              "range": true,
+              "refId": "C",
+              "interval": "15s",
+              "intervalFactor": 1
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "{__name__=~\"node_load1\",job=~\"$job\",instance=~\"$instance\"}",
+              "legendFormat": "load1 (no axis)",
+              "range": true,
+              "refId": "D",
+              "interval": "15s",
+              "intervalFactor": 1
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "{__name__=~\"node_load5\",job=~\"$job\",instance=~\"$instance\"}",
+              "legendFormat": "load5 (no axis)",
+              "range": true,
+              "refId": "E",
+              "interval": "15s",
+              "intervalFactor": 1
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisLabel": "",
+                "drawStyle": "line",
+                "fillOpacity": 8,
+                "gradientMode": "none",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 4,
+                "showPoints": "auto",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "percentunit",
+              "decimals": 2,
+              "min": 0,
+              "noValue": "no host telemetry"
+            },
+            "overrides": [
+              {
+                "id": "byFrameRefID",
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "B"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "bytes"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  },
+                  {
+                    "id": "custom.axisPlacement",
+                    "value": "right"
+                  },
+                  {
+                    "id": "custom.axisLabel",
+                    "value": "swap (bytes)"
+                  }
+                ]
+              },
+              {
+                "id": "byFrameRefID",
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "C"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "bytes"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  },
+                  {
+                    "id": "custom.axisPlacement",
+                    "value": "hidden"
+                  },
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "dash": [
+                        10,
+                        10
+                      ],
+                      "fill": "dash"
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "byFrameRefID",
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "D"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "short"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 2
+                  },
+                  {
+                    "id": "custom.axisPlacement",
+                    "value": "hidden"
+                  }
+                ]
+              },
+              {
+                "id": "byFrameRefID",
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "E"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "short"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 2
+                  },
+                  {
+                    "id": "custom.axisPlacement",
+                    "value": "hidden"
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "displayMode": "list",
+              "placement": "right",
+              "showLast": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 62,
+          "type": "timeseries",
+          "title": "Exporter health: collectors, drm scrape time, exporter RSS",
+          "description": "The row's own instrumentation, so 'the GPU is fine and the telemetry is not' is a panel and not a guess:\n\n* **worst collector** \u2014 `min(node_scrape_collector_success)` over the host's collectors: 0 means at least one failed on the last scrape (the `collector` label on the line below says which);\n* **drm collector** \u2014 the GPU half specifically, the one a partial `/sys` mount breaks;\n* **drm scrape duration** on the right axis in seconds: a collector that starts blocking on sysfs is a card that is going away, and it is also the scrape-time budget the `host` job pays;\n* **exporter RSS** (no axis, bytes): the footprint claim in monitoring/README.md#footprint, live. It is a budget line, so it is on the dashboard rather than only in a script.\n\nNothing here is clamped by `$model` (a host has no model), which is deliberate \u2014 see the panel note.\n\nPromQL sent by this panel:\n\n```promql\nA: min by (job, instance) ({__name__=~\"node_scrape_collector_success\",job=~\"$job\",instance=~\"$instance\"})\nB: {__name__=~\"node_scrape_collector_success\",collector=\"drm\",job=~\"$job\",instance=~\"$instance\"}\nC: {__name__=~\"node_scrape_collector_duration_seconds\",collector=\"drm\",job=~\"$job\",instance=~\"$instance\"}\nD: {__name__=~\"process_resident_memory_bytes\",job=~\"$job\",instance=~\"$instance\"}\n```",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 61
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "min by (job, instance) ({__name__=~\"node_scrape_collector_success\",job=~\"$job\",instance=~\"$instance\"})",
+              "legendFormat": "worst collector (0 = one failed)",
+              "range": true,
+              "refId": "A",
+              "interval": "15s",
+              "intervalFactor": 1
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "{__name__=~\"node_scrape_collector_success\",collector=\"drm\",job=~\"$job\",instance=~\"$instance\"}",
+              "legendFormat": "drm collector ok",
+              "range": true,
+              "refId": "B",
+              "interval": "15s",
+              "intervalFactor": 1
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "{__name__=~\"node_scrape_collector_duration_seconds\",collector=\"drm\",job=~\"$job\",instance=~\"$instance\"}",
+              "legendFormat": "drm scrape time (s) \u2014 right axis",
+              "range": true,
+              "refId": "C",
+              "interval": "15s",
+              "intervalFactor": 1
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "editorMode": "code",
+              "expr": "{__name__=~\"process_resident_memory_bytes\",job=~\"$job\",instance=~\"$instance\"}",
+              "legendFormat": "exporter RSS (bytes, no axis)",
+              "range": true,
+              "refId": "D",
+              "interval": "15s",
+              "intervalFactor": 1
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisLabel": "",
+                "drawStyle": "line",
+                "fillOpacity": 8,
+                "gradientMode": "none",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 4,
+                "showPoints": "auto",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "short",
+              "decimals": 2,
+              "min": 0,
+              "noValue": "no host scrape at all"
+            },
+            "overrides": [
+              {
+                "id": "byFrameRefID",
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "A"
+                },
+                "properties": [
+                  {
+                    "id": "min",
+                    "value": 0
+                  },
+                  {
+                    "id": "max",
+                    "value": 1
+                  }
+                ]
+              },
+              {
+                "id": "byFrameRefID",
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "B"
+                },
+                "properties": [
+                  {
+                    "id": "min",
+                    "value": 0
+                  },
+                  {
+                    "id": "max",
+                    "value": 1
+                  }
+                ]
+              },
+              {
+                "id": "byFrameRefID",
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "C"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "s"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 3
+                  },
+                  {
+                    "id": "custom.axisPlacement",
+                    "value": "right"
+                  },
+                  {
+                    "id": "custom.axisLabel",
+                    "value": "s"
+                  },
+                  {
+                    "id": "min",
+                    "value": 0
+                  }
+                ]
+              },
+              {
+                "id": "byFrameRefID",
+                "matcher": {
+                  "id": "byFrameRefID",
+                  "options": "D"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "bytes"
+                  },
+                  {
+                    "id": "decimals",
+                    "value": 0
+                  },
+                  {
+                    "id": "custom.axisPlacement",
+                    "value": "hidden"
+                  },
+                  {
+                    "id": "min",
+                    "value": 0
+                  },
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "dash": [
+                        10,
+                        10
+                      ],
+                      "fill": "dash"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "displayMode": "list",
+              "placement": "right",
+              "showLast": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        }
+      ]
     }
   ]
 }

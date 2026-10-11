@@ -1,0 +1,103 @@
+# systemd **user** unit for the host + GPU telemetry exporter — same shape as
+# monitoring/monitoring.service and monitor/llm-monitor.service, so the model
+# server, the monitor page, the monitoring stack and this exporter all start the
+# same way after a reboot.
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp monitoring/node-exporter.service ~/.config/systemd/user/   # or symlink it
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now node-exporter
+#   systemctl --user status node-exporter
+#
+# Start/at-boot without a login (same requirement as monitoring.service):
+#
+#   sudo loginctl enable-linger $USER
+#
+# Install the pinned binary first — it verifies the release checksum and puts the
+# binary where this unit expects it:
+#
+#   monitoring/install_node_exporter.sh
+#
+# WHY THIS RUNS ON THE HOST AND NOT IN THE COMPOSE NETWORK
+# -------------------------------------------------------
+# Everything this exporter reads is a file under /sys, published by the **amdgpu
+# kernel driver** — not by ROCm. Vulkan/RADV and ROCm read the same sysfs, so this
+# box needs no ROCm, no /dev/kfd, no /dev/dri and no root to expose VRAM, GTT,
+# GPU busy %, temperatures and power. See
+# spikes/amd-gpu-metrics/FINDINGS.md for the attribute-by-attribute matrix
+# (workspace-szw.10) and monitoring/README.md "Host + GPU telemetry" for the
+# runbook. Running it inside a container — the model server's distrobox or the
+# monitoring compose network — buys nothing and puts host telemetry behind a
+# container that something else can restart, so it does not: this is a host
+# process with the host's /sys.
+#
+# IF IT IS EVER CONTAINERISED, MOUNT ALL OF /sys READ-ONLY. /sys/class/drm/card0/device
+# is a symlink into /sys/devices/pci.../, and node_exporter resolves it
+# (prometheus/procfs calls filepath.EvalSymlinks), so a narrow `-v /sys/class/drm:...`
+# mount makes the card vanish and every scrape fails with
+# `node_scrape_collector_success{collector="drm"} 0`. Verified in the spike. Mount
+# `-v /sys:/sys:ro` or do not do it at all.
+#
+# LOOPBACK ONLY. Prometheus has no authentication and neither does this exporter:
+# it publishes this machine's hardware inventory, process list, mount table and
+# network counters. Binding it anywhere but 127.0.0.1 publishes all of that to
+# whatever else can reach the port. The `--web.listen-address=127.0.0.1:9100`
+# below is a policy, not a default — monitoring/check_monitoring.py re-checks it,
+# and monitoring/README.md ("Host + GPU telemetry") documents how Prometheus
+# reaches it from there.
+#
+# The flags are deliberately literal (no $VARIABLES): they are what
+# `systemctl --user cat node-exporter` shows, and what check_monitoring.py checks.
+
+[Unit]
+Description=node_exporter with the amdgpu drm collector (host + GPU telemetry)
+Documentation=file:%h/service/monitoring/README.md
+Documentation=file:%h/service/spikes/amd-gpu-metrics/FINDINGS.md
+Documentation=https://github.com/prometheus/node_exporter#drm
+
+[Service]
+Type=simple
+# --collector.drm is the GPU half (GTT / VRAM bytes, gpu_busy_percent); hwmon is
+# default-on and carries the temperatures and the package power, so two flags
+# cover the whole ticket. Everything else is the host half, which is not a bonus:
+# on a shared-memory APU the GTT *is* system RAM, so the memory/PSI/swap/load
+# collectors are the other half of "why did the GPU allocation fail".
+ExecStart=%h/.local/bin/node_exporter --web.listen-address=127.0.0.1:9100 --collector.drm
+Restart=on-failure
+RestartSec=10
+Nice=10
+
+# --- the budget (ADR 0001 C5, amended by workspace-szw.13) -------------------
+# Measured 23.6 MiB PSS / 0.8 % CPU for exactly this flag set
+# (monitoring/README.md#footprint). The ceilings sit above the measurement on
+# purpose: a collector pass over a bigger /sys (more mounts, more cores) legitimately
+# costs more than the same binary in a container, and the guard is against a run-
+# away exporter, not against normal work. MemoryHigh is where systemd starts
+# reclaiming; MemoryMax is where it kills, and a kill is `NodeExporterAbsent` in
+# ten minutes — visible, not silent.
+MemoryHigh=28M
+MemoryMax=40M
+CPUQuota=10%
+TasksMax=64
+
+# --- hardening that cannot break a collector ----------------------------------
+# Nothing here needs a capability, needs to write anywhere, or needs to be able to
+# create namespaces. /sys is read-only for this process by construction, and
+# ProtectKernelTunables makes that explicit rather than incidental: node_exporter
+# only ever reads sysfs, so a write would be a bug, and here it is a refusal.
+NoNewPrivileges=true
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+PrivateTmp=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+UMask=0077
+
+[Install]
+WantedBy=default.target

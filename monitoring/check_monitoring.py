@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -272,7 +273,24 @@ REQUIRED_ALERTS = [
     "LLMStaleTarget",
     "LLMMonitorAbsent",
     "LLMScrapeParseErrors",
+    # host + GPU telemetry (workspace-szw.13): first "is the telemetry there", then
+    # the ceilings that are specific to a shared-memory AMD APU.
+    "NodeExporterAbsent",
+    "NodeExporterCollectorFailing",
+    "NodeGpuTelemetryAbsent",
+    "NodeGttPressureHigh",
+    "NodeGttExhausting",
+    "NodeGpuTempHigh",
+    "NodeGpuTempCritical",
+    "NodeMemoryPressureHigh",
+    "NodeMemoryPressureCritical",
 ]
+
+#: The only hosts a `host` scrape target may name. `host.docker.internal` is here
+#: because it is how the Prometheus container reaches the *host's* loopback (the
+#: same path the llm-server-via-proxy job uses for serve.py on 127.0.0.1:8090);
+#: adding a LAN address to this file is the disclosure decision, not a fix.
+HOST_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "host.docker.internal"}
 
 
 def check_unit_tests(alerts: list[str]) -> None:
@@ -304,7 +322,7 @@ def check_prometheus_config() -> None:
         check((PROM_DIR / str(rf)).is_file(), f"rule_files entry {rf} does not exist next to prometheus.yml")
 
     jobs = {job.get("job_name"): job for job in data.get("scrape_configs") or []}
-    for needed in ("llm-server", "llm-server-via-proxy", "prometheus"):
+    for needed in ("llm-server", "llm-server-via-proxy", "prometheus", "host"):
         check(needed in jobs, f"scrape_configs is missing the {needed} job")
     # The ADR: keep native names. Relabelling __name__ is how a rename sneaks in.
     check(
@@ -315,15 +333,24 @@ def check_prometheus_config() -> None:
         for relabel in (job or {}).get("metric_relabel_configs") or []:
             check("target_label" not in relabel, f"{name}: metric_relabel_configs must drop, not rename")
     check("file_sd_configs" in text, "the llm-server job should use file_sd so targets are a file")
-    targets = PROM_DIR / "targets" / "llm-servers.json"
-    check(targets.is_file(), "targets/llm-servers.json is missing")
-    if targets.is_file():
+    for name, path in (("llm-server", "targets/llm-servers.json"),
+                       ("host", "targets/host.json")):
+        target_file = PROM_DIR / path
+        check(target_file.is_file(), f"{path} is missing")
+        if not target_file.is_file():
+            continue
+        if name in jobs:
+            check(
+                path in (PROM_DIR / "prometheus.yml").read_text(encoding="utf-8"),
+                f"the {name} job should read its targets from {path} (file_sd, so a "
+                "target change needs no restart)",
+            )
         try:
-            entries = json.loads(targets.read_text(encoding="utf-8"))
+            entries = json.loads(target_file.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
-            check(False, f"targets/llm-servers.json is not valid JSON: {exc}")
-            entries = []
-        check(bool(entries), "targets/llm-servers.json is empty")
+            check(False, f"{path} is not valid JSON: {exc}")
+            continue
+        check(bool(entries), f"{path} is empty")
         for entry in entries if isinstance(entries, list) else []:
             check(bool(entry.get("targets")), f"target entry without targets: {entry}")
             for target in entry.get("targets", []):
@@ -331,6 +358,132 @@ def check_prometheus_config() -> None:
                     "://" not in str(target),
                     f"file_sd target must be host:port, not a URL: {target}",
                 )
+
+
+def check_host_telemetry() -> None:
+    """The host + GPU exporter (workspace-szw.13): the unit, the target, the pin.
+
+    Three things here fail silently and expensively:
+
+    * **the unit drifting from the scrape target** — the exporter listening on a
+      port Prometheus does not scrape looks identical to "the GPU has no data";
+    * **the exporter bound past loopback** — node_exporter publishes this machine's
+      hardware inventory, processes, mounts and network counters, and neither it
+      nor Prometheus has any authentication, so a non-loopback bind is a disclosure
+      decision (the same class as workspace-szw.12), never a default;
+    * **an unpinned or unverified download** — a curl-to-root installer turns an
+      upstream re-push into a change on this box.
+    """
+    unit = HERE / "node-exporter.service"
+    check(unit.is_file(), "node-exporter.service is missing")
+    listen_port = None
+    if unit.is_file():
+        text = unit.read_text(encoding="utf-8")
+        check("--collector.drm" in text,
+              "node-exporter.service does not enable --collector.drm — without it there "
+              "is no GPU telemetry (drm is default-disabled upstream)")
+        match = re.search(r"--web\.listen-address=(?:\[?::\]?|127\.0\.0\.1|localhost):(\d+)", text)
+        check(
+            bool(match),
+            "node-exporter.service must bind loopback explicitly "
+            "(--web.listen-address=127.0.0.1:9100); a bare :9100 exposes the whole "
+            "hardware inventory on every interface",
+        )
+        if match:
+            listen_port = match.group(1)
+        # user-unit shape, same as monitoring.service / llm-monitor.service
+        check("[Install]" in text and "WantedBy=default.target" in text,
+              "node-exporter.service is not a user unit shape ([Install] "
+              "WantedBy=default.target) — same as the other units in this repo")
+        check("%h" in text or "$HOME" in text,
+              "node-exporter.service should reference the user's own paths (%h), "
+              "not a system-wide install")
+        check("hwmon" in text,
+              "node-exporter.service should note that hwmon is what carries temps/power "
+              "(--collector.drm publishes no temperature at all)")
+        for knob in ("MemoryMax", "CPUQuota", "Restart="):
+            check(knob in text, f"node-exporter.service has no {knob} — an exporter "
+                                "without a ceiling is an unbudgeted process on a "
+                                "RAM-starved box")
+        check("/sys" in text,
+              "node-exporter.service should carry the /sys warning (a containerised "
+              "exporter needs ALL of /sys, not just /sys/class/drm)")
+
+    installer = HERE / "install_node_exporter.sh"
+    check(installer.is_file(), "install_node_exporter.sh is missing")
+    if installer.is_file():
+        text = installer.read_text(encoding="utf-8")
+        check(re.search(r"NODE_EXPORTER_VERSION=\"?[0-9]+\.[0-9]+\.[0-9]+", text) is not None,
+              "install_node_exporter.sh does not pin a version")
+        check(len(re.findall(r"SHA_[A-Z0-9]+=\"?[0-9a-f]{64}", text)) >= 2,
+              "install_node_exporter.sh should carry a sha256 per architecture and "
+              "verify it before executing anything")
+        check("sha256" in text.lower(), "install_node_exporter.sh never verifies a checksum")
+        check(not re.search(r"(?:^|[;&|\s])sudo\s", text),
+              "install_node_exporter.sh calls sudo: this is a *user* install (~/.local/bin, "
+              "a user unit), and root here would mean the unit and the installer disagree")
+        check("--check" in text,
+              "install_node_exporter.sh should be able to answer 'am I at the pin?' without "
+              "downloading anything — collect_host_baseline.sh asks it that question")
+
+    # The box-side collector: the runbook points at it, so it had better exist and
+    # had better ask the questions the findings note left open.
+    baseline = HERE / "collect_host_baseline.sh"
+    check(baseline.is_file(),
+          "collect_host_baseline.sh is missing — the runbook and alert_thresholds.env both "
+          "tell the reader to measure before setting a threshold, and this is how they measure")
+    if baseline.is_file():
+        text = baseline.read_text(encoding="utf-8")
+        for token, why in (("amdgpu_sysfs_probe.py", "the sensor capability matrix"),
+                           ("node_scrape_collector_success", "the drm collector's own success"),
+                           ("alert_thresholds.env", "where the measured thresholds go"),
+                           ("host:gtt_usage_ratio", "the recorded 2-day baseline"),
+                           ("llm:kv_cache_usage_ratio", "the KV half of the payoff overlay")):
+            check(token in text, f"collect_host_baseline.sh does not collect {why} ({token})")
+        check("query_range" in text,
+              "collect_host_baseline.sh should report min/mean/max over a window, not just "
+              "instant values — a threshold set from one sample is not a baseline")
+
+    host_targets = PROM_DIR / "targets" / "host.json"
+    if not host_targets.is_file():
+        return
+    try:
+        entries = json.loads(host_targets.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return
+    ports = set()
+    for entry in entries if isinstance(entries, list) else []:
+        for target in entry.get("targets", []):
+            host, _, port = str(target).rpartition(":")
+            ports.add(port)
+            check(
+                host.lower() in HOST_LOOPBACK_HOSTS,
+                f"targets/host.json target {target!r} is not loopback-scoped "
+                f"(allowed: {', '.join(sorted(HOST_LOOPBACK_HOSTS))}): node_exporter "
+                "publishes this box's hardware inventory and has no authentication. "
+                "Publishing it anywhere else is an explicit decision — see "
+                "monitoring/README.md ('Host + GPU telemetry')",
+            )
+    if listen_port and ports:
+        check(
+            listen_port in ports,
+            f"node-exporter.service listens on :{listen_port} but targets/host.json "
+            f"scrapes {', '.join(sorted(ports))} — the exporter is up and the panels "
+            "are empty, which is the worst possible failure mode",
+        )
+
+    # The GPU row has to be pointed at the same names the exporter publishes, or it
+    # renders 'no data' forever and nobody notices for a week.
+    dashboard = (GRAFANA_DIR / "dashboards" / "llm-server.json")
+    if dashboard.is_file():
+        joined = dashboard.read_text(encoding="utf-8")
+        for metric in ("node_drm_memory_gtt_used_bytes", "node_drm_memory_gtt_size_bytes",
+                       "node_drm_gpu_busy_percent", "node_memory_MemAvailable_bytes",
+                       "node_pressure_memory_waiting_seconds_total"):
+            check(metric in joined, f"dashboard does not plot {metric}")
+        check('node_hwmon_temp_celsius{chip=' in joined.replace('\\"', '"'),
+              "dashboard should read the GPU temperatures by hwmon chip, not by sensor "
+              "name (the sensor names on gfx1151 are only knowable on the box)")
 
 
 def check_dashboard() -> None:
@@ -416,7 +569,8 @@ def check_dashboard() -> None:
 
 #: The rows the dashboard ticket specifies. The dashboard is organised around these
 #: questions and nothing else (a raw per-series dump stays on the proxy page).
-DASHBOARD_ROWS = ("Overview", "Latency", "Cache & KV", "Speculative decode", "Scrape health")
+DASHBOARD_ROWS = ("Overview", "Latency", "Cache & KV", "Speculative decode", "Scrape health",
+                  "GPU & host")
 
 #: Panel types that ship with Grafana. Anything else is a plugin, and plugins are
 #: disabled in compose.yaml (GF_PLUGINS_ALLOW_LOADING: "false"): a panel of another
@@ -596,6 +750,22 @@ def check_dashboard_contract() -> None:
         "repeat-by-variable for multi-instance": '"repeat"' in joined,
         "histogram_quantile": "histogram_quantile" in joined,
         "$__rate_interval windows": "$__rate_interval" in joined,
+        # GPU & host row (workspace-szw.13). The payoff overlay has to have all three
+        # ingredients *on one panel* — GTT used, the GTT ceiling it is a fraction of,
+        # and the KV ratio it is supposed to track. Three separate panels answer
+        # nothing, which is why the ticket asked for one chart.
+        "GTT used vs GTT budget vs KV cache, on one panel": any(
+            all(token in " ".join(str(t.get("expr") or "") for t in p.get("targets") or [])
+                for token in ("node_drm_memory_gtt_used_bytes",
+                              "node_drm_memory_gtt_size_bytes",
+                              "kv_cache_usage_ratio"))
+            for p in charts
+        ),
+        "the GPU's power sensor": "node_hwmon_power_average_watt" in joined,
+        "swap and load, the host half of GTT exhaustion": (
+            "node_memory_SwapFree_bytes" in joined and "node_load1" in joined
+        ),
+        "exporter self-health is on the dashboard": "node_scrape_collector_success" in joined,
     }
     for what, holds in coverage.items():
         check(holds, f"dashboard does not cover: {what}")
@@ -618,11 +788,13 @@ def check_dashboard_contract() -> None:
             f"([1h:5m], not [1h]): {match.group(0)}",
         )
 
-    # --- every llm:* alias a panel plots must actually be recorded --------- #
-    # (?<![\w:]) so vLLM's own vllm:* names are not read as llm:* aliases.
-    aliases = set(re.findall(r"(?<![A-Za-z0-9_])llm:[A-Za-z0-9_:]+", expressions))
+    # --- every llm:* / host:* alias a panel plots must actually be recorded --- #
+    # (?<![\w:]) so vLLM's own vllm:* names are not read as llm:* aliases. `host:*`
+    # is the second namespace (workspace-szw.13): the GTT/PSI baselines the box
+    # records for itself, which a panel may only plot if the rule really exists.
+    aliases = set(re.findall(r"(?<![A-Za-z0-9_])(?:llm|host):[A-Za-z0-9_:]+", expressions))
     have = recorded_aliases()
-    check(bool(aliases), "no dashboard expression references an llm:* recording-rule alias")
+    check(bool(aliases), "no dashboard expression references an llm:*/host:* recording-rule alias")
     for alias in sorted(aliases):
         check(alias in have, f"dashboard plots {alias} but recording_rules.yml does not record it")
 
@@ -702,6 +874,18 @@ def check_compose() -> None:
     commands = " ".join(str(item) for item in (prom.get("command") or []))
     check("--storage.tsdb.retention.size=" in commands, "prometheus needs a retention SIZE cap")
     check("--storage.tsdb.retention.time=" in commands, "prometheus needs a retention time cap")
+
+    # Boolean flags must use the negated form. The flag parser in the pinned
+    # binary rejects `--flag=false` outright ("Error parsing command line
+    # arguments: unexpected false"), and `restart: unless-stopped` turns that into
+    # an endless restart loop that looks like an infrastructure problem. Found by
+    # actually starting the pinned image in workspace-szw.9.
+    for arg in [str(a) for a in (prom.get("command") or [])]:
+        check(
+            not re.search(r"--[\w][\w.-]*=(true|false)$", arg),
+            f"prometheus flag {arg!r}: boolean flags take no value; use the --no-<name> "
+            "form (e.g. --no-web.enable-lifecycle) or the container will not start",
+        )
 
     for name, svc in (("prometheus", prom), ("grafana", graf)):
         ports = [str(p) for p in (svc.get("ports") or [])]
@@ -794,6 +978,59 @@ def check_footprint_documented() -> None:
     readme = (HERE / "README.md").read_text(encoding="utf-8")
     for token in ("mem_limit", "retention.size", "footprint", "PSS"):
         check(token in readme, f"monitoring/README.md does not cover {token}")
+    # workspace-szw.13's documentation half: the runbook entry is the reason the new
+    # alerts are worth having, and "loopback" is the sentence that stops the next
+    # person binding the exporter on 0.0.0.0 to make a panel light up.
+    for token in ("node_exporter", "--collector.drm", "out of GTT", "loopback",
+                  "node-exporter.service", "host.json"):
+        check(token in readme, f"monitoring/README.md does not cover {token}")
+    # The amended budget has to say the same number in both places it is written down,
+    # or the go/no-go is decided by whichever document was read last.
+    adr = (HERE.parent / "docs" / "adr" / "0001-prometheus-grafana-owns-metrics.md")
+    if adr.is_file():
+        adr_text = adr.read_text(encoding="utf-8")
+        check("800 MiB" in adr_text and "800 MiB" in readme,
+              "the C5 budget after the node_exporter amendment (800 MiB) is not stated in "
+              "both the ADR and the runbook")
+        check("node_exporter" in adr_text,
+              "ADR 0001's budget does not carry the host exporter — it is the third process "
+              "in the total and the ADR is where that is decided")
+    check("FOOTPRINT_BUDGET_MIB=800" in readme,
+          "monitoring/README.md should show the footprint command being run against the "
+          "amended budget, not the script's pre-amendment default")
+
+
+def maybe_validate_compose_flags() -> None:
+    """If a prometheus binary is lying around, ask it whether the compose flags exist.
+
+    Compose files are not linted by the thing that runs them, so a typo'd or
+    version-wrong flag is only discovered when the container fails to come up on
+    the box. `prometheus --help` lists every flag it accepts, which is the
+    cheapest possible oracle. Skipped silently when no binary is available
+    (PROM_BIN=/path/to/prometheus to point at one).
+    """
+    binary = os.environ.get("PROM_BIN") or shutil.which("prometheus")
+    if not binary or not Path(binary).is_file():
+        return
+    result = subprocess.run([binary, "--help"], capture_output=True, text=True)
+    help_text = (result.stdout or "") + (result.stderr or "")
+    if not help_text:
+        return
+    accepted = set(re.findall(r"--(?:\[no-\])?([\w][\w.-]*)", help_text))
+    data = parse_yaml((HERE / "compose.yaml").read_text(encoding="utf-8"))
+    command = (((data.get("services") or {}).get("prometheus") or {}).get("command")) or []
+    for arg in (str(a).strip('"') for a in command):
+        if not arg.startswith("--"):
+            continue
+        name = arg[2:].split("=", 1)[0]
+        # `--no-x` and `--x` are the same flag; --help spells booleans `--[no-]x`.
+        candidates = {name, f"no-{name}"}
+        if name.startswith("no-"):
+            candidates.add(name[3:])
+        check(
+            bool(candidates & accepted),
+            f"prometheus rejects --{name}: the pinned binary's --help does not list it",
+        )
 
 
 def maybe_promtool(enabled: bool) -> None:
@@ -874,6 +1111,7 @@ def main(argv: list[str] | None = None) -> int:
     alerts = check_rules()
     check_unit_tests(alerts)
     check_prometheus_config()
+    check_host_telemetry()
     check_dashboard()
     check_dashboard_contract()
     check_dashboard_generated()
@@ -881,6 +1119,7 @@ def main(argv: list[str] | None = None) -> int:
     check_compose()
     check_upstream_declaration()
     check_footprint_documented()
+    maybe_validate_compose_flags()
     maybe_promtool(args.promtool)
 
     if FAILS:

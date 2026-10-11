@@ -191,6 +191,50 @@ MONITOR_PARSE_TRUNCATED = "llm_monitor_parse_truncated"
 MONITOR_SERIES = "llm_monitor_series_count"
 MONITOR_BUILD_INFO = "llm_monitor_build_info"
 
+# --------------------------------------------------------------------------- #
+# host + GPU selectors — node_exporter on the host with --collector.drm
+# --------------------------------------------------------------------------- #
+# Everything below comes from one host process (monitoring/node-exporter.service)
+# scraped as the `host` job. Two of these names carry the whole point of the row:
+# on a shared-memory APU the model's weights and KV live in the **GTT** pool, so
+# `gtt_used` grows with the model and `gtt_size` *is* the `amdgpu.gttsize=` from the
+# root README. VRAM is the BIOS carve-out (deliberately minimised, see the root
+# README) and barely moves — it is plotted for completeness and must never be an
+# alert. Full attribute matrix + provenance: spikes/amd-gpu-metrics/FINDINGS.md.
+# --------------------------------------------------------------------------- #
+GTT_USED = "node_drm_memory_gtt_used_bytes"
+GTT_SIZE = "node_drm_memory_gtt_size_bytes"
+VRAM_USED = "node_drm_memory_vram_used_bytes"
+VIS_VRAM_USED = "node_drm_memory_vis_vram_used_bytes"
+GPU_BUSY = "node_drm_gpu_busy_percent"
+MEM_BUSY = "node_drm_mem_busy_percent"
+
+#: Host RAM: the pool the GTT is carved out of, so this is the same exhaustion
+#: event seen from the other side (see the "Host companion" panel).
+MEM_AVAILABLE = "node_memory_MemAvailable_bytes"
+SWAP_TOTAL = "node_memory_SwapTotal_bytes"
+SWAP_FREE = "node_memory_SwapFree_bytes"
+#: PSI: cumulative seconds during which at least one task was stalled on memory.
+#: rate() of it is a stall fraction of wall clock — the same expression the
+#: NodeMemoryPressure* alerts read, so panel and alert cannot disagree.
+PSI_MEMORY_WAIT = "node_pressure_memory_waiting_seconds_total"
+LOAD1 = "node_load1"
+LOAD5 = "node_load5"
+
+#: hwmon selectors are partial selector strings (open brace, no close): the GPU's
+#: sensors are identified by **chip**, not by sensor name, because the sensor names
+#: on gfx1151 are only knowable on the box. `node_hwmon_chip_names` is the lookup.
+HWMON_TEMP = 'node_hwmon_temp_celsius{chip="amdgpu"'
+HWMON_POWER = 'node_hwmon_power_average_watt{chip="amdgpu"'
+HWMON_POWER_CAP = 'node_hwmon_power_cap_watt{chip="amdgpu"'
+
+#: The exporter's own self-observation: which collectors succeeded, how long the
+#: drm one took, and the RSS the footprint table claims.
+NODE_COLLECTOR_OK = "node_scrape_collector_success"
+NODE_COLLECTOR_TIME = "node_scrape_collector_duration_seconds"
+NODE_PROCESS_RSS = "process_resident_memory_bytes"
+
+
 #: The `llm:*` recording-rule aliases (see ../prometheus/recording_rules.yml).
 #: Panels plot these alongside their raw equivalents. The latency quantiles land
 #: with this dashboard, which is exactly what ADR 0001 C3 deferred to it.
@@ -198,6 +242,11 @@ RULE_DECODE = "llm:decode_tokens_per_second"
 RULE_PROMPT = "llm:prompt_tokens_per_second"
 RULE_REQUESTS = "llm:requests_per_second"
 RULE_KV = "llm:kv_cache_usage_ratio"
+#: Host/GPU baselines recorded by the `host-baselines` group (not vendor aliases —
+#: nothing here has a vendor spelling, so they are `host:*`, see that file's note).
+#: The `:max_2d` one is *the* number the GTT threshold is supposed to be set from.
+RULE_GTT = "host:gtt_usage_ratio"
+RULE_GTT_MAX = "host:gtt_usage_ratio:max_2d"
 RULE_CACHE = "llm:prompt_cache_hit_ratio"
 RULE_DRAFT = "llm:draft_acceptance_ratio"
 RULE_RUNNING = "llm:requests_running"
@@ -235,6 +284,27 @@ def sel(names: str, *, model: bool = True, model_label: str = "model") -> str:
 def raw(selector: str) -> str:
     """A plain (non-`__name__`) metric selector, clamped by the same variables."""
     return selector + '{job=~"$job",instance=~"$instance"}'
+
+
+def host_sel(names: str) -> str:
+    """A `__name__` union for host series — deliberately without the $model filter.
+
+    A machine has no model. Adding `model=~"$model"` here would mean that pinning
+    $model to one model silently emptied every GPU and host panel, which reads as
+    "the exporter is broken" rather than "you filtered out the whole box". $job and
+    $instance still apply, because the host *is* a scrape target like any other.
+    """
+    return '{__name__=~"%s",job=~"$job",instance=~"$instance"}' % names
+
+
+def hwmon(partial: str) -> str:
+    """Close a `node_hwmon_*{chip="amdgpu"` selector and clamp it by the variables.
+
+    Split this way so the chip filter is visible in the constant (it is the part
+    that identifies *which* device the sensor belongs to on a box whose hwmon
+    names are not knowable from a development container).
+    """
+    return partial + ',job=~"$job",instance=~"$instance"}'
 
 
 def var(name: str) -> str:
@@ -399,6 +469,47 @@ LEGEND_TABLE = {
 LEGEND_LIST = {"calcs": ["lastNotNull"], "displayMode": "list", "placement": "right", "showLast": True}
 
 
+def axis(ref, *, unit=None, decimals=None, placement=None, label=None, dashed=False,
+         color=None, min=None, max=None):
+    """A per-query field override, matched on the target's `refId`.
+
+    Why overrides instead of splitting the panel: several series with *different
+    units* belong on one chart exactly when the question is how they move together
+    — which is the GPU & host row's whole premise (GTT pressure next to KV
+    pressure). Grafana keeps a separate scale per axis placement, so `right` puts a
+    byte series on its own axis beside a percent one, and `hidden` gives a series
+    its own invisible scale instead of flattening it against an axis it does not
+    belong to. Legend and tooltip carry the value either way; the panel description
+    has to say which series have no axis of their own, because that is not guessable
+    from the chart.
+    """
+    properties = []
+    if unit is not None:
+        properties.append({"id": "unit", "value": unit})
+    if decimals is not None:
+        properties.append({"id": "decimals", "value": decimals})
+    if placement is not None:
+        properties.append({"id": "custom.axisPlacement", "value": placement})
+    if label is not None:
+        properties.append({"id": "custom.axisLabel", "value": label})
+    if min is not None:
+        properties.append({"id": "min", "value": min})
+    if max is not None:
+        properties.append({"id": "max", "value": max})
+    if dashed:
+        properties.append({"id": "custom.lineStyle",
+                           "value": {"dash": [10, 10], "fill": "dash"}})
+    if color is not None:
+        properties.append({"id": "color",
+                           "value": {"fixedColor": color, "mode": "fixed"}})
+    return {
+        "id": "byFrameRefID",
+        "matcher": {"id": "byFrameRefID", "options": ref},
+        "properties": properties,
+    }
+
+
+
 def describe(notes: str, targets: list[dict]) -> str:
     """Panel description = the prose *and* the expressions it describes.
 
@@ -468,7 +579,7 @@ def _defaults(*, unit, decimals, min_, max_, thresholds, band, no_value):
 
 def _panel(kind, title, notes, targets, *, pid, grid, unit="short", decimals=None,
            min=None, max=None, thresholds=None, band=False, no_value=None,
-           legend=None, repeat=None, max_per_row=2):
+           legend=None, repeat=None, max_per_row=2, overrides=None):
     pid = pid or next(FREE_IDS)
     w, h = grid
     body: dict = {
@@ -482,7 +593,7 @@ def _panel(kind, title, notes, targets, *, pid, grid, unit="short", decimals=Non
         "fieldConfig": {
             "defaults": _defaults(unit=unit, decimals=decimals, min_=min, max_=max,
                                   thresholds=thresholds, band=band, no_value=no_value),
-            "overrides": [],
+            "overrides": overrides or [],
         },
     }
     if kind == "stat":
@@ -515,11 +626,12 @@ def _panel(kind, title, notes, targets, *, pid, grid, unit="short", decimals=Non
 
 def ts(title, notes, targets, *, pid=None, unit="short", decimals=None, min=None,
        max=None, thresholds=None, band=False, no_value=None, legend=None,
-       w=12, h=8, repeat=None, max_per_row=2):
+       w=12, h=8, repeat=None, max_per_row=2, overrides=None):
     """A time-series panel."""
     return _panel("timeseries", title, notes, targets, pid=pid, grid=(w, h), unit=unit,
                   decimals=decimals, min=min, max=max, thresholds=thresholds, band=band,
-                  no_value=no_value, legend=legend, repeat=repeat, max_per_row=max_per_row)
+                  no_value=no_value, legend=legend, repeat=repeat, max_per_row=max_per_row,
+                  overrides=overrides)
 
 
 def stat(title, notes, targets, *, w=4, h=4, **kwargs):
@@ -1264,6 +1376,339 @@ def scrape_row():
 
 
 # --------------------------------------------------------------------------- #
+# GPU & host row (workspace-szw.13)
+# --------------------------------------------------------------------------- #
+# The row that makes the hardware a first-class citizen in this dashboard. It is
+# here because on THIS box the hardware is the failure mode: a shared-memory APU
+# where the model's weights and KV live in the GTT pool, sized by a kernel boot
+# parameter (`amdgpu.gttsize=`), so "the model failed to allocate" and "the box ran
+# out of RAM" are the same event. Everything comes from one host process
+# (monitoring/node-exporter.service, `--collector.drm`), no ROCm, nothing exposed
+# beyond loopback. Provenance of every claim below:
+# spikes/amd-gpu-metrics/FINDINGS.md.
+# --------------------------------------------------------------------------- #
+
+#: Visual bands for GTT pressure. Deliberately below the alert numbers
+#: (alert_thresholds.env: NodeGttPressureHigh at GTT_PRESSURE_WARN), same trick as
+#: KV_BANDS: the chart warns before the pager does.
+GTT_BANDS = [
+    {"color": "green", "value": None},
+    {"color": "yellow", "value": 0.8},
+    {"color": "red", "value": 0.95},
+]
+
+CAVEAT_EXPORTER = (
+    "\n\nEvery `node_*` series on this row comes from the `host` scrape job "
+    "(node_exporter on the host, `prometheus/targets/host.json`). If this panel is "
+    "empty while the model panels are fine, the exporter or the scrape path is the "
+    "problem, not the GPU: `NodeExporterAbsent` / `NodeGpuTelemetryAbsent` say which, "
+    "and monitoring/README.md has the decision tree. Pinning `$job` to a model job "
+    "also empties this row on purpose — a host has no model job."
+)
+CAVEAT_ABSENT = (
+    "\n\nAbsent is not zero. node_exporter publishes an attribute it could not read "
+    "as `0` rather than omitting it (the findings note §1.1 explains why: the driver "
+    "refuses to answer rather than waking a runtime-suspended card), so `0 %` busy or "
+    "a `0` sensor can mean *could not ask*. A high number is always real; a low one "
+    "may not be. `python3 spikes/amd-gpu-metrics/amdgpu_sysfs_probe.py probe` prints "
+    "the same attributes with the honest ok/missing/denied/busy status."
+)
+
+
+def gpu_host_row():
+    gtt_ratio = "%s / %s" % (host_sel(GTT_USED), host_sel(GTT_SIZE))
+    gtt_headroom = "min(%s - %s)" % (host_sel(GTT_SIZE), host_sel(GTT_USED))
+    swap_used = "sum(%s) - sum(%s)" % (host_sel(SWAP_TOTAL), host_sel(SWAP_FREE))
+    panels = [
+        markdown(
+            "Read this before the charts: GPU memory on this box",
+            "This box is a shared-memory APU (gfx1151), so there is no separate pool of "
+            "graphics memory in any useful sense:\n\n"
+            "* **GTT is the pool the model grows.** Weights, KV cache and activations are "
+            "GTT (TTM) allocations; `node_drm_memory_gtt_size_bytes` is the "
+            "`amdgpu.gttsize=120000` from the root README, and the used/size ratio is "
+            "the pressure the stack was blind to before this row existed.\n"
+            "* **VRAM is the BIOS carve-out**, deliberately minimised in the BIOS "
+            "(*Dedicated Graphics Memory*). It barely moves and it is **never** an alert "
+            "— it is plotted so a mistake in the BIOS or the driver shows up as a flat "
+            "line, not as a mystery.\n"
+            "* **GTT is system RAM**, so GPU exhaustion and host exhaustion are the same "
+            "event: the *Host companion* panel (memory PSI, swap, load) is not a "
+            "bonus, it is the other half of the question.\n"
+            "* Nothing here needs ROCm: these are amdgpu **kernel driver** attributes, "
+            "and the Vulkan path llama.cpp uses reads the same sysfs the ROCm path "
+            "would. No `/dev/kfd`, no root, and the exporter is bound to loopback only."
+            + CAVEAT_ABSENT + CAVEAT_EXPORTER,
+            h=5,
+        ),
+        stat(
+            "GTT used",
+            "`max(GTT used / GTT size)` — the pressure ratio NodeGttPressureHigh alerts "
+            "on, as a share of this box's whole GPU budget (the `amdgpu.gttsize=` "
+            "ceiling, weights included). Bands at 80 %/95 %; the alert number lives in "
+            "`prometheus/alert_thresholds.env` and should be re-tuned from "
+            "`host:gtt_usage_ratio:max_2d` after two days of real use.",
+            [target(gauge_max(gtt_ratio), "of the GTT budget")],
+            unit="percentunit", decimals=1, min=0, max=1, w=4, h=5,
+            thresholds=GTT_BANDS, no_value="no GPU telemetry (host job down?)",
+        ),
+        stat(
+            "GTT headroom",
+            "`min(GTT size - GTT used)` — the bytes left before an allocation fails, "
+            "which is the number that decides whether the next request or the next "
+            "model fits. Absolute, because 'how much is enough' depends on what you are "
+            "about to load, not on a percentage.",
+            [target(gtt_headroom, "bytes free")],
+            unit="bytes", decimals=0, w=4, h=5,
+            thresholds=[{"color": "red", "value": None},
+                        {"color": "yellow", "value": 4000000000},
+                        {"color": "green", "value": 16000000000}],
+            no_value="no GPU telemetry (host job down?)",
+        ),
+        stat(
+            "GPU busy",
+            "`max(node_drm_gpu_busy_percent)` — the driver's own load figure (SMU "
+            "average gfx activity on this part). Read it against decode tok/s on the "
+            "Overview row: busy high and tok/s low is a thermally or memory-throttled "
+            "box, busy low and tok/s low is an idle one.",
+            [target(gauge_max(host_sel(GPU_BUSY)), "busy %")],
+            unit="percent", decimals=0, min=0, max=100, w=4, h=5,
+            no_value="no gpu_busy_percent (see panel note: absent is not 0)",
+        ),
+        stat(
+            "hottest GPU sensor",
+            "`max(node_hwmon_temp_celsius{chip=\"amdgpu\"})` — the hottest of the GPU's "
+            "sensors, whichever the kernel names them (gfx1151's sensor names are only "
+            "knowable on the box; `node_hwmon_chip_names` is the lookup). On this class "
+            "of part the junction maximum is about 100 °C, which is why the bands match "
+            "the two alerts.",
+            [target("max(%s)" % hwmon(HWMON_TEMP), "°C")],
+            unit="celsius", decimals=0, w=4, h=5,
+            thresholds=[{"color": "green", "value": None},
+                        {"color": "yellow", "value": 95},
+                        {"color": "red", "value": 100}],
+            no_value="no amdgpu hwmon temp exposed",
+        ),
+        stat(
+            "memory PSI",
+            "`max(rate(node_pressure_memory_waiting_seconds_total[...]))` — the share of "
+            "wall clock with at least one task stalled on memory. This is the same "
+            "expression NodeMemoryPressure{High,Critical} alert on, and on a box whose "
+            "GPU memory *is* system RAM it is the earliest warning either half produces.",
+            [target("max(rate(%s[$__rate_interval]))" % host_sel(PSI_MEMORY_WAIT),
+                   "stalled fraction")],
+            unit="percentunit", decimals=2, min=0, w=4, h=5,
+            thresholds=[{"color": "green", "value": None},
+                        {"color": "yellow", "value": 0.10},
+                        {"color": "red", "value": 0.25}],
+            no_value="no PSI on this kernel",
+        ),
+        stat(
+            "drm collector",
+            "`node_scrape_collector_success{collector=\"drm\"}` — 1 means the GPU half of "
+            "this row was actually collected on the last scrape. It is on this row and "
+            "not only on Scrape health because the failure mode here is silent: a "
+            "containerised exporter with a partial `/sys` mount, or a kernel that "
+            "stopped binding the card, takes the whole row down without taking "
+            "node_exporter down.",
+            [target('{__name__=~"%s",collector="drm",job=~"$job",instance=~"$instance"}'
+                    % NODE_COLLECTOR_OK, "drm ok")],
+            w=4, h=5, min=0, max=1,
+            thresholds=[{"color": "red", "value": None}, {"color": "green", "value": 1}],
+            no_value="no host scrape at all",
+        ),
+        ts(
+            "GPU memory pressure vs KV cache",
+            "The payoff of this row: does KV-cache growth turn into GPU memory pressure "
+            "on this box? Left axis, each series as a fraction of **its own** ceiling:\n\n"
+            "* **GTT used** — `node_drm_memory_gtt_used_bytes / "
+            "node_drm_memory_gtt_size_bytes`: the model's side, the pool that weights "
+            "and KV are actually allocated from, out of the `amdgpu.gttsize` budget;\n"
+            "* **KV cache** — `llamacpp:kv_cache_usage_ratio`, what the *server* says "
+            "about its KV pool (the same series LLMKVCachePressure alerts read) and the "
+            "`llm:kv_cache_usage_ratio` alias beside it;\n"
+            "* right axis, bytes: the flat **GTT budget**, so the absolute scale of the "
+            "claim is on the chart rather than in a footnote.\n\n"
+            "**Read the shape, not the levels — and if the shape does not correlate, "
+            "that is the answer.** The denominators are different on purpose (KV is a "
+            "share of the KV pool; GTT is a share of a ~117 GiB budget that also holds "
+            "the weights), so a KV cache going empty → full can move GTT by a few "
+            "percent only. Two curves climbing together means KV growth is what consumes "
+            "the pool; KV swinging while GTT sits flat means the budget is dominated by "
+            "something else (a second model, a static context reservation, fragmentation) "
+            "— in which case this panel has told you something worth knowing and the "
+            "*Memory pools* panel says what.\n\n"
+            "Not yet verified over a real traffic window from a development container "
+            "with no GPU in it: on the box, `monitoring/collect_host_baseline.sh` prints "
+            "the same two ratios over the last 24 h so the correlation is checked rather "
+            "than assumed."
+            + CAVEAT_ABSENT + CAVEAT_EXPORTER,
+            [
+                target(gtt_ratio, "GTT used (fraction of the GTT budget)", ref="A"),
+                target(var(RULE_GTT), "host:gtt_usage_ratio (rule)", ref="B"),
+                target(gauge_max(sel(KV_RATIO)), "KV cache used (fraction of the KV pool)",
+                       ref="C"),
+                target(var(RULE_KV), "llm:kv_cache_usage_ratio (rule)", ref="D"),
+                target(host_sel(GTT_SIZE), "GTT budget (bytes) — right axis", ref="E"),
+            ],
+            unit="percentunit", decimals=1, w=24, h=10,
+            legend=LEGEND_LIST,
+            no_value="no GPU telemetry (host job down?)",
+            # No panel-level min/max: a panel-wide 0..1 would be applied to the byte
+            # series on the right axis too (Grafana scales each axis from its own
+            # fields but reads min/max per *field*), which would pin the GTT budget
+            # flat at the top of the chart. So the 0..1 belongs to each percent field.
+            overrides=[
+                axis("A", min=0, max=1),
+                axis("B", min=0, max=1),
+                axis("C", min=0, max=1),
+                axis("D", min=0, max=1),
+                axis("E", unit="bytes", decimals=0, placement="right", min=0,
+                    label="GTT budget (bytes)", dashed=True, color="dark-yellow"),
+            ],
+        ),
+        ts(
+            "Memory pools, bytes",
+            "The four pools behind the ratio above, in bytes, so an absolute claim can "
+            "be checked without arithmetic:\n\n"
+            "* **GTT used** (left) against the dashed **GTT budget** — the ceiling is "
+            "flat by construction (a boot parameter), so any slope is the model;\n"
+            "* **VRAM used** and **visible VRAM used** (left, dashed): the BIOS "
+            "carve-out. Flat and small is the *correct* shape on this box — see the note "
+            "at the top of the row, and do not alert on these;\n"
+            "* **MemAvailable** on the right axis, because GTT is carved from it: when "
+            "GTT climbs, this is what falls. Two axes because 117 GiB of system RAM and "
+            "a 30 MiB VRAM used on one scale would be a chart with one line on it.",
+            [
+                target(host_sel(GTT_USED), "GTT used"),
+                target(host_sel(GTT_SIZE), "GTT budget (amdgpu.gttsize)", ref="B"),
+                target(host_sel(VRAM_USED), "VRAM used (BIOS carve-out)", ref="C"),
+                target(host_sel(VIS_VRAM_USED), "visible VRAM used", ref="D"),
+                target(host_sel(MEM_AVAILABLE), "MemAvailable (system RAM) — right axis",
+                       ref="E"),
+            ],
+            unit="bytes", decimals=0, w=12, h=8, legend=LEGEND_LIST,
+            no_value="no GPU telemetry (host job down?)",
+            overrides=[
+                axis("B", dashed=True, color="dark-yellow"),
+                axis("C", dashed=True, color="purple"),
+                axis("D", dashed=True, color="super-light-purple"),
+                axis("E", placement="right", label="MemAvailable (bytes)"),
+            ],
+        ),
+        ts(
+            "GPU busy %, temps and power",
+            "Utilisation, thermals and power in one panel, because the interesting "
+            "questions are causal chains between them (throttling: busy % flat or "
+            "falling while the temperature sits on the band and power is at its cap).\n\n"
+            "* **GPU busy %** (left axis, 0-100) and **memory busy %** — the driver's "
+            "gfx/mem activity. On an APU `mem_busy_percent` counts LPDDR-side activity "
+            "and is worth reading with care, not as 'HBM is full';\n"
+            "* **temps** on the **right axis in °C**, one line per amdgpu hwmon sensor "
+            "(the hottest one is what the alerts read);\n"
+            "* **power** has **no axis of its own** — it is drawn on its own hidden "
+            "scale in watts, so read the legend/tooltip for its value. A third visible "
+            "axis would be unreadable, and plotting watts against a °C axis would be a "
+            "lie with better typography.\n\n"
+            "The findings note warns that on an APU the power sensor reports *package* "
+            "power, not 'GPU power' — label it honestly in any screenshot."
+            + CAVEAT_ABSENT,
+            [
+                target(gauge_max(host_sel(GPU_BUSY)), "GPU busy %"),
+                target(gauge_max(host_sel(MEM_BUSY)), "memory busy %", ref="B"),
+                target(hwmon(HWMON_TEMP), "{{sensor}} {{chip}} °C", ref="C"),
+                target(hwmon(HWMON_POWER), "{{sensor}} avg power (W, no axis)", ref="D"),
+                target(hwmon(HWMON_POWER_CAP), "{{sensor}} power cap (W, no axis)", ref="E"),
+            ],
+            unit="percent", decimals=1, min=0, w=12, h=8, legend=LEGEND_LIST,
+            no_value="no amdgpu busy % / hwmon sensors",
+            # Same reason as the payoff panel: the axes disagree by orders of
+            # magnitude, so the ranges are per field. Watts get a 150 W ceiling
+            # because an APU package can pass it and a hidden axis with an auto range
+            # would otherwise rescale on every spike.
+            overrides=[
+                axis("A", min=0, max=100),
+                axis("B", min=0, max=100, color="orange"),
+                axis("C", unit="celsius", decimals=1, placement="right", label="°C",
+                     min=20, max=110),
+                axis("D", unit="watt", decimals=1, placement="hidden", min=0, max=150,
+                     dashed=True),
+                axis("E", unit="watt", decimals=1, placement="hidden", min=0, max=150,
+                     dashed=True),
+            ],
+        ),
+        ts(
+            "Host companion: memory PSI, swap, load",
+            "Because the GTT pool is system RAM, the same exhaustion event is visible "
+            "from the host side — usually *earlier*, because the kernel starts stalling "
+            "tasks before the driver refuses an allocation:\n\n"
+            "* **memory PSI** (left axis, fraction of wall clock with ≥1 task stalled on "
+            "memory) — the expression NodeMemoryPressure{High,Critical} alert on;\n"
+            "* **swap used** on the **right axis in bytes**, against the dashed swap "
+            "total: on this box swap is the pressure valve after GTT, so a climbing swap "
+            "line with a flat GTT line is a different problem than both climbing;\n"
+            "* **load1 / load5** have **no axis** (own hidden scale): how many tasks were "
+            "runnable, which is what 'the box feels slow' actually measures.\n\n"
+            "Read together with the GPU panels above: GTT pressure + PSI + load rising "
+            "together is the box running out of memory; GTT alone is a sizing problem in "
+            "the model config.",
+            [
+                target("max(rate(%s[$__rate_interval]))" % host_sel(PSI_MEMORY_WAIT),
+                       "memory PSI (stalled fraction)"),
+                target(swap_used, "swap used — right axis", ref="B"),
+                target("sum(%s)" % host_sel(SWAP_TOTAL), "swap total — right axis", ref="C"),
+                target(host_sel(LOAD1), "load1 (no axis)", ref="D"),
+                target(host_sel(LOAD5), "load5 (no axis)", ref="E"),
+            ],
+            unit="percentunit", decimals=2, min=0, w=12, h=8, legend=LEGEND_LIST,
+            no_value="no host telemetry",
+            overrides=[
+                axis("B", unit="bytes", decimals=0, placement="right", label="swap (bytes)"),
+                axis("C", unit="bytes", decimals=0, placement="hidden", dashed=True),
+                axis("D", unit="short", decimals=2, placement="hidden"),
+                axis("E", unit="short", decimals=2, placement="hidden"),
+            ],
+        ),
+        ts(
+            "Exporter health: collectors, drm scrape time, exporter RSS",
+            "The row's own instrumentation, so 'the GPU is fine and the telemetry is "
+            "not' is a panel and not a guess:\n\n"
+            "* **worst collector** — `min(node_scrape_collector_success)` over the "
+            "host's collectors: 0 means at least one failed on the last scrape (the "
+            "`collector` label on the line below says which);\n"
+            "* **drm collector** — the GPU half specifically, the one a partial `/sys` "
+            "mount breaks;\n"
+            "* **drm scrape duration** on the right axis in seconds: a collector that "
+            "starts blocking on sysfs is a card that is going away, and it is also the "
+            "scrape-time budget the `host` job pays;\n"
+            "* **exporter RSS** (no axis, bytes): the footprint claim in "
+            "monitoring/README.md#footprint, live. It is a budget line, so it is on the "
+            "dashboard rather than only in a script.\n\n"
+            "Nothing here is clamped by `$model` (a host has no model), which is "
+            "deliberate — see the panel note.",
+            [
+                target("min by (job, instance) (%s)" % host_sel(NODE_COLLECTOR_OK),
+                       "worst collector (0 = one failed)"),
+                target('{__name__=~"%s",collector="drm",job=~"$job",instance=~"$instance"}'
+                       % NODE_COLLECTOR_OK, "drm collector ok", ref="B"),
+                target('{__name__=~"%s",collector="drm",job=~"$job",instance=~"$instance"}'
+                       % NODE_COLLECTOR_TIME, "drm scrape time (s) — right axis", ref="C"),
+                target(host_sel(NODE_PROCESS_RSS), "exporter RSS (bytes, no axis)", ref="D"),
+            ],
+            unit="short", decimals=2, min=0, w=12, h=8, legend=LEGEND_LIST,
+            no_value="no host scrape at all",
+            overrides=[
+                axis("A", min=0, max=1),
+                axis("B", min=0, max=1),
+                axis("C", unit="s", decimals=3, placement="right", label="s", min=0),
+                axis("D", unit="bytes", decimals=0, placement="hidden", min=0, dashed=True),
+            ],
+        ),
+    ]
+    return ("GPU & host", panels, True)
+
+
+# --------------------------------------------------------------------------- #
 # layout
 # --------------------------------------------------------------------------- #
 
@@ -1302,7 +1747,8 @@ def build() -> dict:
     out: list[dict] = []
     y = 0
     for title, panels, collapsed in [
-        overview_row(), latency_row(), cache_row(), spec_row(), scrape_row()
+        overview_row(), latency_row(), cache_row(), spec_row(), scrape_row(),
+        gpu_host_row()
     ]:
         used = flow(panels, start_y=y + 1)
         entry: dict = {

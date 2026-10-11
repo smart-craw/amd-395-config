@@ -162,3 +162,57 @@ groups:
       - record: llm:scrape_success_ratio
         expr: >-
           avg by (job, instance) (avg_over_time(llm_monitor_scrape_ok[10m]))
+
+  # --- host + GPU baselines (workspace-szw.13) ------------------------------
+  # The rule this repo follows for a new alert is *measure first*, and the ticket
+  # said so explicitly: a GTT threshold guessed on deploy day is an alert that
+  # either never fires or pages at 02:00, because nobody can know this box's
+  # steady-state GTT without watching it work. So the baseline is recorded from
+  # the first scrape onward, in Prometheus, rather than in a notebook:
+  #
+  #   promtool query instant http://127.0.0.1:9090 'host:gtt_usage_ratio:max_2d'
+  #
+  # after two days is the number `GTT_PRESSURE_WARN` in alert_thresholds.env is
+  # meant to be set from (and `monitoring/collect_host_baseline.sh` prints the
+  # whole set). The `:max_2d` / `:mean_2d` suffixes follow the Prometheus
+  # convention the latency quantiles above use.
+  #
+  # Cost: five series written every 5 minutes, each 2-day window read at a 15m
+  # subquery step (192 points per series per evaluation) — the reason the step is
+  # 15m and not 1m is exactly this file's own footprint rule: measure before you
+  # multiply.
+  #
+  # These are `host:*`, not `llm:*`: the C3 contract is about the vendor-drift
+  # seam for model-server metrics, and nothing here has a vendor spelling.
+  - name: host-baselines
+    interval: 5m
+    rules:
+      # GTT as a fraction of the box's whole GTT budget (amdgpu.gttsize), i.e.
+      # the same ratio NodeGttPressureHigh alerts on and the GPU & host row
+      # plots. One series per card.
+      - record: host:gtt_usage_ratio
+        expr: >-
+          node_drm_memory_gtt_used_bytes / node_drm_memory_gtt_size_bytes
+
+      - record: host:gtt_usage_ratio:max_2d
+        expr: >-
+          max_over_time(host:gtt_usage_ratio[2d:15m])
+
+      - record: host:gtt_usage_ratio:mean_2d
+        expr: >-
+          avg_over_time(host:gtt_usage_ratio[2d:15m])
+
+      # Memory PSI as a stall fraction (the same shape NodeMemoryPressure* read),
+      # and the GPU's hottest sensor, so a thermal threshold can be set from what
+      # the box actually reaches rather than from the part's absolute maximum.
+      - record: host:psi_memory_waiting_ratio
+        expr: >-
+          rate(node_pressure_memory_waiting_seconds_total[5m])
+
+      - record: host:psi_memory_waiting_ratio:max_2d
+        expr: >-
+          max_over_time(host:psi_memory_waiting_ratio[2d:15m])
+
+      - record: host:gpu_temp_celsius:max_2d
+        expr: >-
+          max_over_time(node_hwmon_temp_celsius{chip="amdgpu"}[2d:15m])

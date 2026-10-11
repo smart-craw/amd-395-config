@@ -132,3 +132,107 @@ groups:
           team: llm
         annotations:
           summary: "Samples from this target have stopped advancing: whatever is answering is replaying old data, so every panel reading it shows history as if it were now."
+
+  # --------------------------------------------------------------------- #
+  # Host + GPU telemetry (workspace-szw.13): node_exporter on the host with
+  # --collector.drm, scraped as the `host` job
+  # (prometheus/targets/host.json). Two groups, split by what they say:
+  #   host-telemetry = is the telemetry itself there (blind vs idle),
+  #   host-pressure  = the GPU/host memory and thermal ceilings.
+  # The house style holds: `for:`, severity, and a summary that names the
+  # consequence and the first command to run.
+  # --------------------------------------------------------------------- #
+  - name: host-telemetry
+    rules:
+      - alert: NodeExporterAbsent
+        expr: 'absent_over_time(node_exporter_build_info{job="host"}[10m])'
+        for: 0m
+        labels:
+          severity: warning
+          team: host
+        annotations:
+          summary: "Nothing has scraped the host exporter for 10m, so every GPU and host panel reads \"No data\" while the model server is likely fine: check systemctl --user status node-exporter, then curl http://127.0.0.1:9100/metrics on the host, then whether the target in prometheus/targets/host.json can reach it from the container network (the runbook's Host + GPU telemetry section is the decision tree for that last one)."
+
+      - alert: NodeExporterCollectorFailing
+        expr: 'node_scrape_collector_success{job="host"} == 0'
+        for: 10m
+        labels:
+          severity: warning
+          team: host
+        annotations:
+          summary: "A node_exporter collector has been failing for 10m (the collector label says which): that collector's series are missing or stale, so whatever panel reads them is showing history or nothing. If collector=\"drm\": the exporter was started without --collector.drm, or it is containerised with only /sys/class/drm mounted — the card0/device symlink dangles and the whole card disappears from the scrape. Mount all of /sys read-only, or run it on the host as monitoring/node-exporter.service does."
+
+      - alert: NodeGpuTelemetryAbsent
+        expr: 'absent_over_time(node_drm_memory_gtt_used_bytes{job="host"}[15m])'
+        for: 0m
+        labels:
+          severity: warning
+          team: host
+        annotations:
+          summary: "No GPU memory series have been scraped for 15m even though the exporter may be healthy: the drm collector found no amdgpu card at all, which it reports as success, so this is the only rule that can see it. Usual causes: kernel or BIOS change, the module reloaded late, or the exporter pointed at an incomplete /sys. python3 spikes/amd-gpu-metrics/amdgpu_sysfs_probe.py probe prints the whole capability matrix in one command."
+
+  - name: host-pressure
+    rules:
+      # GTT — the pool the model grows on a shared-memory APU. Weights + KV land
+      # here, and gtt_total is the amdgpu.gttsize= from the root README. VRAM is
+      # the BIOS carve-out and is deliberately not alerted on.
+      - alert: NodeGttPressureHigh
+        expr: 'node_drm_memory_gtt_used_bytes / node_drm_memory_gtt_size_bytes > 0.95'
+        for: 15m
+        labels:
+          severity: warning
+          team: host
+        annotations:
+          summary: "GPU (GTT) memory has been over 0.95 of this box's budget for 15m: the next allocation the driver tries may fail — that is an allocation error in the model server's log, not a slowdown, and the runbook entry \"the box ran out of GTT\" says what to cut first. Re-tune this threshold against host:gtt_usage_ratio:max_2d once two days of real traffic have been recorded; the recorded baseline is in Prometheus, not in a notebook."
+
+      # Baseline-free by construction: this predicts the ceiling from the observed
+      # slope, so it protects a box whose steady-state nobody has measured yet
+      # without guessing a number. A steady model cannot fire it (flat slope).
+      - alert: NodeGttExhausting
+        expr: 'predict_linear(node_drm_memory_gtt_used_bytes[30m], 600) > node_drm_memory_gtt_size_bytes'
+        for: 5m
+        labels:
+          severity: critical
+          team: host
+        annotations:
+          summary: "GPU (GTT) memory is growing fast enough to exceed this box's whole GTT budget within 600s at the rate of the last 30m: something is loading or growing while there is no room left. Stop the second model or the largest context first; lowering the KV pool or the slot count is the smaller lever, and the amdgpu.gttsize= kernel parameter is the last one (it needs a reboot)."
+
+      # Hottest amdgpu sensor, because the junction/hotspot is what throttles and
+      # the sensor names differ per kernel — see alert_thresholds.env.
+      - alert: NodeGpuTempHigh
+        expr: 'max by (job, instance) (node_hwmon_temp_celsius{chip="amdgpu"}) > 95'
+        for: 10m
+        labels:
+          severity: warning
+          team: host
+        annotations:
+          summary: "The hottest GPU sensor has been over 95 C for 10m: this part is about to start thermal throttling, so decode throughput will drop with no change in load (it also shows up as LLMDecodeThroughputCollapse). Check airflow and whether a fan curve is being ignored; this is the second cause of a slow box after GTT pressure."
+
+      - alert: NodeGpuTempCritical
+        expr: 'max by (job, instance) (node_hwmon_temp_celsius{chip="amdgpu"}) > 100'
+        for: 5m
+        labels:
+          severity: critical
+          team: host
+        annotations:
+          summary: "The hottest GPU sensor has been over 100 C for 5m: at or past the junction maximum, where the driver throttles hard and a sustained soak can shorten the part's life. Stop the load now — unload the model, do not just idle the client."
+
+      # PSI: GPU memory *is* system RAM on this box, so exhaustion shows up here
+      # as stalls before it shows up as an allocation failure.
+      - alert: NodeMemoryPressureHigh
+        expr: 'rate(node_pressure_memory_waiting_seconds_total[5m]) > 0.10'
+        for: 10m
+        labels:
+          severity: warning
+          team: host
+        annotations:
+          summary: "Tasks have been stalled on memory for more than 0.10 of the wall clock for 10m: reclaim or swap-in is on the critical path, which on this box usually means the GPU (GTT) budget has been squeezed rather than a runaway process. Look at the GPU & host row's Memory pools panel and the swap series beside it."
+
+      - alert: NodeMemoryPressureCritical
+        expr: 'rate(node_pressure_memory_waiting_seconds_total[5m]) > 0.25'
+        for: 5m
+        labels:
+          severity: critical
+          team: host
+        annotations:
+          summary: "Tasks have been stalled on memory for more than 0.25 of the wall clock for 5m: the box is thrashing, everything is slow including the model server's own scheduling, and the OOM killer is the next event. Free memory now (unload the smallest model first, then stop the Grafana container per the go/no-go) before touching anything else."

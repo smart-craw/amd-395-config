@@ -80,6 +80,8 @@ A dependency-free dashboard for whichever model server is running: `monitor/serv
 
 Monitoring is two layers (see [ADR 0001](./docs/adr/0001-prometheus-grafana-owns-metrics.md)): Prometheus + Grafana own `/metrics` -- history, rate math, retention, alerting -- and `monitor/serve.py` owns "right now".  The proxy keeps the live status page for the JSON endpoints (`/health`, `/v1/models`, `/cache`, which are not Prometheus metrics), answers `GET /metrics` as a raw scrape passthrough for Prometheus when the model server is not directly reachable, and grows deep links into the matching Grafana panels.  Nothing in the stack talks to anything outside the box; the Prometheus/Grafana compose stack lives in [`monitoring/`](monitoring/README.md) -- `cp monitoring/.env.example monitoring/.env && docker compose -f monitoring/compose.yaml up -d` brings it up, every knob and rule and dashboard in git.
 
+The box itself is monitored by one host process, not by a container: `node_exporter --collector.drm` in a systemd user unit ([`monitoring/node-exporter.service`](monitoring/node-exporter.service), installed with `monitoring/install_node_exporter.sh`), bound to `127.0.0.1:9100` and scraped as the `host` job.  That is what makes the GPU visible -- GTT/VRAM bytes, `gpu_busy_percent`, temperatures, package power -- with no ROCm installed, because those are amdgpu *kernel driver* attributes and the Vulkan path reads the same sysfs the ROCm path would.  On this machine the model lives in the GTT pool sized by `amdgpu.gttsize` above, so that ratio is the pressure metric; the runbook entry for running out of it is in [`monitoring/README.md`](monitoring/README.md#runbook).
+
 ```sh
 python3 monitor/serve.py --url http://llm.home:8080 --port 8090
 ```
