@@ -1,0 +1,127 @@
+# nginx-grafana.conf.example — Grafana behind basic auth on the LAN, under a
+# subpath. Sample, not mounted by anything: read it, edit it, put it where your
+# nginx reads config.
+#
+#   sudo htpasswd -c /etc/nginx/.llm-passwd YOU        # -c only the first time
+#   sudo chmod 640 /etc/nginx/.llm-passwd && sudo chown root:www-data /etc/nginx/.llm-passwd
+#   sudo cp monitoring/nginx-grafana.conf.example /etc/nginx/conf.d/llm-grafana.conf
+#   sudo nginx -t && sudo systemctl reload nginx
+#
+# Why this shape exists at all: it is the hardened variant of
+# [compose.lan.yaml](./compose.lan.yaml). The LAN sees TLS and a password on the
+# box's existing front door, Grafana stays bound to 127.0.0.1, and the credentials
+# are nginx's — so a leaked viewer password is not a Grafana account, and turning
+# one person off does not mean changing a password everyone uses. Keep
+# `GF_AUTH_ANONYMOUS_ENABLED=true` in the override when you do this (see the note
+# at the bottom of compose.lan.yaml): nginx prompts, Grafana does not.
+#
+#   GRAFANA_LAN_BIND=127.0.0.1          # compose.lan.yaml publishes nothing new
+#   GRAFANA_ROOT_URL=https://llm.home/grafana/
+#   GRAFANA_SERVE_FROM_SUB_PATH=true
+#
+# ---------------------------------------------------------------
+# websocket support (Grafana pushes live-dashboard / live-tail frames).
+# This `map` must sit in nginx's `http` context — files in /etc/nginx/conf.d/ are
+# included there, so leaving it at the top of this file is fine. Plain
+# `Connection "upgrade"` on every request breaks keepalive for normal HTTP calls,
+# which is what makes a dashboard full of parallel panel queries crawl.
+map $http_upgrade $llm_grafana_connection {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name llm.home;
+
+    # Use the box's real certificate. A self-signed cert on the LAN is fine and is
+    # what the LLM front door uses; it just means the phone must trust it once, and
+    # that "https" here means encrypted, not *verified*.
+    ssl_certificate     /etc/nginx/tokens;   # ← replace: your cert
+    ssl_certificate_key /etc/nginx/tokens.key; # ← replace: your key
+
+    # ------------------------------------------------------------- #
+    # THE SUBPATH RULE — the one consequence of GF_SERVER_SERVE_FROM_SUB_PATH
+    # ------------------------------------------------------------- #
+    # `proxy_pass` with a **trailing slash** (`http://127.0.0.1:3000/`) *strips*
+    # the matched prefix; without a slash (`http://127.0.0.1:3000`) the path is
+    # passed through **with** `/grafana` on it.
+    #
+    #   served under /grafana/  →  GRAFANA_ROOT_URL=https://host/grafana/
+    #                              GRAFANA_SERVE_FROM_SUB_PATH=true
+    #                              proxy_pass http://127.0.0.1:3000;      ← no slash
+    #
+    #   served at the root (its own port or subdomain)
+    #                           →  GRAFANA_ROOT_URL=https://host/
+    #                              SERVE_FROM_SUB_PATH not needed
+    #                              proxy_pass http://127.0.0.1:3000/;     ← slash
+    #
+    # Get the pair wrong and the failure is quiet and confusing rather than
+    # obvious: the HTML arrives, then Grafana asks for /public/… and /api/… at the
+    # *root*, so you get a blank page, a spinner, or "Failed to load dashboards"
+    # with 404s for its own assets in the network tab.
+    #
+    # auth_basic covers the whole subtree, API calls included — every request for
+    # a panel value passes through here, so nginx gates the data and not just the
+    # login screen. That is the difference between this and compose.lan.yaml's
+    # direct shape: there the segment is the credential, here a password is.
+    location /grafana/ {
+        auth_basic           "llm dashboards";
+        auth_basic_user_file /etc/nginx/.llm-passwd;
+
+        proxy_pass http://127.0.0.1:3000;          # no trailing slash: prefix kept
+
+        proxy_set_header Host              $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Real-IP         $remote_addr;
+
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection $llm_grafana_connection;
+
+        # A panel over a 7-day range can legitimately take seconds; the 60 s
+        # default is enough, but do not lower it while "tuning".
+        proxy_read_timeout 60s;
+        proxy_buffering off;   # live dashboards stream; buffering them adds latency
+    }
+
+    # Grafana's health endpoint, ungated, so `curl` in a monitoring cron can use
+    # it without a password. Optional, and obviously it discloses "is it up".
+    # location = /grafana/api/health {
+    #     proxy_pass http://127.0.0.1:3000/api/health;
+    #     auth_basic off;
+    # }
+}
+
+# ---------------------------------------------------------------
+# If nginx is the *container* (qwen3.8-flash's `nginx-openai`, the llm-proxy
+# image) rather than nginx on the host:
+#
+#   * `proxy_pass http://127.0.0.1:3000` from inside a container reaches the
+#     container's own loopback, i.e. nothing. Give that service
+#     `extra_hosts: ["host.docker.internal:host-gateway"]` (the same line
+#     compose.yaml already gives Prometheus, for the same reason) and proxy to
+#     `http://host.docker.internal:3000`.
+#   * That hop only works under **rootless docker**, where the gateway can reach
+#     the host's loopback scope. Under rootful docker a loopback-only listener is
+#     not reachable from a bridge container at all, and the fix is to put nginx on
+#     the host network or to run Grafana in nginx's network — do NOT fix it by
+#     binding Grafana on a bridge address, which is exactly the accident
+#     `check_monitoring.py` exists to catch. See monitoring/README.md, "Why the
+#     target is host.docker.internal, and the loopback rule".
+#   * That image takes a single `BACKEND_SERVICE` env var and has no location
+#     blocks of its own, so hosting Grafana from it means baking your own config
+#     into an image — usually the host's nginx (or a second container with
+#     `-v` mounted config) is the cheaper door.
+#
+# And the last two settings that live on the Grafana side, not here:
+#
+#   GF_SERVER_ROOT_URL=https://llm.home/grafana/   (absolute, trailing slash)
+#   GF_SERVER_SERVE_FROM_SUB_PATH=true
+#   # nginx terminates TLS, so Grafana itself stays plain http internally; the
+#   # session cookie can still be marked Secure because the browser only ever sees
+#   # https. Set it only in the nginx shape — with Grafana bound to 0.0.0.0 on
+#   # plain http the cookie would simply never be stored.
+#   GF_SERVER_COOKIE_SECURE=true

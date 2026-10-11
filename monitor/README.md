@@ -89,6 +89,17 @@ URLs with a host are accepted; anything else (`file:///etc/passwd`, a bare
 caller make this server fetch an arbitrary URL, the default bind address is
 loopback — pass `--host 0.0.0.0` only on a network you trust the requesters on.
 
+The same framing covers the history side: the Grafana dashboards disclose the same
+kind of thing (model ids, request rates, prompt-cache behaviour, plus host
+telemetry), so that exposure is opt-in too — `monitoring/compose.lan.yaml`, with
+its risk statement in its own header, and
+`monitoring/nginx-grafana.conf.example` for the basic-auth-over-TLS variant. Two
+things travel together if you do: `$LLM_MONITOR_GRAFANA_URL` is followed by
+**browsers**, so from a phone it has to be an address the phone can reach (not
+`localhost`), and it should be the same URL Grafana's own `GF_SERVER_ROOT_URL`
+claims to be. See
+[monitoring/README.md](../monitoring/README.md#publishing-the-dashboards-on-the-lan-opt-in).
+
 ## Run it as a service
 
 [llm-monitor.service](./llm-monitor.service) is a systemd **user** unit for

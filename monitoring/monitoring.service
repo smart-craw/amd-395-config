@@ -16,6 +16,13 @@
 # `restart: unless-stopped` already brings both containers back after a reboot, as
 # long as dockerd starts. Having both is harmless but confusing — pick one.
 
+# LAN exposure across reboots: this unit names compose.yaml only, so a reboot
+# comes back loopback-only even on a box that had opted in. If you want the LAN
+# bind to survive a boot, add `-f %h/service/monitoring/compose.lan.yaml` to
+# ExecStart and ExecReload — and think about whether you want that: publishing
+# that survives `git pull` but not a reboot is a deliberate feature of this
+# design, not an oversight.
+
 [Unit]
 Description=LLM monitoring stack (Prometheus + Grafana)
 Documentation=file:%h/service/monitoring/README.md

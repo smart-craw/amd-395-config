@@ -93,6 +93,37 @@ jobs:
           GRAFANA_ADMIN_PASSWORD=ci-only-not-a-secret \
             docker compose -f monitoring/compose.yaml config -q
 
+      - name: the opt-in LAN override merges the way the docs say
+        # compose *appends* sequences, so compose.lan.yaml's grafana `ports` is
+        # tagged `!override` (compose-go >= 2.14) to REPLACE the base loopback
+        # mapping instead of joining it. Untagged or unsupported, the runner would
+        # resolve two mappings for host port 3000 — which on the box is not a
+        # warning but a container that dies with "address already in use". The rest
+        # is the same invariant the runbook sells: prometheus stays on loopback even
+        # when grafana does not.
+        run: |
+          set -euo pipefail
+          GRAFANA_ADMIN_PASSWORD=ci-only-not-a-secret \
+            docker compose -f monitoring/compose.yaml \
+                       -f monitoring/compose.lan.yaml config --format json \
+          | python3 -c '
+          import json, sys
+          cfg = json.load(sys.stdin)["services"]
+          graf = cfg["grafana"].get("ports") or []
+          prom = cfg["prometheus"].get("ports") or []
+          assert len(graf) == 1, (
+              f"grafana resolved {len(graf)} published ports: the !override tag on "
+              "compose.lan.yaml ports did not replace the base mapping "
+              "(needs docker compose >= 2.14)")
+          hip = graf[0].get("host_ip") if graf else None
+          assert hip in (None, "", "0.0.0.0"), (
+              f"the LAN override bound grafana to {hip!r}, which exposes nothing")
+          assert len(prom) == 1 and prom[0].get("host_ip") == "127.0.0.1", (
+              "prometheus must stay loopback-bound even with the LAN override: "
+              "Grafana reads it through the datasource proxy")
+          print("LAN override merges as documented")
+          '
+
       # monitoring/PARITY.md is a measurement, so the thing that measures it is tested
       # like code: the parity harness models the bespoke page in Python, and this is
       # the half of that model that needs neither Prometheus nor a model server. (The

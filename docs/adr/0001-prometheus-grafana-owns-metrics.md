@@ -288,6 +288,46 @@ that mapping is what lets a link from the page land on the right series.
 If the measured footprint does not fit, the retention size comes down before the
 memory limit goes up.
 
+> **Amended by `workspace-szw.12` (opt-in LAN exposure).** The loopback rule above
+> is the *default*, not a prohibition, and the amendment is about who may change it
+> and how: "both UIs bound to `127.0.0.1`" now reads **"bound to `127.0.0.1` unless
+> an operator deliberately composes `monitoring/compose.lan.yaml` on top"**.
+>
+> * **Prometheus: unchanged, forever.** It stays loopback in every shape, including
+>   the LAN one, because Grafana's **datasource proxy** (`access: proxy` on the
+>   provisioned datasource) means no panel, deep link or browser request ever needs
+>   9090. Publishing it would add an unauthenticated PromQL endpoint — a cheap
+>   resource attack on a box whose RAM budget is this ADR's subject — in exchange
+>   for nothing Grafana cannot already do. Non-Grafana clients tunnel
+>   (`ssh -L 9090:127.0.0.1:9090`); that path is written into `compose.lan.yaml`
+>   rather than left to be rediscovered.
+> * **Grafana: publishable, by an act that is reviewable.** The base file is
+>   untouched and still binds loopback; exposure arrives only as
+>   `-f monitoring/compose.lan.yaml`, i.e. it is in git *and* on the command line,
+>   so it is visible in the shell history, in a code review, and absent by default
+>   after a reboot (`monitoring.service` names `compose.yaml` only).
+> * **The auth decision: anonymous access with the `Viewer` org role**, sign-up
+>   permanently off, admin password from `.env` and never set by the override. The
+>   alternative — one shared non-admin viewer account — was rejected for the actual
+>   use case ("glance at it from a phone"): a shared password is revocable only
+>   globally, is forgotten the week it is set, and buys attribution nobody reads.
+>   Its cost is stated where it is taken: with anonymous on, *the LAN is the
+>   credential*, and every device on the segment can read model ids, request rates,
+>   prompt-cache behaviour and host telemetry with no trace. Both shapes
+>   (direct, and nginx + basic auth via `monitoring/nginx-grafana.conf.example`,
+>   where Grafana never leaves loopback) are documented in
+>   `monitoring/README.md#publishing-the-dashboards-on-the-lan-opt-in`, with the
+>   `GF_SERVER_ROOT_URL` / `GF_SERVER_SERVE_FROM_SUB_PATH` pair that has to match
+>   nginx's `proxy_pass`.
+> * **Why this is allowed at all** is the same reasoning C1 records for
+>   `serve.py --host 0.0.0.0`: the exposure is *information*, not control. The
+>   dashboards hand out model ids, traffic shape and cache behaviour, so publishing
+>   them is an information-disclosure decision the operator makes with their eyes
+>   open — which is why the risk statement lives in the override file itself, and
+>   `check_monitoring.py` fails if the base file ever binds beyond loopback, if the
+>   override enables sign-up, if it publishes Prometheus, or if it stops saying
+>   what it exposes.
+
 > **Amended by `workspace-szw.13` (host + GPU telemetry).** The budget carries a third
 > line rather than growing beside itself:
 >
@@ -434,12 +474,17 @@ measured footprint against the C5 budget (`workspace-szw.9`).
 >   frozen), pending the week-long parity check in `workspace-szw.11`. It is deleted
 >   per-tile the moment a panel is signed off — nothing is deleted before parity, and
 >   nothing is kept after it.
-> * **LAN exposure** is the loopback-only default plus an opt-in override
->   (`monitoring/compose.lan.yaml`); the nginx + basic-auth variant stays
->   `workspace-szw.12`.
 > * **Host/GPU exporters** (AMD sysfs, node_exporter) were judged a separate memory
 >   and label-cardinality decision, not a free addition to this stack:
 >   `workspace-szw.10`.
+>
+> Update (`workspace-szw.12`): **LAN exposure is now available and still opt-in.** The
+> base deployment is byte-for-byte the loopback stack this ADR accepted; publishing
+> Grafana means composing `monitoring/compose.lan.yaml` on top of it (or, behind the
+> box's existing nginx, `monitoring/nginx-grafana.conf.example` with Grafana left on
+> loopback), and the contract, the auth choice and the disclosure that comes with it
+> are recorded as an amendment to C5 above rather than as a new decision: nothing
+> here wanted a new architecture, it wanted a door with a sign on it.
 >
 > Update (`workspace-szw.13`): that separate decision has been taken and deployed.
 > `node_exporter --collector.drm` now runs on the **host** as a systemd *user* unit

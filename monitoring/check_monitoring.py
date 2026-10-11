@@ -22,7 +22,10 @@ What is actually being defended:
 * the dashboard JSON is structurally sound, references its datasource by
   variable rather than a UI-generated uid, and contains no off-box URL;
 * compose.yaml pins images, bounds memory and CPU, binds loopback, and sets both
-  retention caps.
+  retention caps;
+* compose.lan.yaml — the only supported way to publish Grafana — keeps its opt-in
+  honest: anonymous Viewer and nothing more, sign-up off, Prometheus on loopback,
+  and the disclosure stated in the same file as the port (workspace-szw.12).
 """
 
 from __future__ import annotations
@@ -146,6 +149,16 @@ def parse_yaml(text: str):
             if not sep:
                 raise ValueError(f"not a key: {content!r}")
             key, rest = _scalar(key), rest.strip()
+            # compose's `!override` / `!reset` tags (compose-go >= 2.14). They are
+            # read by the *merger*, not the loader, so the value under them is
+            # parsed normally — which is exactly what a checker of a *merged*
+            # override file needs to see. `ports: !override` in compose.lan.yaml
+            # is the case that matters: without this, the base file's loopback
+            # mapping and this one would both be published and docker would refuse
+            # to start the container.
+            if rest.startswith("!"):
+                _, _, rest = rest.partition(" ")
+                rest = rest.strip()
             anchor = None
             if rest.startswith("&"):
                 anchor, _, rest = rest.partition(" ")
@@ -904,6 +917,9 @@ def check_compose() -> None:
         "GF_NEWSFEED_ENABLED": "false",
         "GF_USERS_ALLOW_SIGN_UP": "false",
         "GF_AUTH_DISABLE_LOGIN_FORM": "false",
+        # Anonymous stays off in the *base* file: the read-only anonymous viewer is
+        # the LAN override's decision (workspace-szw.12), never the default.
+        "GF_AUTH_ANONYMOUS_ENABLED": "false",
     }
     for key, value in expected.items():
         check(
@@ -914,9 +930,163 @@ def check_compose() -> None:
         "GRAFANA_ADMIN_PASSWORD" in json.dumps(env),
         "grafana admin password must come from .env, never be committed",
     )
+    check(
+        "${GRAFANA_ROOT_URL" in str(env.get("GF_SERVER_ROOT_URL", "")),
+        "grafana GF_SERVER_ROOT_URL must be configurable (reverse proxy / LAN URL)",
+    )
     volumes = " ".join(str(v) for v in (graf.get("volumes") or []))
     check(":ro" in volumes, "grafana provisioning/dashboards must be mounted read-only")
     check("extra_hosts" in json.dumps(prom), "prometheus needs host-gateway for the proxy job")
+
+
+def check_lan_exposure() -> None:
+    """LAN exposure is opt-in, and the *files* have to keep saying so.
+
+    The base stack binds loopback (checked in check_compose); compose.lan.yaml is
+    the one supported way to publish Grafana, and nginx-grafana.conf.example is
+    the hardened variant. What matters is not that they exist but that they keep
+    stating the deal: what is disclosed, which auth shape was chosen and why, and
+    that Prometheus — which has no auth at all — stays on loopback because
+    Grafana's datasource proxy already covers every panel.
+    """
+    try:
+        text = (HERE / "compose.lan.yaml").read_text(encoding="utf-8")
+    except FileNotFoundError:
+        check(False, "compose.lan.yaml is missing: LAN exposure has no opt-in path")
+        return
+    services = (parse_yaml(text) or {}).get("services") or {}
+    graf = services.get("grafana") or {}
+    env = {k: str(v).strip('"') for k, v in (graf.get("environment") or {}).items()}
+
+    # --- the override really publishes, and does it as a reviewed choice ---- #
+    ports = [str(p).strip('"') for p in (graf.get("ports") or [])]
+    check(bool(ports), "compose.lan.yaml sets no grafana port, so it exposes nothing")
+    for port in ports:
+        check(
+            not port.startswith("127.0.0.1") and not port.startswith("localhost"),
+            f"compose.lan.yaml grafana port {port} binds loopback: the override would "
+            "publish nothing while claiming to",
+        )
+        check(
+            "${GRAFANA_LAN_BIND" in port,
+            f"compose.lan.yaml grafana port {port}: the published interface must be the "
+            "documented GRAFANA_LAN_BIND knob (0.0.0.0 default, one-interface or "
+            "127.0.0.1 for the nginx shape)",
+        )
+    # compose *merges* sequences, so an untagged `ports` here is added to the base
+    # 127.0.0.1 mapping instead of replacing it: two mappings for one host port and
+    # the container dies with "address already in use". Checked line by line, not
+    # over the whole text — the commented-out prometheus example below also
+    # contains a tagged `ports:` and must not vouch for the live one.
+    live_ports_lines = [
+        line
+        for line in text.splitlines()
+        if re.match(r"^\s*ports\s*:", line) and not line.lstrip().startswith("#")
+    ]
+    check(
+        bool(live_ports_lines)
+        and all("!override" in line for line in live_ports_lines),
+        "compose.lan.yaml: every live `ports:` block must be tagged `!override` — compose "
+        "appends sequences, so an untagged list leaves the base loopback mapping in place",
+    )
+
+    # --- the auth choice, and the things that must never relax with it ------ #
+    check(
+        env.get("GF_AUTH_ANONYMOUS_ENABLED") == "true"
+        and env.get("GF_AUTH_ANONYMOUS_ORG_ROLE") == "Viewer",
+        "compose.lan.yaml must enable anonymous access with the Viewer org role "
+        "(read-only viewing is the use case; a shared non-admin account is the "
+        "documented alternative, not a silent second default)",
+    )
+    for key in ("GF_USERS_ALLOW_SIGN_UP", "GF_USERS_ALLOW_ORG_CREATE", "GF_USERS_VIEWERS_CAN_EDIT"):
+        check(
+            env.get(key) == "false",
+            f"compose.lan.yaml must restate {key}=false next to the door it opens",
+        )
+    check(
+        "GF_SECURITY_ADMIN_PASSWORD" not in env,
+        "compose.lan.yaml must not set the admin password: it comes from .env only, "
+        "so nothing that reads the dashboards can reach administration",
+    )
+    check(
+        "${GRAFANA_ROOT_URL" in env.get("GF_SERVER_ROOT_URL", "")
+        and "${GRAFANA_SERVE_FROM_SUB_PATH" in env.get("GF_SERVER_SERVE_FROM_SUB_PATH", ""),
+        "compose.lan.yaml must carry GF_SERVER_ROOT_URL and GF_SERVER_SERVE_FROM_SUB_PATH "
+        "as variables — the reverse-proxy/subpath case has to be settable without editing git",
+    )
+
+    # --- Prometheus: loopback, and the reason on the page that says it ------ #
+    prom = services.get("prometheus") or {}
+    check(
+        not (prom.get("ports") or []),
+        "compose.lan.yaml publishes Prometheus: it stays on loopback because Grafana's "
+        "datasource proxy is why 9090 never needs publishing (if a non-Grafana client "
+        "really needs it, that decision belongs in the README and an SSH tunnel is "
+        "still the cheaper answer)",
+    )
+    lowered = text.lower()
+    for token, why in (
+        ("datasource proxy", "the reason 9090 stays loopback has to travel with the file"),
+        ("model ids", "the disclosure has to be stated where the port is opened"),
+        ("--host 0.0.0.0", "the same framing as serve.py's deliberate bind warning"),
+        ("what you are accepting", "opt-in needs an explicit risk statement, not a comment"),
+    ):
+        check(token in lowered, f"compose.lan.yaml does not mention {token}: {why}")
+    check(
+        "nginx-grafana.conf.example" in text,
+        "compose.lan.yaml should point at the nginx + basic-auth sample it is the alternative to",
+    )
+
+    # --- the hardened variant --------------------------------------------- #
+    try:
+        nginx = (HERE / "nginx-grafana.conf.example").read_text(encoding="utf-8")
+    except FileNotFoundError:
+        check(False, "nginx-grafana.conf.example is missing: no hardened LAN variant")
+        nginx = ""
+    if nginx:
+        for token in (
+            "auth_basic",
+            "auth_basic_user_file",
+            "location /grafana/",
+            "htpasswd",
+            "host.docker.internal",
+        ):
+            check(token in nginx, f"nginx-grafana.conf.example does not cover {token}")
+        # The trailing-slash rule is the GF_SERVER_SERVE_FROM_SUB_PATH consequence;
+        # documenting one shape without the other is how the UI half-loads.
+        check(
+            "GF_SERVER_SERVE_FROM_SUB_PATH" in nginx and "GF_SERVER_ROOT_URL" in nginx,
+            "nginx-grafana.conf.example must state the root_url / SERVE_FROM_SUB_PATH pair",
+        )
+        check(
+            "proxy_pass http://127.0.0.1:3000;" in nginx
+            and "http://127.0.0.1:3000/" in nginx,
+            "nginx-grafana.conf.example must show both proxy_pass shapes (with the slash "
+            "= prefix stripped, without = prefix kept) and say which goes with which",
+        )
+
+    # --- .env.example documents the knobs, and holds no secret -------------- #
+    example = (HERE / ".env.example").read_text(encoding="utf-8")
+    for token in ("GRAFANA_LAN_BIND", "GRAFANA_SERVE_FROM_SUB_PATH", "GRAFANA_ROOT_URL", "compose.lan.yaml"):
+        check(token in example, f".env.example does not document {token}")
+    check(
+        re.search(r"(?m)^GRAFANA_ADMIN_PASSWORD=\S", example) is None,
+        ".env.example must not carry an admin password value",
+    )
+
+    # --- the runbook keeps the same story ------------------------------------ #
+    readme = (HERE / "README.md").read_text(encoding="utf-8")
+    for token in (
+        "Publishing the dashboards on the LAN",
+        "compose.lan.yaml",
+        "nginx-grafana.conf.example",
+        "datasource proxy",
+        "GF_SERVER_SERVE_FROM_SUB_PATH",
+        "--host 0.0.0.0",
+        "basic auth",
+        "GRAFANA_LAN_BIND",
+    ):
+        check(token in readme, f"monitoring/README.md does not cover {token}")
 
 
 def check_upstream_declaration() -> None:
@@ -1117,6 +1287,7 @@ def main(argv: list[str] | None = None) -> int:
     check_dashboard_generated()
     check_provisioning()
     check_compose()
+    check_lan_exposure()
     check_upstream_declaration()
     check_footprint_documented()
     maybe_validate_compose_flags()

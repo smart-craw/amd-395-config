@@ -11,6 +11,10 @@
 # existence, and nothing outside the box is contacted (no plugins, no telemetry,
 # no update checks, no CDN assets).
 #
+# Both UIs bind 127.0.0.1 *in this file, always*. Want them on the LAN? That is
+# opt-in via an override (-f monitoring/compose.lan.yaml), not an edit here — see
+# monitoring/README.md#publishing-the-dashboards-on-the-lan-opt-in.
+#
 # Resource limits are the point of this file: this box starves itself of RAM for
 # model weights (amdgpu.gttsize / ttm.pages_limit in the root README), so both
 # containers get a hard memory ceiling and a CPU share, and Prometheus gets a
@@ -47,13 +51,20 @@ services:
       # Deliberate: the config is mounted read-only from git, so the way to pick
       # up a config change is `docker compose restart prometheus`, not an HTTP
       # call that would also allow POSTing a whole new config to an
-      # unauthenticated port.
-      - --web.enable-lifecycle=false
+      # unauthenticated port. NOTE the `--no-` form: the flag parser in the pinned
+      # binary rejects `--web.enable-lifecycle=false` outright ("unexpected
+      # false"), so the intuitive spelling crash-loops the container. Verified
+      # against prometheus 3.4.1 in workspace-szw.9; check_monitoring.py rejects
+      # the `=false` spelling so it cannot come back.
+      - --no-web.enable-lifecycle
     volumes:
       - ./prometheus:/etc/prometheus:ro
       - prometheus-tsdb:/prometheus
     ports:
-      # Loopback only. Prometheus is unauthenticated by design.
+      # Loopback only. Prometheus is unauthenticated by design, and Grafana reads
+      # it through the datasource proxy, so no panel ever needs this published —
+      # not even in the LAN override (compose.lan.yaml says what to do if you
+      # think you do).
       - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
     extra_hosts:
       # Lets the llm-server-via-proxy job reach serve.py on the host.
@@ -87,8 +98,9 @@ services:
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_USERS_ALLOW_ORG_CREATE: "false"
       GF_AUTH_DISABLE_LOGIN_FORM: "false"
-      # Anonymous access stays off in the base stack: LAN viewing is a separate,
-      # opt-in decision (ticket workspace-szw.12), not the default.
+      # Anonymous access stays off in the base stack: read-only anonymous viewing
+      # is the LAN override's decision (monitoring/compose.lan.yaml), never the
+      # default. Sign-up stays off in both — see the LAN file for why.
       GF_AUTH_ANONYMOUS_ENABLED: "false"
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
       # Deliberately REQUIRED: copy .env.example to .env and set a real one.
@@ -109,6 +121,8 @@ services:
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
     ports:
+      # Loopback only by default. `-f monitoring/compose.lan.yaml` is the supported
+      # way to publish this port (it replaces this mapping with `!override`).
       - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
     mem_limit: ${GRAFANA_MEM_LIMIT:-256m}
     memswap_limit: ${GRAFANA_MEM_LIMIT:-256m}

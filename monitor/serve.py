@@ -56,7 +56,10 @@ absolute http(s) URL is refused with 400. That override lets the caller make the
 server fetch an arbitrary URL -- and ``GET /metrics`` additionally leaks the whole
 exposition (model ids, traffic shape, prompt-cache behaviour) -- which is exactly
 why the default bind address is loopback. Only pass ``--host 0.0.0.0`` on a
-network you trust the requesters on.
+network you trust the requesters on.  The Grafana side of this box treats
+exposure the same way -- loopback by default, opt-in via
+``monitoring/compose.lan.yaml`` -- see
+``monitoring/README.md#publishing-the-dashboards-on-the-lan-opt-in``.
 
 Standard library only. No build step, no ``pip install``, no ``npm install``.
 
