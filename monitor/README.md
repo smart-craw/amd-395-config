@@ -148,18 +148,24 @@ sudo loginctl enable-linger $USER
 * **cache card** — `/cache`: utilisation as a labelled progress bar with the raw
   numbers, then a key/value grid of everything the endpoint returned, then a raw
   JSON panel.
-* **metrics card** — `/metrics`: a KV-cache progress bar, tiles for generate
-  tok/s, prompt tok/s, requests in flight, requests total, draft-accept rate and
-  prompt-cache hit rate, a throughput history chart, one row per scraped series
-  and the raw exposition text. See “Why `/metrics` is parsed server-side”.
-  Each tile label says which kind of number it is — `· instant`, `· server avg`
-  (the server's own "since my last scrape" gauge), `· lifetime` (counter ÷ counter
-  since start) — because a tile that just says "generate tok/s" gets read as a
-  windowed rate, and none of these are one; a windowed rate is PromQL's job. With
-  `--grafana-url` the card also grows a row of deep links into the equivalent
-  panels (decode, prompt, TTFT p99, KV pressure, queue, cache & spec, scrape
-  health), each carrying `var-instance=<upstream host:port>` so it lands on the
-  same server's history.
+* **metrics card** — `/metrics`: a KV-cache progress bar, four tiles (generate
+  tok/s, prompt tok/s, requests in flight, requests completed), a chart of the
+  server's own generate-throughput gauge, one row per scraped series and the raw
+  exposition text. See “Why `/metrics` is parsed server-side”.
+  Each tile label says which kind of number it is — `· instant` (a gauge, right
+  now), `· server avg` (the server's own "since my last scrape" average),
+  `· lifetime` (a counter, since the process started) — because a tile that just
+  says "generate tok/s" gets read as a windowed rate, and none of these are one; a
+  windowed rate is PromQL's job. **Nothing on this card is derived**: no ratios, no
+  counter-over-counter averages, no name-pattern guessing. Draft acceptance and the
+  prompt-cache hit ratio used to be computed here, and a paired page-vs-Grafana run
+  is what retired them — see
+  [`monitoring/PARITY.md`](../monitoring/PARITY.md). With `--grafana-url` the card
+  also grows a row of deep links into the equivalent panels (decode, prompt,
+  TTFT p99, KV pressure, queue, cache & spec, scrape health), each carrying
+  `var-instance=<upstream host:port>` so it lands on the same server's history —
+  panels 23 and 24 (the Overview stats, over any window you pick) and panel 6 (both
+  ratios plotted against time) are where the two retired ratios live now.
 * **history read-out** — the top bar carries `history: N/M targets up`, and with
   `--prometheus-url` set it is a live digest of `/api/scrape-health`: `history:
   Prometheus unreachable` when the scraping layer is down, `history: not
@@ -314,19 +320,49 @@ extra key next to the envelope:
   all, `metrics` is `null` and the card shows the raw payload.
 
 The card never assumes a metric exists: each tile looks up the exact name this box
-uses (`llamacpp:predicted_tokens_seconds`, `halogen:kv_pool_positions`, …) and
-falls back to a name pattern, and a tile whose metric is missing is simply not
-rendered. Two figures are derived rather than read: draft acceptance
-(`draft_tokens_accepted_total / draft_tokens_total`) and prompt-cache hit rate
-(`prompt_tokens_cached_total / (prompt_tokens_total + prompt_tokens_cached_total)`).
+uses (`llamacpp:predicted_tokens_seconds`, `halogen:kv_pool_positions`, …) and is
+simply not rendered when that name is absent. Nothing is computed from the scrape
+any more — no ratio, no rate, no counter-over-counter average. The one division left
+is the KV bar's fallback (`kv_cache_tokens / kv_pool_positions`, used only when a
+server publishes no usage ratio), and it stayed precisely because Grafana has no
+expression for it either: deleting it would lose a number rather than move one. The
+rules the card now follows are written into the `PARITY` note above `METRIC_SIGNALS`
+in `app.js`, and the measurements behind them are in
+[`monitoring/PARITY.md`](../monitoring/PARITY.md).
 
 That parsing exists so the page can render *right now* without shipping a second
 parser to the browser; it is explicitly **not** the system of record. Dividing two
-instantaneous counter snapshots is not a rate — no window, no `rate()`, no
-counter-reset handling — so those two derived tiles are transitional and are removed
-once the Grafana panels cover them (ADR 0001, "Migration path for the bespoke
-math"). Vendor name drift is meant to shrink here too: a new server family gets an
-entry in the recording-rules file, not a new regex in `app.js`.
+instantaneous counter snapshots is not a rate — no window, no counter-reset handling,
+no way to answer "what has it been doing for the last quarter-hour" — which is why the
+figures that used to do it were deleted rather than improved (ADR 0001's "Migration
+path for the bespoke math", closed by `workspace-szw.11`). Vendor name drift shrinks
+the same way: a new server family gets a line in
+`monitoring/prometheus/recording_rules.yml`, never a new regex in `app.js`.
+
+### A server with no `/metrics` at all is a supported configuration
+
+Some builds — a stock llama.cpp without the halogen metrics, a vLLM deployment,
+anything behind a proxy that does not forward it — answer `/metrics` with 404. That is
+not a degraded mode of this page, and it is worth saying plainly because the parity
+work moved derived figures into Grafana:
+
+* Prometheus scrapes what it can scrape, so **it sees nothing at all** for such a
+  server: no history, no panels, no alerts on it;
+* the page still shows everything it can — `/health`, `/v1/models`, `/cache` and the
+  `/metrics` card reading "this server does not answer /metrics (HTTP 404)" as a
+  muted note, with the status pill staying healthy;
+* so **for that server this page is the only view there is**, and the Grafana link row
+  is not rendered (no `--grafana-url`) or leads to panels with no data (there is one).
+
+That path is a first-class test case, not an afterthought: `tests/mock_upstream.py
+--mode nometrics` is a server whose `/metrics` 404s, and `tests/test_app.test.mjs`
+drives the whole dashboard against it (note shown, no error strip, pill healthy,
+tiles empty, raw body kept). Run it by hand with:
+
+```sh
+python3 monitor/tests/mock_upstream.py --port 8001 --mode nometrics
+python3 monitor/serve.py --url http://127.0.0.1:8001 --port 8090
+```
 
 ## Why `/cache` is parsed defensively
 
@@ -409,7 +445,8 @@ node --test "monitor/tests/*.test.mjs"                         # the dashboard U
 | ------------------------- | ---------------------------------------------------------------------------- |
 | `tests/test_serve.py`     | the JSON envelope, `?url=` override + validation, the 5 s cap per upstream request, dead / 5xx / non-JSON upstreams, the Prometheus parser (labels, NaN/Inf, garbage lines, the series cap), static hosting (bodies really get copied), traversal-proofing, and the `/metrics` scrape passthrough (verbatim bytes + Content-Type, `llm_monitor_*` self-metrics, 502 on a failed scrape, `?url=` rejection, the size/series caps, a stalled scrape not blocking the UI polls) |
 | `tests/test_static.py`    | contracts no browser would warn about: every id app.js looks up exists, every class it toggles is styled, no off-box asset, upstream data never reaches `innerHTML` |
-| `tests/test_app.test.mjs` | the real app.js in a headless DOM against a live `serve.py`: first paint, retargeting without a reload, an unknown `/cache` shape, the metrics tiles/gauge/chart, a server without `/metrics`, the unreachable-upstream path, zero uncaught errors |
+| `tests/test_app.test.mjs` | the real app.js in a headless DOM against a live `serve.py`: first paint, retargeting without a reload, an unknown `/cache` shape, the metrics tiles/gauge/chart, a server without `/metrics`, a server whose `/metrics` names nothing the page knows, the unreachable-upstream path, zero uncaught errors |
+| `tests/test_parity_oracle.test.mjs` | the guard on [`monitoring/PARITY.md`](../monitoring/PARITY.md): the parity harness models the page in Python, so this boots the real page, reads the numbers off the rendered tiles and demands the harness' model agrees — and that the retired ratio tiles stayed retired |
 | `tests/frontend_dom.mjs`  | the miniature DOM the last file needs (parses `index.html`, runs `app.js` unmodified) |
 | `tests/mock_upstream.py`  | the model-server double, usable standalone                                    |
 

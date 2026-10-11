@@ -1,0 +1,656 @@
+{
+  "cache_hit_pct": {
+    "class": "lifetime-vs-window",
+    "page_lifetime": 98.4005646307588,
+    "panel_windowed": {
+      "1h": 98.87550807149796,
+      "1m": 0.0,
+      "5m": 99.4442754497299
+    },
+    "same_math_as_promql": 98.4005646307588
+  },
+  "counter_reset": {
+    "class": "counter-reset",
+    "difference": 60.208280668959254,
+    "explanation": "The page divides two instantaneous counter values, so as soon as the numerator restarts it reports acceptance since that reset \u2014 here 0.086% against a true 80%, and it keeps decaying. rate() puts the dropped back, so the panel reads 60.295% and stays there. The page's figure never recovers: a lifetime division has no window to forget into, which is the whole reason the tile was deleted rather than tuned.",
+    "observed": {
+      "fixture": "http://127.0.0.1:8113",
+      "fixture_age_s": 1712.36,
+      "page_cache_hit_pct": 0.9660997338886961,
+      "page_lifetime_pct": 0.08645617314601162,
+      "panel_cache_hit_pct": 87.15232385159807,
+      "panel_windowed_pct": 60.294736842105266,
+      "panel_windows_pct": {
+        "15m": 59.907344632768364,
+        "1m": 59.199999999999996,
+        "5m": 60.294736842105266
+      },
+      "truth_cache_hit_pct": 90.0
+    },
+    "proof": "monitor/tests/mock_upstream.py --mode reset: draft_tokens_accepted_total restarts every 45 s under a draft_tokens_total that keeps climbing, so the truth is 80% by construction and stays 80% while the scraped counters do not",
+    "truth_pct": 80.0,
+    "what": "a counter that restarts: rate() adds the pre-reset tokens back into the window, a division of two lifetime counters silently treats the restart as a shorter lifetime and reads low forever after"
+  },
+  "draft_accept_pct": {
+    "class": "lifetime-vs-window",
+    "page_lifetime": 80.56346181677843,
+    "panel_windowed": {
+      "1h": 78.57399187836434,
+      "1m": 0.0,
+      "5m": 73.42342342342343
+    },
+    "same_math_as_promql": 80.56346181677843
+  },
+  "gauge_window_reset": {
+    "class": "window",
+    "counter_deltas_per_sample": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "gauge_samples": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "request_failed": null,
+    "spread_factor": null,
+    "what": "the average-since-last-scrape gauge, polled every second during one long decode: each read resets the window the server averages over, so the tile's number depends on who else is scraping"
+  },
+  "idle_zero": {
+    "class": "idle-zero",
+    "page_gauge": 0.0,
+    "panel": {
+      "1m": 0.0,
+      "5m": 7.199999999999999
+    },
+    "what": "llamacpp:*_tokens_seconds are 'average since my last scrape' gauges: an idle server reports 0, and every scrape resets the window, so the tile reads 0 while rate() over a window still shows the last burst"
+  },
+  "label_fanout": {
+    "class": "label-fanout",
+    "classes": [
+      {
+        "arith_check": null,
+        "as_promql": null,
+        "class": "window",
+        "delta": -100.0,
+        "delta_pct": -1.0,
+        "figure": "decode_tok_s",
+        "page": 100.0,
+        "panel": 0.0,
+        "panel_kind": "sum(rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\".*\",instance=~\"127[.]0[.]0[.]1:8111\",model=~\".*\"}[5m]))",
+        "same": 100.0,
+        "same_check": "equal",
+        "window": "5m"
+      },
+      {
+        "arith_check": null,
+        "as_promql": null,
+        "class": "window",
+        "delta": -2000.0,
+        "delta_pct": -1.0,
+        "figure": "prompt_tok_s",
+        "page": 2000.0,
+        "panel": 0.0,
+        "panel_kind": "sum(rate({__name__=~\"llamacpp:prompt_tokens_total|vllm:prompt_tokens_total\",job=~\".*\",instance=~\"127[.]0[.]0[.]1:8111\",model=~\".*\"}[5m]))",
+        "same": 2000.0,
+        "same_check": "equal",
+        "window": "5m"
+      },
+      {
+        "arith_check": null,
+        "as_promql": null,
+        "class": "exact",
+        "delta": 0.0,
+        "delta_pct": 0.0,
+        "figure": "requests_in_flight",
+        "page": 4.0,
+        "panel": 4.0,
+        "panel_kind": "sum({__name__=~\"llamacpp:requests_processing|halogen:requests_running|vllm:num_requests_running\",job=~\".*\",instance=~\"127[.]0[.]0[.]1:8111\",model=~\".*\"})",
+        "same": 4.0,
+        "same_check": "equal",
+        "window": "5m"
+      },
+      {
+        "arith_check": null,
+        "as_promql": null,
+        "class": "sum-vs-max",
+        "delta": null,
+        "delta_pct": null,
+        "figure": "kv_usage_pct",
+        "page": 60.00000000000001,
+        "panel": 40.0,
+        "panel_kind": "max({__name__=~\"llamacpp:kv_cache_usage_ratio|llamacpp:kv_cache_usage\",job=~\".*\",instance=~\"127[.]0[.]0[.]1:8111\",model=~\".*\"})",
+        "same": 40.0,
+        "same_check": "fanout",
+        "window": "5m"
+      },
+      {
+        "arith_check": true,
+        "as_promql": 60.0,
+        "class": "clamp",
+        "delta": -60.0,
+        "delta_pct": -1.0,
+        "figure": "draft_accept_pct",
+        "page": 60.0,
+        "panel": 0.0,
+        "panel_kind": "sum(rate({__name__=~\"halogen:draft_tokens_accepted_total|llamacpp:draft_tokens_accepted_total\",job=~\".*\",instance=~\"127[.]0[.]0[.]1:8111\",model=~\".*\"}[5m])) / clamp_min(sum(rate({__name__=~\"halogen:draft_tokens_total|llamacpp:draft_tokens_total\",job=~\".*\",instance=~\"127[.]0[.]0[.]1:8111\",model=~\".*\"}[5m])), 1)",
+        "same": null,
+        "same_check": null,
+        "window": "5m"
+      },
+      {
+        "arith_check": true,
+        "as_promql": 90.0,
+        "class": "clamp",
+        "delta": -90.0,
+        "delta_pct": -1.0,
+        "figure": "cache_hit_pct",
+        "page": 90.0,
+        "panel": 0.0,
+        "panel_kind": "sum(rate({__name__=~\"halogen:prompt_tokens_cached_total|llamacpp:prompt_cache_tokens_cached_total\",job=~\".*\",instance=~\"127[.]0[.]0[.]1:8111\",model=~\".*\"}[5m])) / clamp_min(sum(rate({__name__=~\"llamacpp:prompt_tokens_total|vllm:prompt_tokens_total\",job=~\".*\",instance=~\"127[.]0[.]0[.]1:8111\",model=~\".*\"}[5m])) + sum(rate({__name__=~\"halogen:prompt_tokens_cached_total|llamacpp:prompt_cache_tokens_cached_total\",job=~\".*\",instance=~\"127[.]0[.]0[.]1:8111\",model=~\".*\"}[5m])), 1)",
+        "same": null,
+        "same_check": null,
+        "window": "5m"
+      },
+      {
+        "arith_check": null,
+        "as_promql": null,
+        "class": "clamp",
+        "delta": -50.0,
+        "delta_pct": -1.0,
+        "figure": "lifetime_decode_tok_s",
+        "page": 50.0,
+        "panel": 0.0,
+        "panel_kind": "sum(rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\".*\",instance=~\"127[.]0[.]0[.]1:8111\",model=~\".*\"}[5m]))",
+        "same": 50.0,
+        "same_check": "equal",
+        "window": "5m"
+      },
+      {
+        "arith_check": true,
+        "as_promql": 500.0,
+        "class": "unit-change",
+        "delta": -500.0,
+        "delta_pct": -1.0,
+        "figure": "requests_total",
+        "page": 500.0,
+        "panel": 0.0,
+        "panel_kind": "sum(rate({__name__=~\"halogen:requests_total|llamacpp:requests_total|vllm:request_success_total\",job=~\".*\",instance=~\"127[.]0[.]0[.]1:8111\",model=~\".*\"}[5m]))",
+        "same": null,
+        "same_check": null,
+        "window": "5m"
+      }
+    ],
+    "families_with_several_label_sets": {
+      "halogen:draft_tokens_accepted_total": [
+        {
+          "labels": {
+            "model": "a"
+          },
+          "text": "60",
+          "value": 60.0
+        },
+        {
+          "labels": {
+            "model": "b"
+          },
+          "text": "180",
+          "value": 180.0
+        }
+      ],
+      "halogen:draft_tokens_total": [
+        {
+          "labels": {
+            "model": "a"
+          },
+          "text": "100",
+          "value": 100.0
+        },
+        {
+          "labels": {
+            "model": "b"
+          },
+          "text": "300",
+          "value": 300.0
+        }
+      ],
+      "halogen:prompt_tokens_cached_total": [
+        {
+          "labels": {
+            "model": "a"
+          },
+          "text": "9000",
+          "value": 9000.0
+        },
+        {
+          "labels": {
+            "model": "b"
+          },
+          "text": "27000",
+          "value": 27000.0
+        }
+      ],
+      "halogen:requests_total": [
+        {
+          "labels": {
+            "model": "a"
+          },
+          "text": "100",
+          "value": 100.0
+        },
+        {
+          "labels": {
+            "model": "b"
+          },
+          "text": "400",
+          "value": 400.0
+        }
+      ],
+      "llamacpp:kv_cache_usage_ratio": [
+        {
+          "labels": {
+            "model": "a"
+          },
+          "text": "0.2",
+          "value": 0.2
+        },
+        {
+          "labels": {
+            "model": "b"
+          },
+          "text": "0.4",
+          "value": 0.4
+        }
+      ],
+      "llamacpp:predicted_tokens_seconds": [
+        {
+          "labels": {
+            "model": "a"
+          },
+          "text": "40",
+          "value": 40.0
+        },
+        {
+          "labels": {
+            "model": "b"
+          },
+          "text": "60",
+          "value": 60.0
+        }
+      ],
+      "llamacpp:prompt_tokens_seconds": [
+        {
+          "labels": {
+            "model": "a"
+          },
+          "text": "900",
+          "value": 900.0
+        },
+        {
+          "labels": {
+            "model": "b"
+          },
+          "text": "1100",
+          "value": 1100.0
+        }
+      ],
+      "llamacpp:prompt_tokens_total": [
+        {
+          "labels": {
+            "model": "a"
+          },
+          "text": "1000",
+          "value": 1000.0
+        },
+        {
+          "labels": {
+            "model": "b"
+          },
+          "text": "3000",
+          "value": 3000.0
+        }
+      ],
+      "llamacpp:requests_processing": [
+        {
+          "labels": {
+            "model": "a"
+          },
+          "text": "1",
+          "value": 1.0
+        },
+        {
+          "labels": {
+            "model": "b"
+          },
+          "text": "3",
+          "value": 3.0
+        }
+      ],
+      "llamacpp:tokens_predicted_seconds_total": [
+        {
+          "labels": {
+            "model": "a"
+          },
+          "text": "10",
+          "value": 10.0
+        },
+        {
+          "labels": {
+            "model": "b"
+          },
+          "text": "30",
+          "value": 30.0
+        }
+      ],
+      "llamacpp:tokens_predicted_total": [
+        {
+          "labels": {
+            "model": "a"
+          },
+          "text": "500",
+          "value": 500.0
+        },
+        {
+          "labels": {
+            "model": "b"
+          },
+          "text": "1500",
+          "value": 1500.0
+        }
+      ]
+    },
+    "instance": "127.0.0.1:8111",
+    "page_figures": {
+      "cache_hit_pct": 90.0,
+      "decode_tok_s": 100.0,
+      "draft_accept_pct": 60.0,
+      "kv_usage_pct": 60.00000000000001,
+      "lifetime_decode_tok_s": 50.0,
+      "prompt_tok_s": 2000.0,
+      "requests_in_flight": 4.0,
+      "requests_total": 500.0
+    },
+    "panel_figures": {
+      "cache_hit_pct": {
+        "5m": 0.0
+      },
+      "decode_tok_s": {
+        "5m": 0.0
+      },
+      "draft_accept_pct": {
+        "5m": 0.0
+      },
+      "kv_usage_pct": {
+        "5m": 40.0
+      },
+      "lifetime_decode_tok_s": {
+        "5m": 0.0
+      },
+      "prompt_tok_s": {
+        "5m": 0.0
+      },
+      "requests_in_flight": {
+        "5m": 4.0
+      },
+      "requests_total": {
+        "5m": 0.0
+      }
+    },
+    "what": "one metric name, several label sets: the page's signalValue() sums them into one figure; panels aggregate differently (the KV panel takes max, the throughput panels sum) and $model can split them further"
+  },
+  "nan_handling": {
+    "class": "nan-handling",
+    "classes": [
+      {
+        "arith_check": null,
+        "as_promql": null,
+        "class": "no-data",
+        "delta": null,
+        "delta_pct": null,
+        "figure": "decode_tok_s",
+        "page": null,
+        "panel": null,
+        "panel_kind": "sum(rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\".*\",instance=~\"127[.]0[.]0[.]1:8112\",model=~\".*\"}[5m]))",
+        "same": null,
+        "same_check": null,
+        "window": "5m"
+      },
+      {
+        "arith_check": null,
+        "as_promql": null,
+        "class": "no-data",
+        "delta": null,
+        "delta_pct": null,
+        "figure": "prompt_tok_s",
+        "page": null,
+        "panel": 0.0,
+        "panel_kind": "sum(rate({__name__=~\"llamacpp:prompt_tokens_total|vllm:prompt_tokens_total\",job=~\".*\",instance=~\"127[.]0[.]0[.]1:8112\",model=~\".*\"}[5m]))",
+        "same": null,
+        "same_check": null,
+        "window": "5m"
+      },
+      {
+        "arith_check": null,
+        "as_promql": null,
+        "class": "no-data",
+        "delta": null,
+        "delta_pct": null,
+        "figure": "requests_in_flight",
+        "page": null,
+        "panel": null,
+        "panel_kind": "sum({__name__=~\"llamacpp:requests_processing|halogen:requests_running|vllm:num_requests_running\",job=~\".*\",instance=~\"127[.]0[.]0[.]1:8112\",model=~\".*\"})",
+        "same": null,
+        "same_check": null,
+        "window": "5m"
+      },
+      {
+        "arith_check": null,
+        "as_promql": null,
+        "class": "no-data",
+        "delta": null,
+        "delta_pct": null,
+        "figure": "kv_usage_pct",
+        "page": null,
+        "panel": null,
+        "panel_kind": "max({__name__=~\"llamacpp:kv_cache_usage_ratio|llamacpp:kv_cache_usage\",job=~\".*\",instance=~\"127[.]0[.]0[.]1:8112\",model=~\".*\"})",
+        "same": null,
+        "same_check": null,
+        "window": "5m"
+      },
+      {
+        "arith_check": null,
+        "as_promql": null,
+        "class": "no-data",
+        "delta": null,
+        "delta_pct": null,
+        "figure": "draft_accept_pct",
+        "page": null,
+        "panel": null,
+        "panel_kind": "sum(rate({__name__=~\"halogen:draft_tokens_accepted_total|llamacpp:draft_tokens_accepted_total\",job=~\".*\",instance=~\"127[.]0[.]0[.]1:8112\",model=~\".*\"}[5m])) / clamp_min(sum(rate({__name__=~\"halogen:draft_tokens_total|llamacpp:draft_tokens_total\",job=~\".*\",instance=~\"127[.]0[.]0[.]1:8112\",model=~\".*\"}[5m])), 1)",
+        "same": null,
+        "same_check": null,
+        "window": "5m"
+      },
+      {
+        "arith_check": null,
+        "as_promql": null,
+        "class": "no-data",
+        "delta": null,
+        "delta_pct": null,
+        "figure": "cache_hit_pct",
+        "page": null,
+        "panel": null,
+        "panel_kind": "sum(rate({__name__=~\"halogen:prompt_tokens_cached_total|llamacpp:prompt_cache_tokens_cached_total\",job=~\".*\",instance=~\"127[.]0[.]0[.]1:8112\",model=~\".*\"}[5m])) / clamp_min(sum(rate({__name__=~\"llamacpp:prompt_tokens_total|vllm:prompt_tokens_total\",job=~\".*\",instance=~\"127[.]0[.]0[.]1:8112\",model=~\".*\"}[5m])) + sum(rate({__name__=~\"halogen:prompt_tokens_cached_total|llamacpp:prompt_cache_tokens_cached_total\",job=~\".*\",instance=~\"127[.]0[.]0[.]1:8112\",model=~\".*\"}[5m])), 1)",
+        "same": null,
+        "same_check": null,
+        "window": "5m"
+      },
+      {
+        "arith_check": null,
+        "as_promql": null,
+        "class": "no-data",
+        "delta": null,
+        "delta_pct": null,
+        "figure": "lifetime_decode_tok_s",
+        "page": null,
+        "panel": null,
+        "panel_kind": "sum(rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\".*\",instance=~\"127[.]0[.]0[.]1:8112\",model=~\".*\"}[5m]))",
+        "same": null,
+        "same_check": null,
+        "window": "5m"
+      },
+      {
+        "arith_check": null,
+        "as_promql": null,
+        "class": "unit-change",
+        "delta": null,
+        "delta_pct": null,
+        "figure": "requests_total",
+        "page": null,
+        "panel": null,
+        "panel_kind": "sum(rate({__name__=~\"halogen:requests_total|llamacpp:requests_total|vllm:request_success_total\",job=~\".*\",instance=~\"127[.]0[.]0[.]1:8112\",model=~\".*\"}[5m]))",
+        "same": null,
+        "same_check": null,
+        "window": "5m"
+      }
+    ],
+    "instance": "127.0.0.1:8112",
+    "non_finite_series": [
+      {
+        "n": 1,
+        "name": "llamacpp:predicted_tokens_seconds",
+        "value": null,
+        "value_text": "NaN"
+      },
+      {
+        "n": 1,
+        "name": "llamacpp:prompt_tokens_seconds",
+        "value": null,
+        "value_text": "+Inf"
+      },
+      {
+        "n": 1,
+        "name": "llamacpp:requests_processing",
+        "value": null,
+        "value_text": "NaN"
+      },
+      {
+        "n": 1,
+        "name": "llamacpp:kv_cache_usage_ratio",
+        "value": null,
+        "value_text": "NaN"
+      },
+      {
+        "n": 1,
+        "name": "halogen:requests_total",
+        "value": null,
+        "value_text": "NaN"
+      },
+      {
+        "n": 1,
+        "name": "halogen:draft_tokens_accepted_total",
+        "value": null,
+        "value_text": "NaN"
+      },
+      {
+        "n": 1,
+        "name": "llamacpp:tokens_predicted_total",
+        "value": null,
+        "value_text": "NaN"
+      },
+      {
+        "n": 1,
+        "name": "llamacpp:tokens_predicted_seconds_total",
+        "value": null,
+        "value_text": "NaN"
+      },
+      {
+        "n": 1,
+        "name": "halogen:prompt_tokens_cached_total",
+        "value": null,
+        "value_text": "NaN"
+      }
+    ],
+    "page_figures": {
+      "cache_hit_pct": null,
+      "decode_tok_s": null,
+      "draft_accept_pct": null,
+      "kv_usage_pct": null,
+      "lifetime_decode_tok_s": null,
+      "prompt_tok_s": null,
+      "requests_in_flight": null,
+      "requests_total": null
+    },
+    "panel_figures": {
+      "cache_hit_pct": {
+        "5m": null
+      },
+      "decode_tok_s": {
+        "5m": null
+      },
+      "draft_accept_pct": {
+        "5m": null
+      },
+      "kv_usage_pct": {
+        "5m": null
+      },
+      "lifetime_decode_tok_s": {
+        "5m": null
+      },
+      "prompt_tok_s": {
+        "5m": 0.0
+      },
+      "requests_in_flight": {
+        "5m": null
+      },
+      "requests_total": {
+        "5m": null
+      }
+    },
+    "panel_kinds": {
+      "cache_hit_pct": {
+        "5m": "sum(rate({__name__=~\"halogen:prompt_tokens_cached_total|llamacpp:prompt_cache_tokens_cached_total\",job=~\".*\",instance=~\"127[.]0[.]0[.]1:8112\",model=~\".*\"}[5m])) / clamp_min(sum(rate({__name__=~\"llamacpp:prompt_tokens_total|vllm:prompt_tokens_total\",job=~\".*\",instance=~\"127[.]0[.]0[.]1:8112\",model=~\".*\"}[5m])) + sum(rate({__name__=~\"halogen:prompt_tokens_cached_total|llamacpp:prompt_cache_tokens_cached_total\",job=~\".*\",instance=~\"127[.]0[.]0[.]1:8112\",model=~\".*\"}[5m])), 1)"
+      },
+      "decode_tok_s": {
+        "5m": "sum(rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\".*\",instance=~\"127[.]0[.]0[.]1:8112\",model=~\".*\"}[5m]))"
+      },
+      "draft_accept_pct": {
+        "5m": "sum(rate({__name__=~\"halogen:draft_tokens_accepted_total|llamacpp:draft_tokens_accepted_total\",job=~\".*\",instance=~\"127[.]0[.]0[.]1:8112\",model=~\".*\"}[5m])) / clamp_min(sum(rate({__name__=~\"halogen:draft_tokens_total|llamacpp:draft_tokens_total\",job=~\".*\",instance=~\"127[.]0[.]0[.]1:8112\",model=~\".*\"}[5m])), 1)"
+      },
+      "kv_usage_pct": {
+        "5m": "max({__name__=~\"llamacpp:kv_cache_usage_ratio|llamacpp:kv_cache_usage\",job=~\".*\",instance=~\"127[.]0[.]0[.]1:8112\",model=~\".*\"})"
+      },
+      "lifetime_decode_tok_s": {
+        "5m": "sum(rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\".*\",instance=~\"127[.]0[.]0[.]1:8112\",model=~\".*\"}[5m]))"
+      },
+      "prompt_tok_s": {
+        "5m": "sum(rate({__name__=~\"llamacpp:prompt_tokens_total|vllm:prompt_tokens_total\",job=~\".*\",instance=~\"127[.]0[.]0[.]1:8112\",model=~\".*\"}[5m]))"
+      },
+      "requests_in_flight": {
+        "5m": "sum({__name__=~\"llamacpp:requests_processing|halogen:requests_running|vllm:num_requests_running\",job=~\".*\",instance=~\"127[.]0[.]0[.]1:8112\",model=~\".*\"})"
+      },
+      "requests_total": {
+        "5m": "sum(rate({__name__=~\"halogen:requests_total|llamacpp:requests_total|vllm:request_success_total\",job=~\".*\",instance=~\"127[.]0[.]0[.]1:8112\",model=~\".*\"}[5m]))"
+      }
+    },
+    "what": "NaN and +Inf in the exposition text: JSON cannot spell them, so the parser hands the page value=null + value_text and app.js skips them in sums; PromQL keeps NaN and the panel renders 'No data'"
+  },
+  "window_choice": {
+    "class": "window",
+    "page_gauge": 0.0,
+    "panel": {
+      "15m": 22.166527492618503,
+      "1h": 20.210205145969745,
+      "1m": 0.0,
+      "5m": 7.199999999999999
+    },
+    "rule_5m_is_the_panel_5m": 7.199999999999999,
+    "what": "one counter, four rate windows, compared with the server's own average gauge (the tile) and with the recording rule's fixed 5m"
+  }
+}

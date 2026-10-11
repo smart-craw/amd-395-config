@@ -36,6 +36,7 @@ sys.path.insert(0, str(TESTS_DIR))
 
 import serve  # noqa: E402  (path juggling first)
 from mock_upstream import MockUpstream  # noqa: E402
+import mock_upstream  # noqa: E402
 
 # The proxy logs every request the way http.server does; hundreds of those lines
 # would bury the test report. Test-only silencing -- the shipped server keeps
@@ -945,6 +946,70 @@ class PassthroughBoundsTests(PassthroughMixin, ProxyFixture):
         # cap respected: the upstream body plus a marker and the self-metrics block
         self.assertLess(len(raw), 4096 + 4096)
         self.assertIn(b"llm_monitor_build_info", raw)
+
+
+class ResetFixtureTests(unittest.TestCase):
+    """The double `monitoring/parity` uses to make a counter reset observable.
+
+    A live server is not obliged to restart inside a measurement window, so the
+    parity run's counter-reset probe drives this instead of waiting for luck. Its
+    contract is the thing worth testing: the truth is constant, the numerator is not
+    monotonic, and the ratio-of-lifetimes figure the bespoke page used collapses —
+    if any of that stops being true the probe proves nothing.
+    """
+
+    TRUTH_PCT = 80.0          # 80 accepted per 100 drafted, every cycle
+    CYCLE_SECONDS = 45.0      # when the numerator restarts
+
+    def values(self, age: float) -> dict:
+        parsed = serve.parse_prometheus(mock_upstream.reset_counters_body(age))
+        self.assertEqual(parsed["errors"], [], "the reset body must stay parseable")
+        return {s["name"]: s["value"] for s in parsed["series"]}
+
+    def test_the_construction_is_what_the_probe_thinks_it_is(self):
+        for age in (1.0, 20.0, 44.0, 60.0, 300.0):
+            v = self.values(age)
+            drafted = v["halogen:draft_tokens_total"]
+            accepted = v["halogen:draft_tokens_accepted_total"]
+            self.assertGreater(drafted, 0)
+            # rate() over any window containing the reset sees the same 80/100,
+            # because the drafted counter never stops and the drops are counted back.
+            self.assertAlmostEqual(100.0 * accepted / drafted if drafted else 0,
+                                   self.ratio_at(age), places=6)
+
+    def ratio_at(self, age: float) -> float:
+        """The ratio-of-lifetimes a reader would compute at this age."""
+        return 100.0 * (80.0 * (age % self.CYCLE_SECONDS)) / (100.0 * age)
+
+    def test_the_numerator_restarts_and_the_lifetimes_ratio_decays(self):
+        before = self.values(self.CYCLE_SECONDS - 1.0)
+        after = self.values(self.CYCLE_SECONDS + 1.0)
+        self.assertAlmostEqual(self.TRUTH_PCT,
+                               100.0 * before["halogen:draft_tokens_accepted_total"]
+                               / before["halogen:draft_tokens_total"], places=6)
+        self.assertLess(after["halogen:draft_tokens_accepted_total"],
+                        before["halogen:draft_tokens_accepted_total"],
+                        "the numerator must go backwards, or there is no reset")
+        self.assertGreater(after["halogen:draft_tokens_total"],
+                           before["halogen:draft_tokens_total"],
+                           "the denominator must keep climbing, or the ratio is not a lifetime")
+        old = self.values(1800.0)   # half an hour in
+        self.assertLess(100.0 * old["halogen:draft_tokens_accepted_total"]
+                        / old["halogen:draft_tokens_total"], 3.0,
+                        "the lifetime ratio should have decayed towards zero by now")
+
+    def test_the_prompt_cache_pair_resets_the_same_way(self):
+        v = self.values(1800.0)
+        hit = 100.0 * v["halogen:prompt_tokens_cached_total"] / (
+            v["halogen:prompt_tokens_cached_total"] + v["llamacpp:prompt_tokens_total"])
+        self.assertLess(hit, 5.0, "same mechanism, 90% by construction, reading ~0")
+
+    def test_the_mode_serves_it_over_http(self):
+        with MockUpstream(mode="reset") as fixture:
+            with urllib.request.urlopen(fixture.url + "/metrics", timeout=5) as resp:
+                body = resp.read().decode()
+        self.assertIn("halogen:draft_tokens_accepted_total", body)
+        self.assertEqual(serve.parse_prometheus(body)["errors"], [])
 
 
 class ScrapeStatsTests(unittest.TestCase):

@@ -442,7 +442,7 @@ describe("dashboard: the metrics card", () => {
     const tiles = tilesOf(card(page, "metrics"));
     // Every label carries which kind of number it is: a tile that just says
     // "generate tok/s" gets read as a rate over a window, and none of these are.
-    // See metricsTiles() in app.js and ADR 0001.
+    // See metricsTiles() in app.js and monitoring/PARITY.md.
     assert.deepEqual(
       tiles.map(([label]) => label),
       [
@@ -450,23 +450,33 @@ describe("dashboard: the metrics card", () => {
         "prompt tok/s \u00b7 server avg",
         "in flight \u00b7 instant",
         "requests \u00b7 lifetime",
-        "draft accept \u00b7 lifetime",
-        "prompt cache hit \u00b7 lifetime",
       ]
     );
     assert.equal(tile(tiles, "generate tok/s \u00b7 server avg")[1], "72.9 tok/s");
-    assert.equal(tile(tiles, "generate tok/s \u00b7 server avg")[2], "since start 61.2 tok/s");
+    assert.equal(tile(tiles, "generate tok/s \u00b7 server avg")[2], "predicted_tokens_seconds");
     assert.equal(tile(tiles, "prompt tok/s \u00b7 server avg")[1], "1,416 tok/s");
     assert.equal(tile(tiles, "prompt tok/s \u00b7 server avg")[2], "779,554 prompt tokens total");
     assert.equal(tile(tiles, "in flight \u00b7 instant")[1], "2");
     assert.equal(tile(tiles, "in flight \u00b7 instant")[2], "0 deferred");
     assert.equal(tile(tiles, "requests \u00b7 lifetime")[1], "522");
     assert.equal(tile(tiles, "requests \u00b7 lifetime")[2], "0 under a JSON schema");
-    // derived, because no single metric says it: accepted / drafted, cached / seen
-    assert.equal(tile(tiles, "draft accept \u00b7 lifetime")[1], "81.4%");
-    assert.equal(tile(tiles, "draft accept \u00b7 lifetime")[2], "248,795 / 305,696 drafted");
-    assert.equal(tile(tiles, "prompt cache hit \u00b7 lifetime")[1], "98.5%");
-    assert.equal(tile(tiles, "prompt cache hit \u00b7 lifetime")[2], "49,838,237 cached / 779,554 processed");
+  });
+
+  test("the ratios that used to be tiles are Grafana's now, not the page's", () => {
+    // workspace-szw.11: draft acceptance and prompt-cache hit ratio were counter ÷
+    // counter since server start — a figure that cannot move no matter what the last
+    // ten minutes did. The paired run showed the windowed versions (panels 23 and 24)
+    // are the numbers worth acting on, so the arithmetic left the browser.
+    const labels = tilesOf(card(page, "metrics")).map(([label]) => label).join(" | ");
+    assert.ok(!/accept/i.test(labels), `draft acceptance came back as a tile: ${labels}`);
+    assert.ok(!/cache hit/i.test(labels), `prompt-cache hit came back as a tile: ${labels}`);
+    assert.ok(!/lifetime tok|since start/i.test(labels), `a lifetime division came back: ${labels}`);
+    // The counters those ratios divided are still visible, untouched, in the series
+    // list: the page publishes the ingredients and lets PromQL do the cooking.
+    const rows = kvRows(card(page, "metrics")).map(([key]) => key);
+    assert.ok(rows.includes("halogen:draft_tokens_accepted_total"), "draft counters vanished");
+    assert.ok(rows.includes("halogen:draft_tokens_total"), "draft counters vanished");
+    assert.ok(rows.includes("halogen:prompt_tokens_cached_total"), "cache counters vanished");
   });
 
   test("with no Grafana configured the card says so instead of pretending", () => {
@@ -555,6 +565,40 @@ describe("dashboard: a server without /metrics", () => {
     assert.equal(metrics.tiles.children.length, 0);
     assert.equal(metrics.raw.hidden, false);
     assert.match(textOf(metrics.rawJson), /does not expose/);
+  });
+});
+
+describe("dashboard: a /metrics this page has no names for", () => {
+  // A server that answers /metrics with metric names app.js has never seen: the
+  // honest answer is "no tiles" plus a pointer to where the numbers live, not a
+  // card of zeros. (Vendor name drift is resolved in recording_rules.yml, not in
+  // the browser — see monitoring/PARITY.md and the PARITY note in app.js.)
+  let page;
+
+  before(async () => {
+    page = boot();
+    await twoPolls(page);
+    retarget(page, ENV.weird);
+    await waitFor(() => /series$/.test(String(textOf(card(page, "metrics").badge))), {
+      what: "the metrics card to count the unknown scrape",
+    });
+  });
+
+  after(() => page.dispose());
+
+  test("unknown names mean no tiles, not zero tiles", () => {
+    const metrics = card(page, "metrics");
+    assert.equal(metrics.tiles.children.length, 0, "tiles were rendered from metrics that are not there");
+    assert.match(textOf(metrics.badge), /series$/);
+    assert.match(textOf(metrics.gaugeValue), /\u2014/);
+  });
+
+  test("the missing throughput gauge is said out loud", () => {
+    // The in-tab curve plots the server's own average gauge and nothing else now, so
+    // a server without it gets an empty chart *and the reason*, not a silent blank.
+    const note = String(textOf(card(page, "metrics").note));
+    assert.match(note, /no generate-throughput gauge/);
+    assert.deepEqual(page.window.errors, []);
   });
 });
 

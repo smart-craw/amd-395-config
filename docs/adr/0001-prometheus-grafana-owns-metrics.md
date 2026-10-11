@@ -348,7 +348,9 @@ tracing, LAN exposure of Grafana (`workspace-szw.12`), host/GPU exporters
 Grafana reaches parity for each one (`workspace-szw.11` parity-check), then the
 client-side counter arithmetic is deleted and the page keeps raw series, raw
 exposition text and link-outs. Nothing is deleted before parity, and nothing is
-kept after it.
+kept after it. *(Done — see the `workspace-szw.11` amendment at the end of this file:
+parity was measured with `monitoring/parity/`, written up in
+`monitoring/PARITY.md`, and the arithmetic is deleted.)*
 
 ## Definition of success
 
@@ -451,3 +453,52 @@ measured footprint against the C5 budget (`workspace-szw.9`).
 > amendment above. It is deliberately **not** in `compose.yaml`: host telemetry does not
 > belong behind a container something else can restart, so it sits outside the
 > port-and-limit story while remaining inside the budget.
+>
+> Update (`workspace-szw.11`): **the migration path has been walked, and the derived
+> client math is gone.** The bespoke page no longer computes anything: draft
+> acceptance, prompt-cache hit ratio and lifetime tokens/s were deleted along with the
+> per-signal name-pattern regexes, and `METRIC_SIGNALS` is now ten exact metric names
+> feeding raw gauges (see the `PARITY` note above it in `monitor/static/app.js`).
+>
+> What made the deletion admissible was not opinion, and it is recorded in
+> [`monitoring/PARITY.md`](../monitoring/PARITY.md): a harness
+> (`monitoring/parity/parity_check.py`) read the page and Grafana's own panel
+> expressions — pulled out of the committed dashboard JSON, not retyped — against one
+> live server, over paired samples, and *classified every difference it found*. Two
+> checks had to pass before any figure could be called redundant. First, the page's
+> arithmetic rewritten as windowless PromQL (`sum(a)/sum(b)`) reproduced the page
+> exactly, which proves the two sides were doing the same division. Second, the number
+> on the tile had to be a number Grafana's own series actually had around the same
+> moment, which is what separates "we read the same gauge" from "we both read some
+> gauge". Then, and only then, did the remaining differences get explained by the
+> mechanism that caused them: window choice, lifetime-since-start versus
+> windowed-`rate()`, the server re-averaging its own gauges on every reader,
+> counter resets, label fan-out, NaN handling, and the panel's `clamp_min` turning an
+> idle 0/0 into a displayed 0%.
+>
+> Three consequences worth stating as decisions rather than findings:
+>
+> * **Anything derived from `/metrics` is Grafana's, and now provably only Grafana's.**
+>   A browser can compute a rate with no window, no counter-reset handling and no test
+>   harness; Prometheus does all three. A figure that needs neither a window nor a
+>   second series may still be a tile — the surviving four tiles are single raw
+>   series, each labelled `instant` / `server avg` / `lifetime` so nobody reads one as
+>   another.
+> * **Name drift is a recording-rule change, not a front-end change.** A server family
+>   that spells `prompt_tokens_total` differently gets a line in
+>   `recording_rules.yml` — checked by `promtool`, visible to anyone writing an alert —
+>   and `app.js` keeps no fallback regex for it. `test_static.py` now enforces that
+>   the deleted arithmetic and its regexes stay deleted.
+> * **Parity was measured, so it can be re-measured, and the harness fails loudly.**
+>   `monitoring/parity/run_parity.sh --duration 7d` re-runs the comparison against any
+>   server; an unclassified difference exits non-zero instead of being averaged into
+>   silence. That is also how a future panel change gets checked: the expressions come
+>   from the dashboard JSON, so a panel that stops matching the page is a failing run,
+>   not a surprise at 02:00.
+>
+> The fallback this ticket was told not to break is intact and documented: a server
+> whose `/metrics` answers 404 is a **supported configuration**, not a degraded one.
+> Prometheus then sees nothing, so `monitor/serve.py` is the only view that server has
+> — asserted by `monitor/tests/test_app.test.mjs` against `--mode nometrics`, and
+> spelled out in `monitor/README.md` ("A server with no `/metrics` at all is a
+> supported configuration").

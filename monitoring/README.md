@@ -32,6 +32,12 @@ no CDN assets, both UIs bound to loopback.
 | `grafana/provisioning/` | datasource + dashboard provider, mounted read-only |
 | `grafana/dashboards/` | provisioned dashboard JSON (see "The dashboard") |
 | `grafana/make_dashboard.py` | generator for the dashboard JSON (edit this, not the JSON) |
+| `PARITY.md` | the page-vs-Grafana parity record: which number to trust, and why (workspace-szw.11) — generated, do not hand-edit |
+| `parity/PARITY.template.md` | the source of that document: prose by hand, numbers by generator |
+| `parity/fill_parity_doc.py` | injects a run's numbers into `PARITY.md` |
+| `parity/evidence/` | the committed artifacts of the run `PARITY.md` quotes |
+| `parity/parity_check.py` | the harness that measures it: paired page/panel figures, delta classes, seven probes |
+| `parity/run_parity.sh` | one command: throwaway Prometheus + light load + N hours of paired samples + report |
 
 ## First time up
 
@@ -706,6 +712,58 @@ curl -sG --data-urlencode 'query=count({__name__=~"llamacpp:kv_cache_usage_ratio
 Worth doing after touching a selector: a query can be valid PromQL and still return
 nothing (a label that does not exist, a family name the server does not use), and
 that is invisible until someone opens the panel.
+
+## Which view is primary, and how that was checked
+
+**Grafana is the primary view for anything derived from `/metrics`.** Throughput as a
+rate, latency quantiles, prompt-cache hit ratio, draft acceptance, request rates, and
+every "over the last N minutes" question: those are PromQL, they run with a real
+window, counter-reset handling and `promtool` tests, and they are the numbers an alert
+and a post-mortem should use. `monitor/serve.py` keeps the live view — the JSON
+endpoints `/metrics` cannot represent (`/health`, `/v1/models`, `/cache`), the raw
+exposition text, and the raw gauges, each labelled as which kind of number it is.
+
+That split used to be a promise rather than a measurement, and the bespoke page still
+computed three figures itself (draft acceptance, prompt-cache hit ratio, lifetime
+tokens/s) plus a fuzzy regex per metric name to guess at other vendors' spelling.
+`workspace-szw.11` measured the two views side by side against the live server,
+classified every difference, and deleted the client-side arithmetic once each
+difference had a name. The record — figures, delta classes, which side to trust, and
+the four probes for the cases a quiet afternoon cannot show — is
+[`PARITY.md`](PARITY.md); the harness that produces it is `parity/`:
+
+```sh
+monitoring/parity/run_parity.sh --duration 1h              # the ticket's week: 7d
+python3 monitoring/parity/parity_check.py report monitoring/parity/runs/<run>/samples.jsonl
+python3 monitoring/parity/parity_check.py selftest         # offline, no server needed
+```
+
+It runs a throwaway Prometheus (the pinned version, this stack's scrape interval, the
+production recording rules) and scrapes the model server beside three doubles —
+`monitor/tests/mock_upstream.py --mode fanout` (one metric name, two `model` label
+sets), `--mode nan` (NaN / +Inf) and `--mode reset` (a counter that restarts on a
+schedule) — so the label-fan-out, NaN and counter-reset behaviours are measured rather
+than described. Its exit code is non-zero when a paired difference falls into none of
+the named classes: a run that cannot fail cannot mean anything. Classification happens
+per row at record time, and `report --reclassify` re-runs that judgement over the raw
+samples when the classifier itself improves, which is how a long run survives a
+classifier fix instead of being thrown away with it.
+
+The committed run under `parity/evidence/` is what `PARITY.md` quotes; it is regenerated
+into `parity/runs/<stamp>/` (gitignored) and injected into the document by
+`parity/fill_parity_doc.py`, which exits non-zero on a placeholder it cannot fill.
+
+Two things follow from that record and belong in the runbook, not just the write-up:
+
+* **the server's `llamacpp:*_tokens_seconds` gauges are not comparable figures.** They
+  average over the interval since *whoever last read `/metrics`*, so scraping the box
+  from two places changes what each one sees, and an idle server reports 0 rather than
+  "no data". Grafana's `rate()` is the number to quote.
+* **a server whose `/metrics` answers 404 is a supported configuration, not a degraded
+  one.** Prometheus then sees nothing at all, so the proxy page is the only view that
+  server has — by design, and test-covered (`monitor/tests/mock_upstream.py --mode
+  nometrics`). Grafana being primary is a statement about `/metrics` telemetry, not a
+  claim that every server has any.
 
 ## Recording rules vs raw PromQL in panels
 

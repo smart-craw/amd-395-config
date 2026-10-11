@@ -93,6 +93,27 @@ jobs:
           GRAFANA_ADMIN_PASSWORD=ci-only-not-a-secret \
             docker compose -f monitoring/compose.yaml config -q
 
+      # monitoring/PARITY.md is a measurement, so the thing that measures it is tested
+      # like code: the parity harness models the bespoke page in Python, and this is
+      # the half of that model that needs neither Prometheus nor a model server. (The
+      # other half — that the model still matches the real page — is enforced by
+      # monitor/tests/test_parity_oracle.test.mjs in the UI job.)
+      - name: parity harness - page-side model still matches its fixtures
+        run: python3 monitoring/parity/parity_check.py selftest
+
+      # monitoring/PARITY.md is generated from a run's artifacts by
+      # fill_parity_doc.py, which refuses to leave a placeholder unfilled. This is the
+      # same check in CI: a document quoting numbers it did not read from the run it
+      # cites is worse than no document, and a half-filled table is how that happens.
+      - name: PARITY.md is fully generated (no unfilled placeholders)
+        run: |
+          set -euo pipefail
+          if grep -n -o '{{[A-Z_]*}}' monitoring/PARITY.md; then
+            echo "::error::monitoring/PARITY.md contains unfilled placeholders;" \
+                 "re-run: python3 monitoring/parity/fill_parity_doc.py <run-dir>"
+            exit 1
+          fi
+
       - name: Grafana would accept the provisioned dashboard
         # Grafana's own schema check is not available without running it, but the two
         # structural things that break provisioning are checked by

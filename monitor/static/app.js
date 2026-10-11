@@ -285,8 +285,7 @@
       // metrics card only:
       metrics: null, // parsed scrape from the last poll
       lastMetrics: null, // last scrape that parsed, for degraded renders
-      rateHistory: [], // generation tok/s samples
-      rateBase: null, // previous counter sample, for the tok/s fallback
+      rateHistory: [], // generation tok/s samples (the server's own gauge)
       notServed: false, // optional route answered 404: this server has no such endpoint
       note: null, // muted one-liner next to the error strip
     };
@@ -976,47 +975,48 @@
   //   env.body    "llamacpp:requests_processing 0\n…"      (raw panel, verbatim)
   //   env.metrics {format, count, truncated, errors, families, series}
   //
-  // Nothing here assumes a metric exists. llama.cpp, vLLM and the halogen router
-  // answer with different sets, so every tile looks its metric up by the exact
-  // name this box uses, falls back to a name pattern, and is left out when
-  // neither matches. If the parse found nothing the card still shows the raw
-  // text: never blank, never a guess.
+  // Nothing here assumes a metric exists. Every tile looks its metric up by the exact
+  // name this box uses and is left out when that name is absent; if the parse found
+  // nothing at all the card still shows the raw text — never blank, never a guess.
 
   /**
-   * What each tile wants. `exact` is a metric name observed on
-   * http://llm.home:8081/metrics; `fuzzy` is the best-effort match for a server
-   * that names the same thing differently.
-   */
-  /**
-   * FROZEN (workspace-szw.6): this table is a compatibility shim, not the future.
+   * What each tile reads: one entry per figure, one exact metric name each, as
+   * observed on this box's own server (monitor/README.md, "Why /metrics is parsed
+   * server-side").
    *
-   * Vendor-drift in metric names is resolved in Prometheus from now on — the `llm:*`
-   * recording rules in monitoring/prometheus/recording_rules.yml are the supported
-   * place for "this server spells it differently" (ADR 0001 C3), because a regex in
-   * the browser cannot be tested by promtool, is re-downloaded on every paint, and is
-   * invisible to anyone writing an alert.
+   * PARITY (workspace-szw.11, monitoring/PARITY.md): this table used to carry a
+   * best-effort name regex per signal, and the page used to *compute* draft
+   * acceptance, prompt-cache hit ratio and lifetime tokens/s by dividing one
+   * instantaneous counter snapshot by another. All of that is gone, and the paired
+   * page-vs-Grafana run is why: every figure here was compared against the
+   * dashboard's own expression over the same scrape, and each one either matched a
+   * Grafana panel (so the browser arithmetic was redundant — the panels and the
+   * `llm:*` recording rules do it with a real window, counter-reset handling and
+   * promtool tests) or was a raw gauge with no arithmetic in it at all.
    *
-   * So: add a signal here only for a number the page must show that Grafana cannot yet
-   * show; and when the parity check (workspace-szw.11) confirms a tile's Grafana
-   * equivalent, delete the tile and its arithmetic in the same commit that adds the
-   * deep link. Nothing is deleted before parity; nothing is kept after it.
+   * Which leaves these rules, stricter than the ones they replace:
+   *
+   *   1. **No derived figures.** A ratio, a rate, a difference, an average: those are
+   *      PromQL's job (ADR 0001). Add a tile only for a number this box publishes that
+   *      Grafana does not already show — and label which kind of number it is.
+   *   2. **No name-drift regexes.** A server family that spells things differently
+   *      gets a line in monitoring/prometheus/recording_rules.yml, which promtool can
+   *      check and an alert can read. A regex in the browser is re-downloaded on every
+   *      paint, is invisible to alerting, and matches names nobody reviewed.
+   *   3. **A tile whose metric is absent is absent, not zero.** Same rule as the rest
+   *      of the page.
    */
   const METRIC_SIGNALS = {
-    genRate: { exact: "llamacpp:predicted_tokens_seconds", fuzzy: /(pred|gen|decode)[a-z_:]*tokens_(seconds|per_second)$/i },
-    promptRate: { exact: "llamacpp:prompt_tokens_seconds", fuzzy: /prompt[a-z_:]*tokens_(seconds|per_second)$/i },
-    processing: { exact: "llamacpp:requests_processing", fuzzy: /requests?_(processing|active|running|inflight)$/i },
-    deferred: { exact: "llamacpp:requests_deferred", fuzzy: /requests?_(deferred|queued|waiting)$/i },
-    requests: { exact: "halogen:requests_total", fuzzy: /(^|:)requests_total$/i },
-    structured: { exact: "halogen:structured_requests_total", fuzzy: /structured_requests_total$/i },
-    promptTokens: { exact: "llamacpp:prompt_tokens_total", fuzzy: /(^|:)prompt_tokens_total$/i },
-    genTokens: { exact: "llamacpp:tokens_predicted_total", fuzzy: /(tokens_predicted|predicted_tokens|generation_tokens)_total$/i },
-    genSeconds: { exact: "llamacpp:tokens_predicted_seconds_total", fuzzy: /(tokens_predicted|predicted_tokens)_seconds_total$/i },
-    cachedPrompt: { exact: "halogen:prompt_tokens_cached_total", fuzzy: /prompt_tokens_cached_total$/i },
-    draftTotal: { exact: "halogen:draft_tokens_total", fuzzy: /(^|:)draft_tokens_total$/i },
-    draftAccepted: { exact: "halogen:draft_tokens_accepted_total", fuzzy: /draft_tokens_accepted_total$/i },
-    kvRatio: { exact: "llamacpp:kv_cache_usage_ratio", fuzzy: /(kv|cache)[a-z_]*usage[a-z_]*ratio$/i },
-    kvTokens: { exact: "llamacpp:kv_cache_tokens", fuzzy: /kv_cache_tokens$/i },
-    kvPool: { exact: "halogen:kv_pool_positions", fuzzy: /kv_pool_(positions|tokens)$/i },
+    genRate: { exact: "llamacpp:predicted_tokens_seconds" },
+    promptRate: { exact: "llamacpp:prompt_tokens_seconds" },
+    processing: { exact: "llamacpp:requests_processing" },
+    deferred: { exact: "llamacpp:requests_deferred" },
+    requests: { exact: "halogen:requests_total" },
+    structured: { exact: "halogen:structured_requests_total" },
+    promptTokens: { exact: "llamacpp:prompt_tokens_total" },
+    kvRatio: { exact: "llamacpp:kv_cache_usage_ratio" },
+    kvTokens: { exact: "llamacpp:kv_cache_tokens" },
+    kvPool: { exact: "halogen:kv_pool_positions" },
   };
 
   /** envelope.metrics -> lookup-friendly view, or null when there is nothing. */
@@ -1061,17 +1061,19 @@
   }
 
   /**
-   * The one number for one signal. A name can carry several series (one per
-   * label set: ``some:histogram_bucket{model="a"}`` and ``{model="b"}``), and a
-   * sum is the only honest single figure for a counter across label sets.
+   * The one number for one signal: the exact metric named above, summed across its
+   * label sets (``some:metric{model="a"}`` and ``{model="b"}`` are one figure here).
+   *
+   * That sum is a decision, and monitoring/PARITY.md names the consequence: a panel
+   * may aggregate the same family differently (`max` on the KV panel, or split by the
+   * $model variable), which is a difference of definition rather than an error. There
+   * is no name-pattern fallback any more — an exact miss means this server does not
+   * publish this figure, and the tile is simply not rendered.
    */
   function signalValue(view, key) {
     const signal = METRIC_SIGNALS[key];
     if (!view || !signal) return null;
-    let hits = (signal.exact && view.byName.get(signal.exact)) || null;
-    for (let i = 0; (!hits || !hits.length) && i < view.names.length; i += 1) {
-      if (signal.fuzzy.test(view.names[i])) hits = view.byName.get(view.names[i]);
-    }
+    const hits = (signal.exact && view.byName.get(signal.exact)) || null;
     if (!hits || !hits.length) return null;
     let total = 0;
     let counted = 0;
@@ -1091,6 +1093,8 @@
     };
   }
 
+  /** Only the KV gauge divides anything now, and it is a fallback rather than a
+   *  figure: see metricsGauge and monitoring/PARITY.md ("what stayed"). */
   function divide(numerator, denominator) {
     if (!isNum(numerator) || !isNum(denominator) || denominator <= 0) return null;
     return numerator / denominator;
@@ -1101,10 +1105,18 @@
     return ratio === null ? null : clamp(ratio * 100, 0, 999);
   }
 
-  /** Pull every figure the card shows out of one scrape, in one pass. */
+  /**
+   * Pull every figure the card shows out of one scrape, in one pass.
+   *
+   * These are the raw series, read once, with no arithmetic between them and the
+   * tile: no ratios, no lifetime divisions, no counter-over-counter averages. The
+   * page used to compute draft acceptance and the prompt-cache hit ratio here, and
+   * workspace-szw.11 deleted them once the paired run showed the panels' windowed
+   * versions are the numbers an operator should act on.
+   */
   function metricsSummary(view) {
     const pick = (key) => signalValue(view, key);
-    const out = {
+    return {
       genRate: pick("genRate"),
       promptRate: pick("promptRate"),
       processing: pick("processing"),
@@ -1112,33 +1124,25 @@
       requests: pick("requests"),
       structured: pick("structured"),
       promptTokens: pick("promptTokens"),
-      genTokens: pick("genTokens"),
-      genSeconds: pick("genSeconds"),
-      cachedPrompt: pick("cachedPrompt"),
-      draftTotal: pick("draftTotal"),
-      draftAccepted: pick("draftAccepted"),
       kvRatio: pick("kvRatio"),
       kvTokens: pick("kvTokens"),
       kvPool: pick("kvPool"),
     };
-    const num = (found) => (found && found.value !== null ? found.value : null);
-    const seen = num(out.promptTokens) || 0;
-    const cached = num(out.cachedPrompt) || 0;
-    out.genLifetime = divide(num(out.genTokens), num(out.genSeconds)); // tokens / s, lifetime
-    out.acceptPct = percent(num(out.draftAccepted), num(out.draftTotal));
-    out.cacheHitPct = seen + cached > 0 ? percent(cached, seen + cached) : null;
-    return out;
   }
 
   /** Tiles worth a big number, in reading order; a missing metric skips its tile.
    *
-   * Every label says which of the three kinds of number it is, because they are not
-   * interchangeable and the old page labelled all three the same way:
+   * Every label says which kind of number it is, because these are not
+   * interchangeable and reading one as another is how a quiet box gets mistaken for
+   * a healthy one:
    *   instant     a gauge, read as-is right now
-   *   server avg  the server's own "average since my last scrape" gauge
-   *   lifetime    a counter divided by a counter since the process started
-   * Only the first is a statement about this second; the Grafana panels compute
-   * windowed rates, which is the fourth thing none of these can be (ADR 0001).
+   *   server avg  the server's own "average since my last scrape" gauge — a
+   *               duty-cycle figure that is re-averaged by whoever reads /metrics
+   *               last, and is *not* the windowed rate Grafana shows
+   *   lifetime    a counter, accumulated since the process started (a total, not a
+   *               rate: the per-second version of this is Grafana's)
+   * Anything that needs a window lives in PromQL (ADR 0001); the deep links above
+   * carry the windowed versions of all four.
    */
   function metricsTiles(summary, genNow) {
     const tiles = [];
@@ -1148,9 +1152,7 @@
       tiles.push({
         label: "generate tok/s \u00b7 server avg",
         value: fmtRate(genNow),
-        sub: isNum(summary.genLifetime)
-          ? "since start " + fmtRate(summary.genLifetime)
-          : shortMetricName(summary.genRate ? summary.genRate.name : ""),
+        sub: shortMetricName(summary.genRate ? summary.genRate.name : ""),
       });
     }
     if (num(summary.promptRate) !== null) {
@@ -1179,24 +1181,22 @@
         sub: num(summary.structured) !== null ? fmtInt(summary.structured.value) + " under a JSON schema" : "completed since start",
       });
     }
-    if (isNum(summary.acceptPct)) {
-      tiles.push({
-        label: "draft accept \u00b7 lifetime",
-        value: pctLabel(summary.acceptPct),
-        sub: fmtInt(summary.draftAccepted.value) + " / " + fmtInt(summary.draftTotal.value) + " drafted",
-      });
-    }
-    if (isNum(summary.cacheHitPct)) {
-      tiles.push({
-        label: "prompt cache hit \u00b7 lifetime",
-        value: pctLabel(summary.cacheHitPct),
-        sub: fmtInt(summary.cachedPrompt.value) + " cached / " + fmtInt(summary.promptTokens.value) + " processed",
-      });
-    }
     return tiles;
   }
 
-  /** KV-cache fill for the progress bar: the reported ratio, else used / pool. */
+  /**
+   * KV-cache fill for the progress bar.
+   *
+   * The reported ratio is a raw gauge and is what Grafana's KV panel reads, so the
+   * two views agree exactly (measured: the largest difference over the parity run was
+   * 0.3%, and it was the two scrapes happening at different instants).
+   *
+   * The `used / pool` fallback is the one division that stayed, for the servers that
+   * publish kv_cache_tokens and kv_pool_positions but no ratio — and it stayed
+   * because Grafana has no equivalent: the KV panel selects the ratio family only.
+   * Deleting it would lose a number rather than move one, which is the test this
+   * ticket applies to everything else.
+   */
   function metricsGauge(summary) {
     if (!summary) return null;
     const num = (found) => (found && found.value !== null ? found.value : null);
@@ -1305,25 +1305,19 @@
   /**
    * One tok/s sample per successful poll, for the throughput chart.
    *
-   * llama.cpp reports "since the last scrape" gauges and those are used as-is. A
-   * server without them gets the honest fallback: the delta of its tokens
-   * counter over the wall-clock gap between the two polls.
+   * The chart plots the server's own average-since-last-scrape gauge, and only that.
+   * It used to fall back to dividing the tokens counter's delta by the wall-clock gap
+   * between two polls — a rate window invented in the browser, with no counter-reset
+   * handling (a server restart mid-chart produced a negative delta and a discarded
+   * point) and no test that could catch it. That is exactly the arithmetic workspace-
+   * szw.11 removed: a server that publishes no throughput gauge gets no in-tab curve
+   * and a note saying where the number lives (Grafana panel 1, which computes it from
+   * the counters the same way, with a window and a reset-aware function).
    */
   function noteThroughput(card, view) {
     if (!view) return;
-    const now = nowMs();
     const reported = signalValue(view, "genRate");
-    let rate = reported && reported.value !== null ? reported.value : null;
-    if (rate === null) {
-      const counter = signalValue(view, "genTokens");
-      const base = card.rateBase;
-      if (counter && counter.value !== null) {
-        card.rateBase = { value: counter.value, at: now };
-        if (base && counter.value >= base.value && now > base.at) {
-          rate = (counter.value - base.value) / ((now - base.at) / 1000);
-        }
-      }
-    }
+    const rate = reported && reported.value !== null ? reported.value : null;
     if (!isNum(rate) || rate < 0) return;
     card.rateHistory.push(rate);
     if (card.rateHistory.length > HISTORY_SAMPLES) card.rateHistory.shift();
@@ -1391,6 +1385,15 @@
     }
     if (view && view.truncated) {
       notes.push("only the first " + fmtInt(view.count) + " series were kept");
+    }
+    if (view && !summary.genRate) {
+      // The one chart on this card plots the server's own average gauge, and a server
+      // that does not publish it gets no curve. Say so instead of drawing an empty box:
+      // the number exists, it just lives behind the decode link (Grafana panel 1).
+      notes.push(
+        "no generate-throughput gauge on this server \u2014 the windowed rate is " +
+          (state.grafanaUrl ? "Grafana's (panel 1)" : "a PromQL rate over the counters below")
+      );
     }
     card.note = notes.length ? clip(notes.join("  \u00b7  "), 190) : null;
 
@@ -1871,7 +1874,6 @@
       card.metrics = null;
       card.lastMetrics = null;
       card.rateHistory = [];
-      card.rateBase = null;
       card.notServed = false;
       card.note = null;
     });
