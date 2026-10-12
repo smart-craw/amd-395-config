@@ -1,8 +1,8 @@
 [
   {
-    "targets": ["llm.home:8001"],
+    "targets": ["llm.home:8080"],
     "labels": {
-      "model": "qwen3-27b",
+      "model": "qwen3.8-flash",
       "env": "home"
     }
   }

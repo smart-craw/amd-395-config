@@ -79,7 +79,7 @@ scrape_configs:
           # match serve.py's --url (or llm-monitor.service's
           # LLM_MONITOR_UPSTREAM) or the passthrough scrapes a different
           # server than the direct job does.
-          llm_upstream: "http://llm.home:8001"
+          llm_upstream: "http://llm.home:8080"
     metrics_path: /metrics
     relabel_configs:
       # One proxy can front several servers: the llm_upstream label becomes the

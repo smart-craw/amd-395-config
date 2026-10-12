@@ -11,3 +11,4 @@ spikes/amd-gpu-metrics/fixtures/
 # gets copied into monitoring/parity/evidence/ by hand; everything else in
 # monitoring/parity/runs/ is scratch.
 monitoring/parity/runs/
+.env
