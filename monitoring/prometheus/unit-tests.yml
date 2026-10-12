@@ -1,0 +1,536 @@
+# promtool unit tests for the alert rules — `promtool test rules` runs this file.
+#
+#   promtool test rules monitoring/prometheus/unit-tests.yml      # from repo root
+#   make -C monitoring test-alerts                                # ditto, via the helper
+#
+# Every alert has at least one firing and one non-firing scenario, so a threshold
+# that is edited into nonsense (or a metric name that drifts) fails CI instead of
+# quietly never firing at 03:00. rule_files points at the GENERATED rules.yml: if
+# rules.yml is stale relative to alert_thresholds.env, the render check in CI
+# fails first.
+
+rule_files:
+  - rules.yml
+  - recording_rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  # ---------------------------------------------------------------- availability
+  - interval: 1m
+    input_series:
+      - series: 'up{job="llm-server", instance="llm.home:8001"}'
+        values: '1 1 1 1 0 0 0 0 0 0 0 0 0 0 0'
+    alert_rule_test:
+      # up goes to 0 at 4m; SERVER_DOWN_FOR is 2m -> pending at 4m, firing at 6m.
+      - eval_time: 3m
+        alertname: LLMServerDown
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: LLMServerDown
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: LLMServerDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              team: llm
+              job: llm-server
+              instance: llm.home:8001
+            exp_annotations:
+              summary: "The model server is not answering /metrics: every request to it will fail or queue until it comes back. Check systemctl --user status llm-server, then whether the port in monitoring/prometheus/targets/llm-servers.json is the one the server actually listens on."
+
+  - interval: 1m
+    input_series:
+      # A healthy server whose metrics are present: LLMMetricsAbsent must stay dark.
+      - series: 'llamacpp:tokens_predicted_total{job="llm-server", instance="llm.home:8001"}'
+        values: '0+100x12'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: LLMMetricsAbsent
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      # The shape of mock mode "nometrics": the target is up, no model metrics.
+      - series: 'up{job="llm-server", instance="llm.home:8001"}'
+        values: '1x12'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: LLMMetricsAbsent
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: LLMMetricsAbsent
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: llm
+            exp_annotations:
+              summary: "No model-server metrics have been scraped for 5m, so Grafana will read \"No data\" even if the server is healthy. The monitor page is still fully usable \u2014 it reads /health, /v1/models and /cache, which are not Prometheus metrics. Usual causes: the server has no /metrics route at all (stock llama.cpp build, mock mode \"nometrics\"), it answers /metrics with JSON or 404, or the scrape job is mispointed. A server that never exposes /metrics is a supported configuration: silence this alert rather than distrust the dashboard."
+
+  # ------------------------------------------------------------------- monitor
+  - interval: 1m
+    input_series:
+      - series: 'llm_monitor_scrape_ok{upstream="http://llm.home:8001"}'
+        values: '1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0'
+      - series: 'llm_monitor_build_info{version="1.1.0"}'
+        values: '1x16'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: LLMScrapeFailing
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: LLMScrapeFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: llm
+              upstream: http://llm.home:8001
+            exp_annotations:
+              summary: "The monitor is up but its own scrape of the model server has been failing for 5m: the live page and the passthrough are serving stale or empty data, so a flat-lined Grafana panel right now means \"the monitor is blind\", not \"the model is idle\". Look at journalctl --user -u llm-monitor and curl the proxy's /metrics."
+
+  - interval: 1m
+    input_series:
+      - series: 'llm_monitor_build_info{version="1.1.0"}'
+        values: '1 1 1 1 1 1 1 1 1 1'
+    alert_rule_test:
+      # build_info is being scraped -> nothing is "absent".
+      - eval_time: 4m
+        alertname: LLMMonitorAbsent
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      # Nothing at all is scraped through the passthrough in this group.
+      - series: 'up{job="prometheus", instance="localhost:9090"}'
+        values: '1x30'
+    alert_rule_test:
+      # Nothing scraped the proxy for MONITOR_ABSENT_FOR (10m): that is a
+      # monitoring outage, not a model-server outage. (The non-firing case lives
+      # in the group above, where llm_monitor_build_info is being scraped.)
+      - eval_time: 12m
+        alertname: LLMMonitorAbsent
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: llm
+            exp_annotations:
+              summary: "Nothing has scraped the monitor's /metrics passthrough for 10m, so scrape health has no history: serve.py is not running, or the llm-server-via-proxy job is missing or mispointed (see the llm_upstream label in prometheus.yml)."
+
+  - interval: 1m
+    input_series:
+      - series: 'llm_monitor_parse_errors_total{upstream="http://llm.home:8001"}'
+        values: '0 0 0 1 1 1 1 1'
+      - series: 'llm_monitor_parse_errors_total{upstream="http://quiet.example:8001"}'
+        values: '0x8'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: LLMScrapeParseErrors
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: LLMScrapeParseErrors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: llm
+              upstream: http://llm.home:8001
+            exp_annotations:
+              summary: "The monitor could not parse part of the model server's /metrics in the last 10m: a metric family may be silently missing from the parsed views and from the KV/queueing alerts that read it. The unparsable lines are listed on the monitor page's metrics card (serve.py reports them as metrics.errors)."
+
+  # -------------------------------------------------------------------- pressure
+  - interval: 1m
+    input_series:
+      - series: 'llamacpp:kv_cache_usage_ratio{instance="llm.home:8001"}'
+        values: '0.5 0.5 0.98 0.98 0.98 0.98 0.98 0.98 0.98 0.98'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: LLMKVCachePressureWarn
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: LLMKVCachePressureCritical
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: LLMKVCachePressureWarn
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: llm
+              instance: llm.home:8001
+            exp_annotations:
+              summary: "The KV cache has been over 0.90 for 5m: new requests are about to wait for context space and long prompts start evicting cached prefixes, so latency climbs before anything actually fails."
+      - eval_time: 8m
+        alertname: LLMKVCachePressureCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              team: llm
+              instance: llm.home:8001
+            exp_annotations:
+              summary: "The KV cache is effectively full (over 0.97 for 2m): the server is in an eviction storm, prefills are being redone and throughput collapses under queueing. Shorten the context, lower the slot count, or stop the largest client."
+
+  - interval: 1m
+    input_series:
+      # Under the warn threshold: neither pressure rule may fire.
+      - series: 'llamacpp:kv_cache_usage_ratio{instance="llm.home:8001"}'
+        values: '0.4 0.6 0.85 0.85 0.85 0.85 0.85 0.85'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: LLMKVCachePressureWarn
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: LLMKVCachePressureCritical
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      - series: 'llamacpp:requests_deferred{instance="llm.home:8001"}'
+        values: '0 0 1 1 1 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: LLMQueueing
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: LLMQueueing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: llm
+              instance: llm.home:8001
+            exp_annotations:
+              summary: "Requests have been deferred for 5m: arrivals are waiting for a slot instead of generating, which is the \"why is it slow\" half of the picture; read it together with the KV-cache alerts."
+
+  # ------------------------------------------------------------------ behaviour
+  - interval: 1m
+    input_series:
+      # 100 tok/s for 40 minutes, then a ~100x drop: collapse vs its own baseline.
+      - series: 'llamacpp:tokens_predicted_total{instance="llm.home:8001"}'
+        values: '0+6000x40 240000+60x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: LLMDecodeThroughputCollapse
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: LLMDecodeThroughputCollapse
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: llm
+            exp_annotations:
+              summary: "Decode throughput has stayed below 0.5 of its own 1h baseline for 10m: generation is roughly twice as slow as this box just demonstrated, with no change in load. Usual suspects on this hardware: thermal or GTT pressure, a second model taking shared memory, or a speculative-decode path that stopped helping."
+
+  - interval: 1m
+    input_series:
+      # Steady 100 tok/s the whole time: no collapse.
+      - series: 'llamacpp:tokens_predicted_total{instance="llm.home:8001"}'
+        values: '0+6000x60'
+    alert_rule_test:
+      - eval_time: 55m
+        alertname: LLMDecodeThroughputCollapse
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      # 100 prompt tok/s of which ~2.4 tok/s are cache hits -> ratio ~0.02.
+      - series: 'llamacpp:prompt_tokens_total{instance="llm.home:8001"}'
+        values: '0+6000x25'
+      - series: 'halogen:prompt_tokens_cached_total{instance="llm.home:8001"}'
+        values: '0+144x25'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: LLMPromptCacheCold
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: LLMPromptCacheCold
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: llm
+              instance: llm.home:8001
+            exp_annotations:
+              summary: "The prompt cache is missing more than 0.20 of prompt tokens while traffic is flowing: something restarted, the cache is too small for the working set, or slots are evicting each other's prefixes \u2014 time-to-first-token is paying for it. halogen:* names only exist on the halogen front door, so on a plain llama.cpp server this rule has no data and stays dark."
+
+  - interval: 1m
+    input_series:
+      # Traffic is flowing and the cache is warm: must stay dark.
+      - series: 'llamacpp:prompt_tokens_total{instance="llm.home:8001"}'
+        values: '0+6000x30'
+      - series: 'halogen:prompt_tokens_cached_total{instance="llm.home:8001"}'
+        values: '0+60000x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: LLMPromptCacheCold
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      # The database stops taking samples from a target while it stays "up".
+      - series: 'up{job="llm-server", instance="stale.example:8001"}'
+        values: '1 1 1'
+      # Keeps the test window open: promtool ends a test group at the last sample
+      # of any series, and the eval times below are after this target goes quiet.
+      - series: 'prometheus_build_info{job="prometheus", instance="localhost:9090"}'
+        values: '1x11'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: LLMStaleTarget
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: LLMStaleTarget
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: llm
+              job: llm-server
+              instance: stale.example:8001
+            exp_annotations:
+              summary: "Samples from this target have stopped advancing: whatever is answering is replaying old data, so every panel reading it shows history as if it were now."
+
+  # ------------------------------------------------------- host + GPU telemetry
+  # workspace-szw.13: node_exporter --collector.drm on the host, scraped as the
+  # `host` job. Two shapes of test below: the "is the telemetry there at all"
+  # alerts, which are about absence, and the pressure alerts, whose numbers come
+  # from alert_thresholds.env (GTT ratio, hottest GPU sensor, memory PSI).
+  - interval: 1m
+    input_series:
+      # Nothing is scraped from the host at all: a box where the exporter unit is
+      # not installed, or where the container cannot reach the host's loopback.
+      # The filler series keeps the evaluation window open past the absent window.
+      - series: 'prometheus_build_info{job="prometheus", instance="localhost:9090"}'
+        values: '1x24'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: NodeExporterAbsent
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: host
+              job: host
+            exp_annotations:
+              summary: "Nothing has scraped the host exporter for 10m, so every GPU and host panel reads \"No data\" while the model server is likely fine: check systemctl --user status node-exporter, then curl http://127.0.0.1:9100/metrics on the host, then whether the target in prometheus/targets/host.json can reach it from the container network (the runbook's Host + GPU telemetry section is the decision tree for that last one)."
+
+  - interval: 1m
+    input_series:
+      - series: 'node_exporter_build_info{job="host", instance="host.docker.internal:9100", version="1.12.1"}'
+        values: '1x24'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: NodeExporterAbsent
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      # The drm collector failing (the /sys-mount trap: card0/device dangling).
+      - series: 'node_scrape_collector_success{collector="drm", job="host", instance="host.docker.internal:9100"}'
+        values: '1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: NodeExporterCollectorFailing
+        exp_alerts: []
+      - eval_time: 13m
+        alertname: NodeExporterCollectorFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: host
+              collector: drm
+              job: host
+              instance: host.docker.internal:9100
+            exp_annotations:
+              summary: "A node_exporter collector has been failing for 10m (the collector label says which): that collector's series are missing or stale, so whatever panel reads them is showing history or nothing. If collector=\"drm\": the exporter was started without --collector.drm, or it is containerised with only /sys/class/drm mounted \u2014 the card0/device symlink dangles and the whole card disappears from the scrape. Mount all of /sys read-only, or run it on the host as monitoring/node-exporter.service does."
+
+  - interval: 1m
+    input_series:
+      - series: 'node_scrape_collector_success{collector="drm", job="host", instance="host.docker.internal:9100"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 13m
+        alertname: NodeExporterCollectorFailing
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      # Exporter healthy, but no GPU series at all: a collector that finds no card
+      # reports success, so only the absence rule can see this.
+      - series: 'node_memory_MemAvailable_bytes{job="host", instance="host.docker.internal:9100"}'
+        values: '70000000000x24'
+    alert_rule_test:
+      - eval_time: 17m
+        alertname: NodeGpuTelemetryAbsent
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: host
+              job: host
+            exp_annotations:
+              summary: "No GPU memory series have been scraped for 15m even though the exporter may be healthy: the drm collector found no amdgpu card at all, which it reports as success, so this is the only rule that can see it. Usual causes: kernel or BIOS change, the module reloaded late, or the exporter pointed at an incomplete /sys. python3 spikes/amd-gpu-metrics/amdgpu_sysfs_probe.py probe prints the whole capability matrix in one command."
+
+  - interval: 1m
+    input_series:
+      - series: 'node_drm_memory_gtt_used_bytes{card="card0", job="host", instance="host.docker.internal:9100"}'
+        values: '36936790016x24'
+    alert_rule_test:
+      - eval_time: 17m
+        alertname: NodeGpuTelemetryAbsent
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      # 97 % of the GTT budget, held: warn fires after GTT_PRESSURE_WARN_FOR.
+      # The ceiling is this box's amdgpu.gttsize=120000 (root README) in bytes.
+      - series: 'node_drm_memory_gtt_size_bytes{card="card0", job="host", instance="host.docker.internal:9100"}'
+        values: '125829120000x36'
+      - series: 'node_drm_memory_gtt_used_bytes{card="card0", job="host", instance="host.docker.internal:9100"}'
+        values: '122054246400x36'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: NodeGttPressureHigh
+        exp_alerts: []
+      - eval_time: 17m
+        alertname: NodeGttPressureHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: host
+              card: card0
+              job: host
+              instance: host.docker.internal:9100
+            exp_annotations:
+              summary: "GPU (GTT) memory has been over 0.95 of this box's budget for 15m: the next allocation the driver tries may fail \u2014 that is an allocation error in the model server's log, not a slowdown, and the runbook entry \"the box ran out of GTT\" says what to cut first. Re-tune this threshold against host:gtt_usage_ratio:max_2d once two days of real traffic have been recorded; the recorded baseline is in Prometheus, not in a notebook."
+
+  - interval: 1m
+    input_series:
+      # Half the budget: the pressure rule stays dark, and so does the exhaustion
+      # rule (a flat line projects to itself, below the ceiling).
+      - series: 'node_drm_memory_gtt_size_bytes{card="card0", job="host", instance="host.docker.internal:9100"}'
+        values: '125829120000x36'
+      - series: 'node_drm_memory_gtt_used_bytes{card="card0", job="host", instance="host.docker.internal:9100"}'
+        values: '62914560000x36'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: NodeGttPressureHigh
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: NodeGttExhausting
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      # 90 GB of a 125.8 GB budget, growing 8 GB/min: no room left inside the
+      # prediction horizon, so the baseline-free rule catches it.
+      - series: 'node_drm_memory_gtt_size_bytes{card="card0", job="host", instance="host.docker.internal:9100"}'
+        values: '125829120000x30'
+      - series: 'node_drm_memory_gtt_used_bytes{card="card0", job="host", instance="host.docker.internal:9100"}'
+        values: '90000000000+8000000000x30'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: NodeGttExhausting
+        exp_alerts: []
+      - eval_time: 8m
+        alertname: NodeGttExhausting
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              team: host
+              card: card0
+              job: host
+              instance: host.docker.internal:9100
+            exp_annotations:
+              summary: "GPU (GTT) memory is growing fast enough to exceed this box's whole GTT budget within 600s at the rate of the last 30m: something is loading or growing while there is no room left. Stop the second model or the largest context first; lowering the KV pool or the slot count is the smaller lever, and the amdgpu.gttsize= kernel parameter is the last one (it needs a reboot)."
+
+  - interval: 1m
+    input_series:
+      # The hotspot sensor at 106 C: critical first (5m), then warn (10m). The
+      # selector is max() over the chip's sensors because gfx1151's sensor names
+      # are only known on the box.
+      - series: 'node_hwmon_temp_celsius{chip="amdgpu", sensor="temp2", job="host", instance="host.docker.internal:9100"}'
+        values: '60 60 106 106 106 106 106 106 106 106 106 106 106 106'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: NodeGpuTempCritical
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: NodeGpuTempCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              team: host
+              job: host
+              instance: host.docker.internal:9100
+            exp_annotations:
+              summary: "The hottest GPU sensor has been over 100 C for 5m: at or past the junction maximum, where the driver throttles hard and a sustained soak can shorten the part's life. Stop the load now \u2014 unload the model, do not just idle the client."
+      - eval_time: 9m
+        alertname: NodeGpuTempHigh
+        exp_alerts: []
+      - eval_time: 13m
+        alertname: NodeGpuTempHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: host
+              job: host
+              instance: host.docker.internal:9100
+            exp_annotations:
+              summary: "The hottest GPU sensor has been over 95 C for 10m: this part is about to start thermal throttling, so decode throughput will drop with no change in load (it also shows up as LLMDecodeThroughputCollapse). Check airflow and whether a fan curve is being ignored; this is the second cause of a slow box after GTT pressure."
+
+  - interval: 1m
+    input_series:
+      # Idle-but-warm card. Note the trap this pins: node_exporter exports an
+      # unreadable sensor as 0, so "low" is never a firing condition here.
+      - series: 'node_hwmon_temp_celsius{chip="amdgpu", sensor="temp1", job="host", instance="host.docker.internal:9100"}'
+        values: '55.111x24'
+      - series: 'node_hwmon_temp_celsius{chip="amdgpu", sensor="temp2", job="host", instance="host.docker.internal:9100"}'
+        values: '61x24'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: NodeGpuTempHigh
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: NodeGpuTempCritical
+        exp_alerts: []
+
+  - interval: 1m
+    input_series:
+      # Memory PSI: 18 seconds of stall per 60 s of wall clock = 0.30 of the time
+      # with a task waiting on memory. Critical (0.25) first, warn (0.10) after.
+      - series: 'node_pressure_memory_waiting_seconds_total{job="host", instance="host.docker.internal:9100"}'
+        values: '0+18x30'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: NodeMemoryPressureCritical
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: NodeMemoryPressureCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              team: host
+              job: host
+              instance: host.docker.internal:9100
+            exp_annotations:
+              summary: "Tasks have been stalled on memory for more than 0.25 of the wall clock for 5m: the box is thrashing, everything is slow including the model server's own scheduling, and the OOM killer is the next event. Free memory now (unload the smallest model first, then stop the Grafana container per the go/no-go) before touching anything else."
+      - eval_time: 8m
+        alertname: NodeMemoryPressureHigh
+        exp_alerts: []
+      - eval_time: 13m
+        alertname: NodeMemoryPressureHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              team: host
+              job: host
+              instance: host.docker.internal:9100
+            exp_annotations:
+              summary: "Tasks have been stalled on memory for more than 0.10 of the wall clock for 10m: reclaim or swap-in is on the critical path, which on this box usually means the GPU (GTT) budget has been squeezed rather than a runaway process. Look at the GPU & host row's Memory pools panel and the swap series beside it."
+
+  - interval: 1m
+    input_series:
+      # 2 s of stall per 60 s = 0.033: memory is not the problem.
+      - series: 'node_pressure_memory_waiting_seconds_total{job="host", instance="host.docker.internal:9100"}'
+        values: '0+2x30'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: NodeMemoryPressureHigh
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: NodeMemoryPressureCritical
+        exp_alerts: []

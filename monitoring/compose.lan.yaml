@@ -1,0 +1,194 @@
+# Opt-in LAN exposure — Grafana reachable from a phone / the other machine.
+#
+# The base stack binds 127.0.0.1 and nothing else. This file is an **override**,
+# so publishing is a deliberate, reviewable act that sits in git and on the
+# command line, not a side effect of editing compose.yaml:
+#
+#   docker compose -f monitoring/compose.yaml -f monitoring/compose.lan.yaml up -d
+#   monitoring/up.sh --lan          # the same thing, with the pre-flight checks
+#
+# Back to loopback afterwards: bring it up without the override —
+#
+#   docker compose -f monitoring/compose.yaml up -d
+#
+# Compose does not remember which files you passed; the override is a per-command
+# decision, which is the whole reason it is a separate file.
+#
+# =========================================================================== #
+# WHAT YOU ARE ACCEPTING
+# =========================================================================== #
+# These dashboards are legible, and legibility is what you are trading:
+#
+#   * which models are loaded and how busy each one is — model ids are routinely
+#     treated as secret, and the `var-model` / `instance` values are in the URL
+#   * request rates and latency quantiles — i.e. when the box is used, by how
+#     much, and how responsively
+#   * prompt-cache hit ratios and draft-accept ratios — which is a statement
+#     about *what is being asked* of the models
+#   * GPU + host telemetry (the GPU & host row): hostname, mount table, memory
+#     pools, temperatures, per-process footprint
+#
+# That is the same class of decision as `monitor/serve.py --host 0.0.0.0` (see
+# monitor/README.md and ADR 0001 C1's "binds" row): nothing here is *dangerous*,
+# it is *readable*, and once published it stays readable to every device on the
+# segment — including ones you do not manage. Prometheus in particular has **no
+# authentication at all**, which is why loopback is its access control.
+#
+# So: do this on a network you are willing to read your own dashboards from, and
+# if the box already runs nginx, prefer the nginx shape at the bottom — TLS plus a
+# password, with Grafana still on loopback.
+
+services:
+  grafana:
+    # `!override` is load-bearing, not decoration. Compose *merges* sequences
+    # (strict-identity dedup), it does not replace them: an untagged second
+    # mapping would be added next to the base `127.0.0.1:${GRAFANA_PORT}:3000`,
+    # and the container then fails to start with "address already in use" — two
+    # mappings for one host port. The tag replaces the base list. It needs docker
+    # compose >= 2.14 (the compose-go `!override`/`!reset` tags); an older
+    # compose fails at `docker compose config` rather than quietly doing the wrong
+    # thing, and `check_monitoring.py` refuses an untagged ports block here.
+    ports: !override
+      # 0.0.0.0 is the point of this file. The tightening worth taking: set
+      # GRAFANA_LAN_BIND=<the LAN interface's address> in monitoring/.env and the
+      # socket binds that one interface instead of every one (no guest Wi-Fi SSID,
+      # no tunnel, no public path). Set it to 127.0.0.1 and this file becomes the
+      # nginx shape below: same settings, no new door.
+      - "${GRAFANA_LAN_BIND:-0.0.0.0}:${GRAFANA_PORT:-3000}:3000"
+    environment:
+      # ------------------------------------------------------------------ #
+      # The auth choice, and the trade-off it buys
+      # ------------------------------------------------------------------ #
+      # CHOSEN: anonymous access, with the Viewer org role.
+      #
+      # Why: the use case is "glance at the dashboards from a phone". A single
+      # shared non-admin viewer account costs a password that everyone on the LAN
+      # has to type and keep — a shared password cannot be revoked per person, is
+      # forgotten the week it is set, and buys an audit trail nobody here will
+      # read. Viewer is genuinely read-only: no editing, no saving, no Explore, no
+      # datasource or user admin, no admin screens.
+      #
+      # What it costs, stated plainly: **every device on the LAN can read
+      # everything a Viewer sees** — model ids, request rates, cache behaviour,
+      # host telemetry — with no login, no password to leak and no attribution of
+      # who looked. There is no countermeasure inside Grafana for that; anonymous
+      # Viewer is a "the LAN is the credential" configuration.
+      #
+      # The alternative (shared non-admin viewer account) is one switch and one
+      # user away, in this file and in the running box:
+      #
+      #     GF_AUTH_ANONYMOUS_ENABLED: "false"        # and the login form is the door
+      #
+      # then create ONE Viewer user, either in the UI (Administration ▸ Users ▸
+      # Add user, role Viewer — the one click this stack ever asks for) or from
+      # the box:
+      #
+      #     curl -fsS -u "admin:$GRAFANA_ADMIN_PASSWORD" -H 'Content-Type: application/json' \
+      #       -d '{"name":"LAN viewer","login":"lanviewer","password":"…"}' \
+      #       http://127.0.0.1:3000/api/admin/users
+      #     curl -fsS -u "admin:$GRAFANA_ADMIN_PASSWORD" -X PATCH -H 'Content-Type: application/json' \
+      #       -d '{"role":"Viewer"}' \
+      #       http://127.0.0.1:3000/api/org/users/<id from the previous call>
+      #
+      # That account lives in the grafana-data volume: it survives `docker
+      # compose down`, and `down --volumes` deletes it — unlike everything else
+      # here, it is state, not git.
+      #
+      # In both shapes the admin account is untouched: it comes from
+      # GF_SECURITY_ADMIN_PASSWORD in monitoring/.env (base compose.yaml,
+      # required, never committed) and **this file deliberately does not set it** —
+      # so nothing that reads the dashboards gets anywhere near administering the
+      # box. The login form stays enabled (anonymous users skip it; you still need
+      # it to administer), which does mean anything on the LAN can *attempt* the
+      # admin password: compose can refuse a missing password, it cannot refuse a
+      # weak one.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+      GF_AUTH_ANONYMOUS_ORG_NAME: "Main Org."
+      # Anonymous + a visible "Sign out" is a trap: it logs the anonymous session
+      # out and lands the phone on a login form it cannot get back from.
+      GF_AUTH_ANONYMOUS_HIDE_SIGNOUT_BUTTON: "true"
+      # Restated here on purpose: this is the file that opens the door, so the
+      # switch that must never flip travels with it instead of being trusted to
+      # the base file. Sign-up on an exposed Grafana is privilege escalation: the
+      # first person on the segment makes themselves an account.
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_USERS_ALLOW_ORG_CREATE: "false"
+      GF_USERS_VIEWERS_CAN_EDIT: "false"
+      GF_AUTH_DISABLE_LOGIN_FORM: "false"
+      # ------------------------------------------------------------------ #
+      # Where Grafana thinks it lives
+      # ------------------------------------------------------------------ #
+      # root_url has to be an ABSOLUTE URL and it has to be the URL the *browser*
+      # uses, because it is what Grafana uses when it builds absolute links
+      # (redirects after login, panel links written as absolute, anything a
+      # notification quotes). It does not affect whether the UI loads. The default
+      # below is a guess about your DNS name; set the real one in monitoring/.env,
+      # port and all, e.g. GRAFANA_ROOT_URL=http://llm.home:3000/ for the direct
+      # shape or https://llm.home/grafana/ for the nginx shape.
+      GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL:-http://llm.home:3000/}
+      # Only for the subpath shape (served under /grafana/ by nginx). Consequence,
+      # because getting it wrong is confusing rather than obviously broken: with
+      # SERVE_FROM_SUB_PATH=false behind a subpath, the HTML arrives but Grafana
+      # asks for its assets and API at the root (/public/…, /api/…), so the page
+      # half-loads or 404s and looks like a proxy bug. With the port bound to
+      # loopback (nginx is the only door) this must match the location block in
+      # monitoring/nginx-grafana.conf.example — see that file for which proxy_pass
+      # slash goes with which setting.
+      GF_SERVER_SERVE_FROM_SUB_PATH: ${GRAFANA_SERVE_FROM_SUB_PATH:-false}
+      # Grafana keeps listening on 0.0.0.0 *inside* the container (base file): the
+      # published host address above is what decides who can reach it, not this.
+
+  # ===================================================================== #
+  # Prometheus stays on loopback. There is deliberately no variable for this.
+  # ===================================================================== #
+  # Every panel gets its numbers through Grafana's **datasource proxy**: the
+  # provisioned datasource is `access: proxy`
+  # (grafana/provisioning/datasources/datasource.yml), so the browser asks
+  # Grafana — `/api/datasources/proxy/uid/prometheus/api/v1/…` — and Grafana asks
+  # Prometheus over the container network. Nothing a LAN browser loads ever needs
+  # to reach 9090, which is why publishing Prometheus buys a dashboard *nothing*.
+  #
+  # What publishing it would actually mean: an unauthenticated PromQL endpoint on
+  # your segment. Reads only — `--web.enable-admin-api` is not enabled and
+  # `--no-web.enable-lifecycle` is in the base file, so nobody can reload or wipe
+  # config — but any device could then run arbitrary queries (a wide `rate()` over
+  # the whole retention is enough to make a RAM-starved box limp), read every
+  # series including the host telemetry, and read `/debug/*`. The read is the
+  # whole disclosure.
+  #
+  # So the bar is "a panel needs raw API access that Grafana's proxy cannot give
+  # it", which in practice means *something other than Grafana* on another machine
+  # (a notebook, a forwarder, promtool poking at it). In order:
+  #
+  #   1. SSH tunnel — `ssh -L 9090:127.0.0.1:9090 user@box`. Same effect, no
+  #      port open to anyone else, and nothing left to find later.
+  #   2. Ask which panel needs it. Usually it does not; see the runbook entry
+  #      "Do I have to publish 9090?" in monitoring/README.md.
+  #   3. This block, with its eyes open:
+  #
+  #   prometheus:
+  #     ports: !override
+  #       - "${PROMETHEUS_LAN_BIND:-0.0.0.0}:${PROMETHEUS_PORT:-9090}:9090"
+
+# =========================================================================== #
+# The hardened shape: nginx + basic auth, Grafana still on loopback
+# =========================================================================== #
+# The box already puts nginx in front of the model server
+# (`qwen3.8-flash/docker-compose.yml`), so this is the shape that fits the
+# existing perimeter: the LAN sees HTTPS and a password, Grafana never leaves
+# loopback. The working sample — location block, the htpasswd command, the
+# websocket headers, and the subpath/root_url consequences — is
+# [nginx-grafana.conf.example](./nginx-grafana.conf.example).
+#
+# With nginx as the only door:
+#
+#   GRAFANA_LAN_BIND=127.0.0.1        # the override publishes nothing new
+#   GRAFANA_ROOT_URL=https://llm.home/grafana/
+#   GRAFANA_SERVE_FROM_SUB_PATH=true
+#
+# and keep GF_AUTH_ANONYMOUS_ENABLED=true. That is not a mistake: nginx asks for
+# the password once per session, and Grafana stays silent behind it. Turn
+# anonymous off *and* leave the login form up and the LAN user types two
+# passwords for one page — which is how shared passwords end up written on the
+# Grafana bezel.

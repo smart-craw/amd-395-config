@@ -1,0 +1,218 @@
+# Recording rules: the neutral `llm:*` aliases the ADR (workspace-szw.1) promises
+# as the place vendor name-drift is absorbed.
+#
+# These exist so hand-written queries, the provisioned dashboard and future alert
+# rules can say `llm:decode_tokens_per_second` instead of guessing between
+# `llamacpp:*`, `halogen:*`, `llama:*` and `vllm:*` once more than one serving
+# stack is on the box. They are written every evaluation, so a new series appears
+# in the TSDB within ~one interval of its source counter being first scraped.
+#
+# The provisioned dashboard does NOT depend on them: its panels spell the raw
+# expressions and plot these aliases *beside* them, so it renders against a server
+# whose rules have never run and "No data" means no data, not no rule (see
+# monitoring/README.md "Recording rules vs raw PromQL in panels"). Where an alias
+# is drawn on a panel, `check_monitoring.py` verifies the name is actually recorded
+# here — a typo'd alias is invisible until someone trusts it.
+#
+# LABELS: every alias keeps `job`, `instance` and the normalized `model` rather than
+# collapsing to one global number. A dimensionless global sum cannot be filtered by
+# the dashboard's $instance / $model variables, and a panel that silently ignores
+# its own filters is worse than no panel; the ADR's contract is the alias *names*,
+# explicitly not their label set (and the alert rules that read raw names are
+# unaffected). `model` is normalized the same way the dashboard does it: vLLM's
+# `model_name` copied onto `model` with the regex `(.+)`, not `(.*)` — an empty
+# `model_name` matches `(.*)` on the empty string and would blank a perfectly good
+# `model` label that file_sd set. Verified against a live Prometheus.
+#
+# Not generated; no thresholds involved. Committed and validated by
+# `promtool check rules monitoring/prometheus/recording_rules.yml`.
+#
+# The metric-name unions below must stay in step with the selector constants in
+# monitoring/grafana/make_dashboard.py (DECODE_TOKENS, CACHE_CACHED, ...). Both
+# sides are one edit each; if they ever drift, the `(rule)` series on a panel will
+# disagree with the raw series next to it.
+
+groups:
+  - name: llm-aliases
+    interval: 30s
+    rules:
+      # Generation throughput, windowed — the correct version of the server's own
+      # "average since last scrape" gauge llamacpp:predicted_tokens_seconds.
+      # The {__name__=~...} selector is the vendor-drift seam: add the next stack's
+      # counter name here once, not in every panel and alert.
+      - record: llm:decode_tokens_per_second
+        expr: >-
+          sum by (job, instance, model) (label_replace(rate({__name__=~"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total"}[5m]), "model", "$1", "model_name", "(.+)"))
+
+      - record: llm:prompt_tokens_per_second
+        expr: >-
+          sum by (job, instance, model) (label_replace(rate({__name__=~"llamacpp:prompt_tokens_total|vllm:prompt_tokens_total"}[5m]), "model", "$1", "model_name", "(.+)"))
+
+      - record: llm:requests_per_second
+        expr: >-
+          sum by (job, instance, model) (label_replace(rate({__name__=~"halogen:requests_total|llamacpp:requests_total|vllm:request_success_total"}[5m]), "model", "$1", "model_name", "(.+)"))
+
+      # Queue depth as a gauge pair, so an alert can say "queued" instead of naming
+      # a vendor. These two were listed as pending in ADR 0001 C3 and are what
+      # workspace-szw.5's queueing alerts should read.
+      - record: llm:requests_running
+        expr: >-
+          sum by (job, instance, model) (label_replace({__name__=~"llamacpp:requests_processing|halogen:requests_running|vllm:num_requests_running"}, "model", "$1", "model_name", "(.+)"))
+
+      - record: llm:requests_queued
+        expr: >-
+          sum by (job, instance, model) (label_replace({__name__=~"llamacpp:requests_deferred|halogen:requests_queued|vllm:num_requests_waiting"}, "model", "$1", "model_name", "(.+)"))
+
+      # Prompt-cache hit ratio over 5m. The `+ cached` in the denominator is the
+      # llama.cpp convention: prompt_tokens_total counts only the tokens that
+      # MISSED the cache. clamp_min keeps a quiet server's 0/0 from becoming a NaN
+      # hole (Prometheus drops NaN, which reads as a missing metric).
+      - record: llm:prompt_cache_hit_ratio
+        expr: >-
+          sum by (job, instance, model) (label_replace(rate({__name__=~"halogen:prompt_tokens_cached_total|llamacpp:prompt_cache_tokens_cached_total"}[5m]), "model", "$1", "model_name", "(.+)"))
+          /
+          clamp_min(sum by (job, instance, model) (label_replace(rate({__name__=~"llamacpp:prompt_tokens_total|vllm:prompt_tokens_total"}[5m]), "model", "$1", "model_name", "(.+)")) + sum by (job, instance, model) (label_replace(rate({__name__=~"halogen:prompt_tokens_cached_total|llamacpp:prompt_cache_tokens_cached_total"}[5m]), "model", "$1", "model_name", "(.+)")), 1)
+
+      # Speculative-decode acceptance over 5m. clamp_min kills the 0/0 -> NaN spike
+      # a restart (or an idle minute) leaves behind.
+      - record: llm:draft_acceptance_ratio
+        expr: >-
+          sum by (job, instance, model) (label_replace(rate({__name__=~"halogen:draft_tokens_accepted_total|llamacpp:draft_tokens_accepted_total"}[5m]), "model", "$1", "model_name", "(.+)"))
+          /
+          clamp_min(sum by (job, instance, model) (label_replace(rate({__name__=~"halogen:draft_tokens_total|llamacpp:draft_tokens_total"}[5m]), "model", "$1", "model_name", "(.+)")), 1)
+
+      - record: llm:kv_cache_usage_ratio
+        expr: >-
+          max by (job, instance, model) (label_replace({__name__=~"llamacpp:kv_cache_usage_ratio|llamacpp:kv_cache_usage"}, "model", "$1", "model_name", "(.+)"))
+
+      # ------------------------------------------------------------------ #
+      # Latency quantiles (ADR 0001 C3, deferred to the dashboard ticket).
+      #
+      # `sum by (le, ...)` first, then histogram_quantile: quantiles of per-series
+      # quantiles are meaningless, and `le` has to survive the aggregation because
+      # it is what the quantile function reads. `le` is deliberately NOT kept on the
+      # output (histogram_quantile drops it), so these are ordinary series and not
+      # half a histogram.
+      #
+      # These only produce series where the server publishes `_bucket` series.
+      # A build with counters and average gauges only — which is what most
+      # llama.cpp builds do — emits nothing here, and the dashboard's "no histogram
+      # on this server" message is the honest answer, not a gap to fill.
+      # ------------------------------------------------------------------ #
+      - record: llm:time_to_first_token_seconds:p50
+        expr: >-
+          histogram_quantile(0.50, sum by (le, job, instance, model) (label_replace(rate({__name__=~"llama:time_to_first_token_seconds_bucket|llamacpp:time_to_first_token_seconds_bucket|llamacpp:ttft_seconds_bucket|vllm:time_to_first_token_seconds_bucket"}[5m]), "model", "$1", "model_name", "(.+)")))
+
+      - record: llm:time_to_first_token_seconds:p90
+        expr: >-
+          histogram_quantile(0.90, sum by (le, job, instance, model) (label_replace(rate({__name__=~"llama:time_to_first_token_seconds_bucket|llamacpp:time_to_first_token_seconds_bucket|llamacpp:ttft_seconds_bucket|vllm:time_to_first_token_seconds_bucket"}[5m]), "model", "$1", "model_name", "(.+)")))
+
+      - record: llm:time_to_first_token_seconds:p99
+        expr: >-
+          histogram_quantile(0.99, sum by (le, job, instance, model) (label_replace(rate({__name__=~"llama:time_to_first_token_seconds_bucket|llamacpp:time_to_first_token_seconds_bucket|llamacpp:ttft_seconds_bucket|vllm:time_to_first_token_seconds_bucket"}[5m]), "model", "$1", "model_name", "(.+)")))
+
+      # Siblings of the C3 contract rows, named the same way, for the two other
+      # latency panels this dashboard adds. Additive: ADR 0001 C3 lists the quantile
+      # aliases as "to be added with the latency panels", and shipping only TTFT
+      # would leave two panels with a raw expression and no neutral name.
+      - record: llm:time_per_output_token_seconds:p50
+        expr: >-
+          histogram_quantile(0.50, sum by (le, job, instance, model) (label_replace(rate({__name__=~"llama:time_per_output_token_seconds_bucket|llamacpp:time_per_output_token_seconds_bucket|llamacpp:time_per_token_seconds_bucket|vllm:time_per_output_token_seconds_bucket"}[5m]), "model", "$1", "model_name", "(.+)")))
+
+      - record: llm:time_per_output_token_seconds:p90
+        expr: >-
+          histogram_quantile(0.90, sum by (le, job, instance, model) (label_replace(rate({__name__=~"llama:time_per_output_token_seconds_bucket|llamacpp:time_per_output_token_seconds_bucket|llamacpp:time_per_token_seconds_bucket|vllm:time_per_output_token_seconds_bucket"}[5m]), "model", "$1", "model_name", "(.+)")))
+
+      - record: llm:time_per_output_token_seconds:p99
+        expr: >-
+          histogram_quantile(0.99, sum by (le, job, instance, model) (label_replace(rate({__name__=~"llama:time_per_output_token_seconds_bucket|llamacpp:time_per_output_token_seconds_bucket|llamacpp:time_per_token_seconds_bucket|vllm:time_per_output_token_seconds_bucket"}[5m]), "model", "$1", "model_name", "(.+)")))
+
+      - record: llm:end_to_end_response_seconds:p50
+        expr: >-
+          histogram_quantile(0.50, sum by (le, job, instance, model) (label_replace(rate({__name__=~"llama:end_to_end_response_seconds_bucket|llamacpp:end_to_end_response_seconds_bucket|llamacpp:requests_seconds_bucket|llamacpp:request_seconds_bucket|vllm:e2e_request_latency_seconds_bucket"}[5m]), "model", "$1", "model_name", "(.+)")))
+
+      - record: llm:end_to_end_response_seconds:p90
+        expr: >-
+          histogram_quantile(0.90, sum by (le, job, instance, model) (label_replace(rate({__name__=~"llama:end_to_end_response_seconds_bucket|llamacpp:end_to_end_response_seconds_bucket|llamacpp:requests_seconds_bucket|llamacpp:request_seconds_bucket|vllm:e2e_request_latency_seconds_bucket"}[5m]), "model", "$1", "model_name", "(.+)")))
+
+      - record: llm:end_to_end_response_seconds:p99
+        expr: >-
+          histogram_quantile(0.99, sum by (le, job, instance, model) (label_replace(rate({__name__=~"llama:end_to_end_response_seconds_bucket|llamacpp:end_to_end_response_seconds_bucket|llamacpp:requests_seconds_bucket|llamacpp:request_seconds_bucket|vllm:e2e_request_latency_seconds_bucket"}[5m]), "model", "$1", "model_name", "(.+)")))
+
+  # --- is the monitor actually scraping? (ADR 0001 C2/C3) --------------------
+  # `llm_monitor_*` is what monitor/serve.py publishes through its /metrics
+  # passthrough. These two aliases are the canonical "history is being recorded"
+  # signal: a flat line in Grafana means blind, not idle, and that distinction is
+  # the whole reason the passthrough publishes self-metrics at all.
+  - name: llm-scrape-health
+    interval: 30s
+    rules:
+      - record: llm:scrape_ok
+        expr: min by (job, instance) (llm_monitor_scrape_ok)
+
+      # Fraction of the last 10 minutes in which the monitor's most recent scrape
+      # had succeeded. Deliberately built from the gauge, not from a success/failure
+      # counter pair: the monitor counts successes (a counter Prometheus can reset
+      # on restart) and records the latest outcome as a gauge, so averaging the gauge
+      # is the only ratio that does not invent a counter that does not exist.
+      #
+      # A monitor that is up but cannot reach its upstream reads 0 here and 1 on `up`
+      # -- that pair is what an operator needs: `up` says the process answers, this
+      # says the scrape works.
+      - record: llm:scrape_success_ratio
+        expr: >-
+          avg by (job, instance) (avg_over_time(llm_monitor_scrape_ok[10m]))
+
+  # --- host + GPU baselines (workspace-szw.13) ------------------------------
+  # The rule this repo follows for a new alert is *measure first*, and the ticket
+  # said so explicitly: a GTT threshold guessed on deploy day is an alert that
+  # either never fires or pages at 02:00, because nobody can know this box's
+  # steady-state GTT without watching it work. So the baseline is recorded from
+  # the first scrape onward, in Prometheus, rather than in a notebook:
+  #
+  #   promtool query instant http://127.0.0.1:9090 'host:gtt_usage_ratio:max_2d'
+  #
+  # after two days is the number `GTT_PRESSURE_WARN` in alert_thresholds.env is
+  # meant to be set from (and `monitoring/collect_host_baseline.sh` prints the
+  # whole set). The `:max_2d` / `:mean_2d` suffixes follow the Prometheus
+  # convention the latency quantiles above use.
+  #
+  # Cost: five series written every 5 minutes, each 2-day window read at a 15m
+  # subquery step (192 points per series per evaluation) — the reason the step is
+  # 15m and not 1m is exactly this file's own footprint rule: measure before you
+  # multiply.
+  #
+  # These are `host:*`, not `llm:*`: the C3 contract is about the vendor-drift
+  # seam for model-server metrics, and nothing here has a vendor spelling.
+  - name: host-baselines
+    interval: 5m
+    rules:
+      # GTT as a fraction of the box's whole GTT budget (amdgpu.gttsize), i.e.
+      # the same ratio NodeGttPressureHigh alerts on and the GPU & host row
+      # plots. One series per card.
+      - record: host:gtt_usage_ratio
+        expr: >-
+          node_drm_memory_gtt_used_bytes / node_drm_memory_gtt_size_bytes
+
+      - record: host:gtt_usage_ratio:max_2d
+        expr: >-
+          max_over_time(host:gtt_usage_ratio[2d:15m])
+
+      - record: host:gtt_usage_ratio:mean_2d
+        expr: >-
+          avg_over_time(host:gtt_usage_ratio[2d:15m])
+
+      # Memory PSI as a stall fraction (the same shape NodeMemoryPressure* read),
+      # and the GPU's hottest sensor, so a thermal threshold can be set from what
+      # the box actually reaches rather than from the part's absolute maximum.
+      - record: host:psi_memory_waiting_ratio
+        expr: >-
+          rate(node_pressure_memory_waiting_seconds_total[5m])
+
+      - record: host:psi_memory_waiting_ratio:max_2d
+        expr: >-
+          max_over_time(host:psi_memory_waiting_ratio[2d:15m])
+
+      - record: host:gpu_temp_celsius:max_2d
+        expr: >-
+          max_over_time(node_hwmon_temp_celsius{chip="amdgpu"}[2d:15m])

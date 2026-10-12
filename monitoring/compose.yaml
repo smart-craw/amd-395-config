@@ -1,0 +1,167 @@
+# Prometheus + Grafana for the LLM box — the system of record for /metrics.
+#
+#   cp monitoring/.env.example monitoring/.env   # then set GRAFANA_ADMIN_PASSWORD
+#   docker compose -f monitoring/compose.yaml up -d
+#
+# Both commands are run from the repo root; compose reads monitoring/.env by
+# itself because the project directory is the directory holding compose.yaml.
+# There is no build step and nothing to click: see monitoring/README.md.
+#
+# Everything is in git: config, rules, dashboards. Nothing is clicked into
+# existence, and nothing outside the box is contacted (no plugins, no telemetry,
+# no update checks, no CDN assets).
+#
+# Both UIs bind 127.0.0.1 *in this file, always*. Want them on the LAN? That is
+# opt-in via an override (-f monitoring/compose.lan.yaml), not an edit here — see
+# monitoring/README.md#publishing-the-dashboards-on-the-lan-opt-in.
+#
+# Resource limits are the point of this file: this box starves itself of RAM for
+# model weights (amdgpu.gttsize / ttm.pages_limit in the root README), so both
+# containers get a hard memory ceiling and a CPU share, and Prometheus gets a
+# *size* cap on its TSDB as well as a time cap. See monitoring/README.md for the
+# measured footprint and how these numbers were derived.
+
+name: llm-monitoring
+
+x-common: &common
+  restart: unless-stopped
+  # These containers must never reach the internet; the loopback port maps below
+# are the only thing exposed, and only on this host.
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+
+services:
+  prometheus:
+    # Pinned by tag AND digest (bump both deliberately: see monitoring/README.md).
+    image: prom/prometheus:v3.4.1@sha256:9abc6cf6aea7710d163dbb28d8eeb7dc5baef01e38fa4cd146a406dd9f07f70d
+    <<: *common
+    container_name: llm-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # BOTH caps are mandatory: time alone does not bound the disk, and a
+      # RAM-starved box must not be wedged by its own telemetry.
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION_TIME:-15d}
+      - --storage.tsdb.retention.size=${PROMETHEUS_RETENTION_SIZE:-2GB}
+      # Deliberate: the config is mounted read-only from git, so the way to pick
+      # up a config change is `docker compose restart prometheus`, not an HTTP
+      # call that would also allow POSTing a whole new config to an
+      # unauthenticated port. NOTE the `--no-` form: the flag parser in the pinned
+      # binary rejects `--web.enable-lifecycle=false` outright ("unexpected
+      # false"), so the intuitive spelling crash-loops the container. Verified
+      # against prometheus 3.4.1 in workspace-szw.9; check_monitoring.py rejects
+      # the `=false` spelling so it cannot come back.
+      - --no-web.enable-lifecycle
+    volumes:
+      - ./prometheus:/etc/prometheus:ro
+      - prometheus-tsdb:/prometheus
+    ports:
+      # Loopback only. Prometheus is unauthenticated by design, and Grafana reads
+      # it through the datasource proxy, so no panel ever needs this published —
+      # not even in the LAN override (compose.lan.yaml says what to do if you
+      # think you do).
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+    extra_hosts:
+      # Lets the llm-server-via-proxy job reach serve.py on the host.
+      - "host.docker.internal:host-gateway"
+    # Defaults are the ADR 0001 C5 budget; .env overrides them.
+    mem_limit: ${PROMETHEUS_MEM_LIMIT:-512m}
+    memswap_limit: ${PROMETHEUS_MEM_LIMIT:-512m}
+    cpus: ${PROMETHEUS_CPUS:-0.50}
+    pids_limit: ${PROMETHEUS_PIDS_LIMIT:-256}
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  grafana:
+    image: grafana/grafana:11.6.1@sha256:52c3e20686b860c6dc1f623811565773cf51eefa378817a4896dfc863c3c82c8
+    <<: *common
+    container_name: llm-grafana
+    depends_on:
+      - prometheus
+    environment:
+      # --- no outbound calls, no plugin surface -------------------------
+      GF_PLUGINS_ALLOW_LOADING: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_NEWSFEED_ENABLED: "false"
+      GF_INSTALL_PLUGINS: ""
+      # --- accounts -----------------------------------------------------
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_USERS_ALLOW_ORG_CREATE: "false"
+      GF_AUTH_DISABLE_LOGIN_FORM: "false"
+      # Anonymous access stays off in the base stack: read-only anonymous viewing
+      # is the LAN override's decision (monitoring/compose.lan.yaml), never the
+      # default. Sign-up stays off in both — see the LAN file for why.
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      # Deliberately REQUIRED: copy .env.example to .env and set a real one.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in monitoring/.env}
+      GF_SECURITY_DISABLE_GRAVATAR: "true"
+      GF_SERVER_HTTP_ADDR: 0.0.0.0
+      GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL:-http://localhost:3000/}
+      GF_PATHS_PROVISIONING: /etc/grafana/provisioning
+      GF_PATHS_DASHBOARDS: /var/lib/grafana/dashboards
+      # The image defaults this to /var/log/grafana, which does not exist on a
+      # read-only rootfs: Grafana exits at start-up with "mkdir: permission
+      # denied". Inside the data volume it is writable and survives upgrades.
+      GF_PATHS_LOGS: /var/lib/grafana/logs
+      GF_DASHBOARDS_MIN_REFRESH_INTERVAL: 15s
+      GF_NEWSFEED_URL: ""
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      # Loopback only by default. `-f monitoring/compose.lan.yaml` is the supported
+      # way to publish this port (it replaces this mapping with `!override`).
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
+    mem_limit: ${GRAFANA_MEM_LIMIT:-256m}
+    memswap_limit: ${GRAFANA_MEM_LIMIT:-256m}
+    cpus: ${GRAFANA_CPUS:-0.25}
+    pids_limit: ${GRAFANA_PIDS_LIMIT:-512}
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  # ------------------------------------------------------------------ #
+  # Alertmanager is deliberately NOT part of the default stack: wiring it
+  # up means pointing this box at a notification channel (email, webhook,
+  # Telegram, ...), which is an outbound-network dependency the ADR rules
+  # against by default. Enabling it is its own decision. When you make it,
+  # no alertmanager.yml is committed yet. Uncomment this block, write the config,
+  # and then
+  # `docker compose -f monitoring/compose.yaml up -d alertmanager`.
+  # ------------------------------------------------------------------ #
+  # alertmanager:
+  #   image: prom/alertmanager:v0.27.0
+  #   <<: *common
+  #   container_name: llm-alertmanager
+  #   command:
+  #     - --config.file=/etc/alertmanager/alertmanager.yml
+  #     - --storage.path=/alertmanager
+  #   volumes:
+  #     - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+  #     - alertmanager-data:/alertmanager
+  #   ports:
+  #     - "127.0.0.1:${ALERTMANAGER_PORT:-9093}:9093"
+  #   mem_limit: 80m
+  #   cpus: "0.20"
+
+volumes:
+  # Named volumes, prefixed with the project name below: the TSDB lives in
+  # llm-monitoring_prometheus-tsdb. `docker volume rm
+  # llm-monitoring_prometheus-tsdb` purges the history (see monitoring/README.md
+  # "Purging the TSDB").
+  prometheus-tsdb:
+  grafana-data:

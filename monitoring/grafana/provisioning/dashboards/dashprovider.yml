@@ -1,0 +1,22 @@
+# Dashboard provider: the dashboards in monitoring/grafana/dashboards are the
+# source of truth. Editing them in the UI and leaving the edit there is how
+# dashboards rot; see monitoring/README.md ("changing a panel").
+apiVersion: 1
+
+providers:
+  - name: llm-monitoring
+    orgId: 1
+    folder: LLM
+    folderUid: llm
+    type: file
+    disableDeletion: true
+    # Do not let the UI write back over the committed files...
+    allowUiUpdates: false
+    updateFolderItems: false
+    # ...and poll the directory (this is the default, spelled out so nobody
+    # "fixes" it): a `git pull` picks new/changed dashboard JSON up by itself,
+    # `docker compose restart grafana` just makes it immediate.
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

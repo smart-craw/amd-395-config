@@ -16,7 +16,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import socket
 import sys
+import tempfile
 import threading
 import unittest
 import urllib.error
@@ -24,6 +27,7 @@ import urllib.parse
 import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 TESTS_DIR = Path(__file__).resolve().parent
 MONITOR_DIR = TESTS_DIR.parent
@@ -32,6 +36,7 @@ sys.path.insert(0, str(TESTS_DIR))
 
 import serve  # noqa: E402  (path juggling first)
 from mock_upstream import MockUpstream  # noqa: E402
+import mock_upstream  # noqa: E402
 
 # The proxy logs every request the way http.server does; hundreds of those lines
 # would bury the test report. Test-only silencing -- the shipped server keeps
@@ -570,6 +575,547 @@ class StaticHostingTests(ProxyFixture):
         for target in ("/../../etc/passwd", "/%2e%2e%2f%2e%2e%2fetc%2fpasswd", "/..%2f..%2fetc"):
             with self.subTest(target=target):
                 self.assertIn(get(self.base + target)[0], (400, 404))
+
+
+# --- scrape passthrough (GET /metrics) --------------------------------------
+
+#: Every self-metric the proxy owns; the ADR (workspace-szw.1, C2) is the source
+#: of the names, the code is the source of the list.
+SELF_SERIES_NAMES = {name for name, _kind, _help in serve.SELF_METRICS}
+
+
+def parse_body(raw: bytes) -> dict:
+    """Parse a passthrough body with the proxy's own parser (the acceptance
+    criterion is "parseable by parse_prometheus", so the tests use exactly that
+    parser rather than a private one)."""
+    return serve.parse_prometheus(raw.decode("utf-8", errors="replace"))
+
+
+def self_block(raw: bytes) -> bytes:
+    """The appended ``llm_monitor_*`` block on its own.
+
+    Parsing the *whole* body would hit the proxy's own series cap when the
+    upstream is huge, and the self-metrics are the last lines in it.
+    """
+    marker = raw.index(b"# llm-monitor ")
+    return raw[marker:]
+
+
+def self_series(raw: bytes, name: str) -> list[dict]:
+    return [s for s in parse_body(self_block(raw))["series"] if s["name"] == name]
+
+
+def self_value(raw: bytes, name: str) -> float:
+    found = self_series(raw, name)
+    if not found:
+        raise AssertionError(f"{name} is missing from the self-metrics block")
+    return found[0]["value"]
+
+
+class PassthroughMixin:
+    """``scrape()`` for a :class:`ProxyFixture` subclass."""
+
+    def scrape(self, url: str | None = None, path: str | None = None, **kw):
+        target = self.base + (path or serve.PASSTHROUGH_ROUTE)
+        if url is not None:
+            target += "?url=" + urllib.parse.quote(url, safe="")
+        return get(target, **kw)
+
+
+class PassthroughTests(PassthroughMixin, ProxyFixture):
+    """``GET /metrics``: the route a real Prometheus scrapes. Plain text, not the
+    envelope; the upstream bytes verbatim; the proxy's own series appended."""
+
+    mode = "healthy"
+
+    def upstream_body(self) -> bytes:
+        with urllib.request.urlopen(self.upstream.url + "/metrics", timeout=15) as resp:
+            return resp.read()
+
+    def test_upstream_exposition_comes_back_verbatim(self):
+        native = self.upstream_body()
+        status, headers, raw = self.scrape()
+        self.assertEqual(status, 200)
+        self.assertTrue(
+            raw.startswith(native),
+            "the upstream bytes must be copied byte for byte, in order",
+        )
+        self.assertEqual(len(raw), int(headers["Content-Length"]))
+
+    def test_utf8_bytes_survive_the_round_trip(self):
+        # Non-ASCII label values are legal exposition text, and decode/re-encode
+        # is where a "verbatim" passthrough quietly mangles them.
+        with MockUpstream(mode="unicode") as uni:
+            with urllib.request.urlopen(uni.url + "/metrics", timeout=15) as resp:
+                native = resp.read()
+            status, _, raw = self.scrape(url=uni.url)
+        self.assertEqual(status, 200)
+        self.assertEqual(raw[: len(native)], native)
+        self.assertIn("日本語".encode("utf-8"), raw)
+        self.assertNotIn(b"\xef\xbf\xbd", raw, "no U+FFFD: the bytes were copied, not re-encoded")
+        series = [
+            s for s in parse_body(self_block(raw))["series"]
+            if s["name"] == "llm_monitor_scrape_upstream_status"
+        ]
+        self.assertEqual(series[0]["labels"]["upstream"], uni.url)
+        self.assertEqual(parse_body(raw)["errors"], [])
+
+    def test_content_type_is_the_exposition_contract(self):
+        status, headers, _ = self.scrape()
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], serve.PROMETHEUS_CONTENT_TYPE)
+        self.assertEqual(
+            serve.PROMETHEUS_CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8"
+        )
+
+    def test_no_json_envelope_and_no_markup_on_this_path(self):
+        _, _, raw = self.scrape()
+        self.assertFalse(raw.lstrip().startswith((b"{", b"[")), "must not be the envelope")
+        for key in (b'"latency_ms"', b'"content_type"', b'"ok"', b'"error"'):
+            self.assertNotIn(key, raw)
+        self.assertNotIn(b"<html", raw.lower())
+        self.assertNotIn(b"<!doctype", raw.lower())
+
+    def test_native_metric_names_are_not_renamed_or_relabeled(self):
+        native = self.upstream_body()
+        _, _, raw = self.scrape()
+        self.assertTrue(raw.startswith(native), "verbatim, in order")
+        for name, value in (
+            (b"llamacpp:prompt_tokens_total", b"779554"),
+            (b"halogen:prompt_tokens_cached_total", b"49838237"),
+            (b"llamacpp:kv_cache_usage_ratio", b"0.625"),
+        ):
+            with self.subTest(name=name):
+                self.assertIn(name + b" " + value, raw)
+                # the colon spelling is the contract; an underscore rewrite here
+                # would silently break every recording rule written against it
+                self.assertNotIn(name.replace(b":", b"_"), raw)
+        self.assertIn(b"# TYPE llamacpp:requests_processing gauge", raw)
+
+    def test_self_metrics_are_appended_and_parse_cleanly(self):
+        _, _, raw = self.scrape()
+        parsed = parse_body(raw)
+        self.assertEqual(parsed["errors"], [], "the whole body must be valid exposition")
+        self.assertFalse(parsed["truncated"])
+        self.assertEqual(
+            {s["name"] for s in parsed["series"] if s["name"].startswith(serve.SELF_METRIC_PREFIX)},
+            SELF_SERIES_NAMES,
+        )
+
+    def test_build_info_is_one_and_carries_the_version(self):
+        _, _, raw = self.scrape()
+        info = self_series(raw, "llm_monitor_build_info")
+        self.assertEqual(len(info), 1)
+        self.assertEqual(info[0]["value"], 1)
+        self.assertEqual(info[0]["labels"], {"version": serve.VERSION})
+
+    def test_counters_and_gauges_describe_this_scrape(self):
+        native_count = parse_body(self.upstream_body())["count"]
+        _, _, first = self.scrape()
+        _, _, second = self.scrape()
+        self.assertEqual(
+            self_value(second, "llm_monitor_scrape_success_total"),
+            self_value(first, "llm_monitor_scrape_success_total") + 1,
+            "a counter, incremented once per successful scrape",
+        )
+        self.assertEqual(self_value(second, "llm_monitor_scrape_ok"), 1)
+        self.assertEqual(self_value(second, "llm_monitor_scrape_upstream_status"), 200)
+        self.assertEqual(
+            self_value(second, "llm_monitor_series_count"), native_count
+        )
+        self.assertEqual(self_value(second, "llm_monitor_parse_truncated"), 0)
+        self.assertGreaterEqual(self_value(second, "llm_monitor_scrape_latency_ms"), 0)
+
+    def test_only_the_scraped_upstream_is_rendered(self):
+        """``sum(llm_monitor_*)`` across targets must not double-count (ADR C2)."""
+        with MockUpstream(mode="weird") as other:
+            _, _, raw = self.scrape(url=other.url)
+            self.assertIn(other.url.encode(), raw)
+            self.assertNotIn(
+                self.upstream.url.encode(),
+                raw[raw.index(b"# llm-monitor"):],
+                "the self-metrics block must carry only the scraped upstream's row",
+            )
+            rows = [s for s in self_series(raw, "llm_monitor_scrape_ok")]
+            self.assertEqual([s["labels"]["upstream"] for s in rows], [other.url])
+
+    def test_parse_errors_in_the_upstream_body_are_counted(self):
+        with MockUpstream(mode="weird") as weird:
+            _, _, raw = self.scrape(url=weird.url)
+            with urllib.request.urlopen(weird.url + "/metrics", timeout=15) as resp:
+                native = resp.read()
+        self.assertGreaterEqual(
+            self_value(raw, "llm_monitor_parse_errors_total"), 1,
+            "'some:not_a_number nope' and 'totally unparsable here' are errors",
+        )
+        self.assertEqual(self_value(raw, "llm_monitor_parse_truncated"), 0)
+        # ...and the odd body still came through verbatim, errors and all
+        self.assertTrue(raw.startswith(native))
+
+    def test_head_works_without_a_body(self):
+        request = urllib.request.Request(self.base + serve.PASSTHROUGH_ROUTE, method="HEAD")
+        with urllib.request.urlopen(request, timeout=15) as resp:
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(resp.headers["Content-Type"], serve.PROMETHEUS_CONTENT_TYPE)
+            self.assertGreater(int(resp.headers["Content-Length"]), 0)
+            self.assertEqual(resp.read(), b"")
+
+    def test_trailing_slash_is_the_same_route(self):
+        status, headers, raw = self.scrape(path=serve.PASSTHROUGH_ROUTE + "/")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], serve.PROMETHEUS_CONTENT_TYPE)
+        self.assertIn(b"llm_monitor_build_info", raw)
+
+    def test_the_rest_of_the_surface_is_untouched(self):
+        """Claiming /metrics must not disturb /api/* or the static hosting."""
+        env = self.api("metrics")
+        self.assertEqual([k for k in env if k != "_status"], ENVELOPE_KEYS + ["metrics"])
+        self.assertEqual(
+            env["metrics"]["count"], parse_body(self.upstream_body())["count"]
+        )
+        status, headers, raw = get(self.base + "/index.html")
+        self.assertEqual(status, 200)
+        self.assertIn("text/html", headers["Content-Type"])
+        self.assertIn(b"<", raw[:200])
+
+
+class PassthroughFailureTests(PassthroughMixin, ProxyFixture):
+    """A failed scrape is a scrape failure: 502 + one line of plain text."""
+
+    mode = "healthy"
+
+    def assert_scrape_failure(self, status: int, headers, raw: bytes, needle: str) -> None:
+        self.assertEqual(status, 502)
+        self.assertTrue(headers["Content-Type"].startswith("text/plain"), headers["Content-Type"])
+        self.assertEqual(raw.count(b"\n"), 1, "exactly one line, terminated")
+        self.assertIn(needle, raw.decode())
+        self.assertNotIn(b"<html", raw.lower())
+        self.assertNotIn(b"<!doctype", raw.lower())
+        self.assertFalse(raw.lstrip().startswith((b"{", b"[")), "never a 200-shaped envelope")
+        self.assertNotIn(b"llm_monitor_", raw, "no sample set to speak of")
+
+    def test_upstream_500_is_a_502_with_a_reason(self):
+        with MockUpstream(mode="broken") as broken:
+            status, headers, raw = self.scrape(url=broken.url)
+        self.assert_scrape_failure(status, headers, raw, "HTTP 500")
+
+    def test_upstream_without_the_route_is_a_502(self):
+        with MockUpstream(mode="nometrics") as quiet:
+            status, headers, raw = self.scrape(url=quiet.url)
+        self.assert_scrape_failure(status, headers, raw, "HTTP 404")
+
+    def test_unreachable_upstream_is_a_502(self):
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            dead_port = probe.getsockname()[1]
+        status, headers, raw = self.scrape(url=f"http://127.0.0.1:{dead_port}")
+        self.assert_scrape_failure(status, headers, raw, "unreachable")
+
+    def test_wedged_upstream_hits_the_five_second_cap(self):
+        import time
+
+        with MockUpstream(mode="wedged") as wedged:
+            wedged.wedge_seconds = serve.UPSTREAM_TIMEOUT_SECONDS + 3
+            started = time.monotonic()
+            status, headers, raw = self.scrape(url=wedged.url, timeout=20)
+            elapsed = time.monotonic() - started
+        self.assert_scrape_failure(status, headers, raw, "timed out")
+        self.assertLess(
+            elapsed, serve.UPSTREAM_TIMEOUT_SECONDS + 3.0,
+            "the scrape must not outlive the per-request cap",
+        )
+
+    def test_a_wedged_scrape_does_not_block_the_ui_polls(self):
+        """The passthrough runs on its own thread; the dashboard must stay live."""
+        import time
+
+        with MockUpstream(mode="wedged") as wedged:
+            wedged.wedge_seconds = 5
+            stuck = threading.Thread(
+                target=lambda: self.scrape(url=wedged.url, timeout=20), daemon=True
+            )
+            stuck.start()
+            time.sleep(0.3)  # let the stalled scrape get going
+            started = time.monotonic()
+            env = self.api("models")
+            elapsed = time.monotonic() - started
+        self.assertTrue(env["ok"])
+        self.assertLess(elapsed, 2.0, "/api/models waited on a stalled scrape")
+
+    def test_bad_url_overrides_are_400_in_plain_text(self):
+        for bad in (
+            "file:///etc/passwd",
+            "localhost:8000",
+            "gopher://llm:1",
+            "ftp://a.b",
+            "/relative",
+            "http://",
+        ):
+            with self.subTest(bad=bad):
+                status, headers, raw = self.scrape(url=bad)
+                self.assertEqual(status, 400)
+                self.assertTrue(headers["Content-Type"].startswith("text/plain"))
+                self.assertIn("invalid ?url=", raw.decode())
+                self.assertNotIn(b"<html", raw.lower())
+                self.assertNotIn(b"\n", raw.strip(b"\n"), "one line only")
+                self.assertNotIn(b"etc/passwd", raw, "do not echo the rejected target back")
+
+    def test_blank_url_falls_back_to_the_default_upstream(self):
+        status, _, raw = self.scrape(url="")
+        self.assertEqual(status, 200)
+        self.assertIn(self.upstream.url.encode(), raw)
+
+    def test_a_bad_url_does_not_poison_the_self_metrics(self):
+        _, _, raw = self.scrape(url="file:///etc/passwd")
+        self.assertEqual(raw.count(b"llm_monitor_"), 0)
+        _, _, ok = self.scrape()
+        self.assertEqual(self_value(ok, "llm_monitor_scrape_ok"), 1)
+
+
+class PassthroughClaimsMetricsTests(unittest.TestCase):
+    """``/metrics`` is claimed ahead of ``static/`` so a static asset can never
+    shadow the route Prometheus is configured to scrape."""
+
+    def setUp(self):
+        self.shadow = Path(tempfile.mkdtemp(prefix="llm-monitor-shadow-"))
+        # A file that *would* be served if the passthrough did not claim the path.
+        (self.shadow / "metrics").write_text("STATIC-ASSET-NAMED-METRICS", encoding="utf-8")
+        outer = self
+
+        class ShadowHandler(serve.MonitorHandler):
+            def __init__(self, *args, **kwargs):
+                kwargs["directory"] = str(outer.shadow)
+                super().__init__(*args, **kwargs)
+
+        self.upstream = MockUpstream(mode="healthy")
+        self.upstream.__enter__()
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), ShadowHandler)
+        self.server.monitor_upstream = self.upstream.url
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.upstream.__exit__(None, None, None)
+        shutil.rmtree(self.shadow, ignore_errors=True)
+
+    def test_static_asset_cannot_shadow_the_scrape_route(self):
+        status, headers, raw = get(self.base + serve.PASSTHROUGH_ROUTE)
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], serve.PROMETHEUS_CONTENT_TYPE)
+        self.assertNotIn(b"STATIC-ASSET-NAMED-METRICS", raw)
+        self.assertIn(b"llm_monitor_build_info", raw)
+
+    def test_other_paths_still_come_from_the_static_dir(self):
+        # The shadow dir proves the static handler is really the one being used,
+        # i.e. the passthrough claims exactly one path and nothing else.
+        (self.shadow / "page.html").write_text("<html>page</html>", encoding="utf-8")
+        status, headers, raw = get(self.base + "/page.html")
+        self.assertEqual(status, 200)
+        self.assertIn("text/html", headers["Content-Type"])
+        self.assertIn(b"page", raw)
+        self.assertEqual(get(self.base + "/index.html")[0], 404)
+
+
+class PassthroughBoundsTests(PassthroughMixin, ProxyFixture):
+    """A chatty server must not make the scrape unbounded."""
+
+    mode = "healthy"
+
+    def test_series_cap_marks_itself_in_the_self_metrics(self):
+        with MockUpstream(mode="huge") as huge:
+            status, _, raw = self.scrape(url=huge.url)
+            with urllib.request.urlopen(huge.url + "/metrics", timeout=30) as resp:
+                native = resp.read()
+        self.assertEqual(status, 200)
+        self.assertEqual(self_value(raw, "llm_monitor_parse_truncated"), 1)
+        self.assertEqual(self_value(raw, "llm_monitor_series_count"), serve.MAX_SERIES)
+        # the body itself is still verbatim: every series the server sent
+        self.assertTrue(raw.startswith(native))
+        self.assertGreater(native.count(b"\n"), serve.MAX_SERIES)
+
+    def test_oversized_body_is_capped_and_says_so(self):
+        with MockUpstream(mode="huge") as huge:
+            with mock.patch.object(serve, "MAX_BODY_BYTES", 4096):
+                status, headers, raw = self.scrape(url=huge.url)
+        self.assertEqual(status, 200)
+        self.assertIn(b"truncated at 4096 bytes", raw)
+        self.assertTrue(headers["Content-Type"].startswith("text/plain"))
+        # cap respected: the upstream body plus a marker and the self-metrics block
+        self.assertLess(len(raw), 4096 + 4096)
+        self.assertIn(b"llm_monitor_build_info", raw)
+
+
+class ResetFixtureTests(unittest.TestCase):
+    """The double `monitoring/parity` uses to make a counter reset observable.
+
+    A live server is not obliged to restart inside a measurement window, so the
+    parity run's counter-reset probe drives this instead of waiting for luck. Its
+    contract is the thing worth testing: the truth is constant, the numerator is not
+    monotonic, and the ratio-of-lifetimes figure the bespoke page used collapses —
+    if any of that stops being true the probe proves nothing.
+    """
+
+    TRUTH_PCT = 80.0          # 80 accepted per 100 drafted, every cycle
+    CYCLE_SECONDS = 45.0      # when the numerator restarts
+
+    def values(self, age: float) -> dict:
+        parsed = serve.parse_prometheus(mock_upstream.reset_counters_body(age))
+        self.assertEqual(parsed["errors"], [], "the reset body must stay parseable")
+        return {s["name"]: s["value"] for s in parsed["series"]}
+
+    def test_the_construction_is_what_the_probe_thinks_it_is(self):
+        for age in (1.0, 20.0, 44.0, 60.0, 300.0):
+            v = self.values(age)
+            drafted = v["halogen:draft_tokens_total"]
+            accepted = v["halogen:draft_tokens_accepted_total"]
+            self.assertGreater(drafted, 0)
+            # rate() over any window containing the reset sees the same 80/100,
+            # because the drafted counter never stops and the drops are counted back.
+            self.assertAlmostEqual(100.0 * accepted / drafted if drafted else 0,
+                                   self.ratio_at(age), places=6)
+
+    def ratio_at(self, age: float) -> float:
+        """The ratio-of-lifetimes a reader would compute at this age."""
+        return 100.0 * (80.0 * (age % self.CYCLE_SECONDS)) / (100.0 * age)
+
+    def test_the_numerator_restarts_and_the_lifetimes_ratio_decays(self):
+        before = self.values(self.CYCLE_SECONDS - 1.0)
+        after = self.values(self.CYCLE_SECONDS + 1.0)
+        self.assertAlmostEqual(self.TRUTH_PCT,
+                               100.0 * before["halogen:draft_tokens_accepted_total"]
+                               / before["halogen:draft_tokens_total"], places=6)
+        self.assertLess(after["halogen:draft_tokens_accepted_total"],
+                        before["halogen:draft_tokens_accepted_total"],
+                        "the numerator must go backwards, or there is no reset")
+        self.assertGreater(after["halogen:draft_tokens_total"],
+                           before["halogen:draft_tokens_total"],
+                           "the denominator must keep climbing, or the ratio is not a lifetime")
+        old = self.values(1800.0)   # half an hour in
+        self.assertLess(100.0 * old["halogen:draft_tokens_accepted_total"]
+                        / old["halogen:draft_tokens_total"], 3.0,
+                        "the lifetime ratio should have decayed towards zero by now")
+
+    def test_the_prompt_cache_pair_resets_the_same_way(self):
+        v = self.values(1800.0)
+        hit = 100.0 * v["halogen:prompt_tokens_cached_total"] / (
+            v["halogen:prompt_tokens_cached_total"] + v["llamacpp:prompt_tokens_total"])
+        self.assertLess(hit, 5.0, "same mechanism, 90% by construction, reading ~0")
+
+    def test_the_mode_serves_it_over_http(self):
+        with MockUpstream(mode="reset") as fixture:
+            with urllib.request.urlopen(fixture.url + "/metrics", timeout=5) as resp:
+                body = resp.read().decode()
+        self.assertIn("halogen:draft_tokens_accepted_total", body)
+        self.assertEqual(serve.parse_prometheus(body)["errors"], [])
+
+
+class ScrapeStatsTests(unittest.TestCase):
+    """The ``llm_monitor_*`` series themselves (no sockets involved)."""
+
+    def test_render_is_never_empty_and_always_names_every_series(self):
+        rendered = serve.ScrapeStats().render()
+        self.assertIn("llm_monitor_build_info", rendered)
+        for name, kind, _help in serve.SELF_METRICS:
+            with self.subTest(name=name):
+                self.assertIn(f"# TYPE {name} {kind}", rendered)
+        parsed = serve.parse_prometheus(rendered)
+        self.assertEqual(parsed["errors"], [])
+
+    def test_failure_is_recorded_as_ok_zero_with_the_upstream_status(self):
+        stats = serve.ScrapeStats()
+        stats.observe("http://llm:8001", ok=False, status=500, latency_ms=12.5)
+        parsed = serve.parse_prometheus(stats.render())
+        by_name = {s["name"]: s for s in parsed["series"]}
+        self.assertEqual(by_name["llm_monitor_scrape_ok"]["value"], 0)
+        self.assertEqual(by_name["llm_monitor_scrape_upstream_status"]["value"], 500)
+        self.assertEqual(by_name["llm_monitor_scrape_success_total"]["value"], 0)
+        self.assertEqual(by_name["llm_monitor_scrape_latency_ms"]["value"], 12.5)
+
+    def test_no_answer_from_the_upstream_reports_status_zero(self):
+        stats = serve.ScrapeStats()
+        stats.observe("http://llm:8001", ok=False, status=None, latency_ms=5000.0)
+        rendered = stats.render()
+        self.assertIn('llm_monitor_scrape_upstream_status{upstream="http://llm:8001"} 0', rendered)
+        self.assertIn('llm_monitor_scrape_ok{upstream="http://llm:8001"} 0', rendered)
+
+    def test_counters_accumulate_and_gauges_track_the_latest_scrape(self):
+        stats = serve.ScrapeStats()
+        for latency in (10.0, 20.0, 30.0):
+            stats.observe(
+                "http://llm:8001", ok=True, status=200, latency_ms=latency,
+                series_count=5, parse_errors=1, truncated=False,
+            )
+        parsed = serve.parse_prometheus(stats.render())
+        by_name = {s["name"]: s for s in parsed["series"]}
+        self.assertEqual(by_name["llm_monitor_scrape_success_total"]["value"], 3)
+        self.assertEqual(by_name["llm_monitor_parse_errors_total"]["value"], 3)
+        self.assertEqual(by_name["llm_monitor_scrape_latency_ms"]["value"], 30.0)
+        self.assertEqual(by_name["llm_monitor_series_count"]["value"], 5)
+
+    def test_one_row_per_upstream_and_only_filtering(self):
+        stats = serve.ScrapeStats()
+        stats.observe("http://a:1", ok=True, status=200, latency_ms=1)
+        stats.observe("http://b:2", ok=True, status=200, latency_ms=2)
+        both = stats.render()
+        self.assertEqual(both.count('upstream="http://a:1"'), len(SELF_SERIES_NAMES) - 1)
+        only_b = serve.parse_prometheus(stats.render(only="http://b:2"))
+        upstreams = {s["labels"]["upstream"] for s in only_b["series"] if "upstream" in s["labels"]}
+        self.assertEqual(upstreams, {"http://b:2"})
+        self.assertIn("http://a:1", both)
+
+    def test_upstream_label_values_are_escaped(self):
+        stats = serve.ScrapeStats()
+        stats.observe('http://a:1/x"y', ok=True, status=200, latency_ms=1)
+        parsed = serve.parse_prometheus(stats.render())
+        upstreams = {s["labels"]["upstream"] for s in parsed["series"] if "upstream" in s["labels"]}
+        self.assertEqual(upstreams, {'http://a:1/x"y'})
+
+    def test_self_metric_names_use_underscores_and_are_prefixed(self):
+        for name, _kind, _help in serve.SELF_METRICS:
+            self.assertTrue(name.startswith(serve.SELF_METRIC_PREFIX), name)
+            self.assertNotIn(":", name)
+            self.assertNotIn("-", name)
+        # build_info is a gauge carrying a constant 1, per the ADR
+        kinds = {name: kind for name, kind, _help in serve.SELF_METRICS}
+        self.assertEqual(kinds["llm_monitor_build_info"], "gauge")
+        self.assertEqual(kinds["llm_monitor_scrape_success_total"], "counter")
+
+
+class RenderPassthroughTests(unittest.TestCase):
+    """Unit level: how the body is assembled."""
+
+    def render(self, body: bytes, **extra) -> bytes:
+        stats = serve.ScrapeStats()
+        result = dict({"body": body, "status": 200, "latency_ms": 1.0, "ok": True}, **extra)
+        return serve.render_passthrough(result, stats, "http://llm:8001")
+
+    def test_missing_final_newline_is_repaired(self):
+        out = self.render(b"llamacpp:requests_processing 2")
+        self.assertTrue(out.startswith(b"llamacpp:requests_processing 2\n"))
+
+    def test_existing_newline_is_not_doubled(self):
+        out = self.render(b"llamacpp:requests_processing 2\n")
+        self.assertFalse(out.startswith(b"llamacpp:requests_processing 2\n\n"))
+
+    def test_empty_upstream_body_still_answers_as_exposition(self):
+        out = self.render(b"")
+        self.assertEqual(out.count(b"\n\n"), 0)
+        parsed = serve.parse_prometheus(out.decode())
+        self.assertEqual(parsed["errors"], [])
+        self.assertIn("llm_monitor_build_info", out.decode())
+
+    def test_appended_block_is_marked_as_the_proxies_own(self):
+        out = self.render(b"a 1\n")
+        self.assertIn(b"# llm-monitor", out)
+        self.assertIn(serve.VERSION.encode(), out)
+
+    def test_truncated_result_is_visible_in_the_body(self):
+        out = self.render(b"a 1\n", truncated=True)
+        self.assertIn(b"truncated at", out)
+        self.assertEqual(serve.parse_prometheus(out.decode())["errors"], [])
 
 
 class ArgParsingTests(unittest.TestCase):

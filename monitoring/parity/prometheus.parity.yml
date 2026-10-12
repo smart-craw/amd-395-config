@@ -1,0 +1,55 @@
+# Prometheus config for the parity run (workspace-szw.11) — see PARITY.md.
+#
+# Deliberately NOT monitoring/prometheus/prometheus.yml: this one is throwaway,
+# takes its targets as flags from run_parity.sh (rendered into
+# runs/parity-prometheus.yml by sed on the placeholders below), and scrapes the
+# fixture doubles as well as the model server so the label-fan-out and NaN probes
+# have something to look at. Everything that has to agree with production does:
+#
+#   * scrape_interval 15s  — same as production, because the window a page and a
+#     rate window disagree by is a function of the scrape interval;
+#   * the production recording rules file, so `llm:*` exist here exactly as they
+#     do on the box and the panels' rule series are compared against real rules;
+#   * the same job name `llm-server`, so a panel's `$job` filter behaves the same.
+#
+# Start it with (run_parity.sh does this for you):
+#
+#   sed -e "s|@UPSTREAM@|http://llm.home:8080|;s|@HOST@|llm.home:8080|" \
+#       -e "s|@FANOUT@|127.0.0.1:8111|;s|@NAN@|127.0.0.1:8112|" \
+#       -e "s|@RESET@|127.0.0.1:8113|" \
+#       monitoring/parity/prometheus.parity.yml > runs/prometheus.yml
+#   prometheus --config.file=runs/prometheus.yml \
+#              --storage.tsdb.path=runs/tsdb --web.listen-address=127.0.0.1:9090
+
+global:
+  scrape_interval: 15s
+  scrape_timeout: 5s
+  evaluation_interval: 15s
+  external_labels:
+    box: strix-halo
+
+rule_files:
+  # ..relative to this file, i.e. the real rules, not a copy of them.
+  - ../prometheus/recording_rules.yml
+
+scrape_configs:
+  - job_name: llm-server
+    static_configs:
+      - targets: ["@HOST@"]
+        labels:
+          env: home
+          parity: "true"
+
+  # The doubles that make the fan-out, NaN and counter-reset probes real scrapes
+  # rather than hand-written numbers: monitor/tests/mock_upstream.py in `fanout`
+  # (one metric name, two `model` label sets), `nan` (NaN / +Inf under the healthy
+  # names) and `reset` (a counter that restarts every 45 s, which a live server is
+  # not obliged to do inside a measurement window).
+  - job_name: parity-fixtures
+    static_configs:
+      - targets: ["@FANOUT@"]
+        labels: {model: "fanout-a,fanout-b", parity_fixture: fanout}
+      - targets: ["@NAN@"]
+        labels: {model: "nan", parity_fixture: nan}
+      - targets: ["@RESET@"]
+        labels: {model: "reset", parity_fixture: reset}

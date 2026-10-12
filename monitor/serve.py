@@ -4,20 +4,33 @@
 Serves the static UI out of ``monitor/static/`` and, on the *same origin*,
 proxies a handful of read-only GETs to the model server:
 
-    GET /api/health   -> <upstream>/health
-    GET /api/models   -> <upstream>/v1/models
-    GET /api/cache    -> <upstream>/cache
-    GET /api/metrics  -> <upstream>/metrics  (+ parsed Prometheus series)
-    GET /api/config   -> active upstream + defaults (no upstream call)
+    GET /api/health        -> <upstream>/health
+    GET /api/models        -> <upstream>/v1/models
+    GET /api/cache         -> <upstream>/cache
+    GET /api/metrics       -> <upstream>/metrics  (+ parsed Prometheus series)
+    GET /api/config        -> active upstream + defaults (no upstream call)
+    GET /api/scrape-health -> <prometheus>/api/v1/targets (monitor the monitor)
+    GET /metrics           -> <upstream>/metrics, verbatim + llm_monitor_* self-metrics
+
+``GET /metrics`` is the plain-text scrape passthrough, the one route that is not a
+JSON envelope: it answers the exposition body the model server sent, byte for
+byte, with ``Content-Type: text/plain; version=0.0.4; charset=utf-8`` and the
+proxy's own ``llm_monitor_*`` series appended, so a real Prometheus can pull
+through here when it cannot reach the model server directly. The two-layer
+architecture (Prometheus/Grafana owns history; this page is the "right now" view)
+is decided in ``docs/adr/0001-prometheus-grafana-owns-metrics.md``, and the scrape
+job itself lives under ``monitoring/``. A body over ``MAX_BODY_BYTES`` is
+capped like every other upstream response and the truncation is said out loud in a
+comment line rather than hidden.
 
 The proxy exists because the model server (llama.cpp / vLLM style) does not send
 CORS headers, so a page served from another origin could not poll it directly.
 UI + API from one origin means no CORS problem at all.
 
-``/metrics`` is the one route that is not JSON: it answers the Prometheus text
-exposition format (``text/plain; version=0.0.4``). The raw text is left in
-``body`` exactly as the upstream said it, and the parsed form is added as an extra
-``metrics`` key so the dashboard does not have to ship a second parser::
+The ``/api/metrics`` route is the JSON-shaped twin of the passthrough: same
+upstream call, but the raw text is left in ``body`` exactly as the upstream said
+it and the parsed form is added as an extra ``metrics`` key so the dashboard does
+not have to ship a second parser::
 
     {"format": "prometheus", "count": 19, "truncated": false, "errors": [],
      "families": [{"name": "llamacpp:requests_processing", "type": "gauge",
@@ -36,11 +49,17 @@ and a populated ``error`` -- never a 500 that takes the dashboard down, and neve
 a hang: every upstream request is capped at 5 seconds wall-clock, whatever the
 upstream is doing (stalled, half-open, or dribbling bytes out forever).
 
-Each proxy route additionally accepts ``?url=<http(s) base>`` so the dashboard can
-re-point the endpoint selector live; anything that is not an absolute http(s) URL
-is refused with 400. That override lets the caller make the server fetch an
-arbitrary URL, which is exactly why the default bind address is loopback -- only
-pass ``--host 0.0.0.0`` on a network you trust the requesters on.
+Every proxy route (including the ``/metrics`` passthrough) additionally accepts
+``?url=<http(s) base>`` so the dashboard can re-point the endpoint selector live
+and one proxy can be scraped as several distinct targets; anything that is not an
+absolute http(s) URL is refused with 400. That override lets the caller make the
+server fetch an arbitrary URL -- and ``GET /metrics`` additionally leaks the whole
+exposition (model ids, traffic shape, prompt-cache behaviour) -- which is exactly
+why the default bind address is loopback. Only pass ``--host 0.0.0.0`` on a
+network you trust the requesters on.  The Grafana side of this box treats
+exposure the same way -- loopback by default, opt-in via
+``monitoring/compose.lan.yaml`` -- see
+``monitoring/README.md#publishing-the-dashboards-on-the-lan-opt-in``.
 
 Standard library only. No build step, no ``pip install``, no ``npm install``.
 
@@ -71,9 +90,19 @@ DEFAULT_UPSTREAM = "http://llm.home:8080"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8090
 
+#: Reported in llm_monitor_build_info so a broken monitor is at least a
+#: *versioned* broken monitor.
+VERSION = "1.1.0"
+
 #: Environment fallback, mirroring the env-configurable-upstream pattern used by
 #: BACKEND_SERVICE in qwen3.8-flash/docker-compose.yml.
 ENV_UPSTREAM = "LLM_MONITOR_UPSTREAM"
+
+#: Where the historical view lives. Neither is used for anything but links and
+#: the scrape-health read-out; both are opt-in (unset = "no Grafana / Prometheus
+#: on this box", which is a supported configuration, not a broken one).
+ENV_GRAFANA_URL = "LLM_MONITOR_GRAFANA_URL"
+ENV_PROMETHEUS_URL = "LLM_MONITOR_PROMETHEUS_URL"
 
 #: Hard cap per upstream request (connect + status line + body). The dashboard
 #: must never sit waiting on a wedged model server.
@@ -99,11 +128,45 @@ PROXY_ROUTES = {
     "/api/metrics": "/metrics",
 }
 
+#: The raw scrape passthrough (proxy path -> upstream path). Deliberately *not*
+#: part of PROXY_ROUTES: it answers plain text, not the JSON envelope, and it is
+#: the path Prometheus scrapes, so it has to stay out of the static-file tree.
+PASSTHROUGH_ROUTE = "/metrics"
+PASSTHROUGH_UPSTREAM_PATH = "/metrics"
+
+#: Exact response Content-Type of the passthrough (the exposition format's own
+#: spelling; Prometheus parses the body either way but the header is the
+#: contract the scrape job documents).
+PROMETHEUS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
+
 #: The upstream-side endpoints the UI should offer in its selector.
 PUBLIC_ENDPOINTS = ["/health", "/v1/models", "/cache", "/metrics"]
 
-#: The one route whose upstream payload is not JSON.
+#: The one /api route whose upstream payload is not JSON.
 METRICS_ROUTE = "/api/metrics"
+
+#: Prefix for this proxy's own series. Underscores (ours); the upstream's native
+#: colon-names are passed through untouched (ADR workspace-szw.1).
+SELF_METRIC_PREFIX = "llm_monitor_"
+#: Series name -> (type, help) for the self-metrics appended to /metrics.
+SELF_METRICS = (
+    ("llm_monitor_scrape_success_total", "counter",
+     "Passthrough scrapes of this upstream that returned exposition text."),
+    ("llm_monitor_scrape_ok", "gauge",
+     "1 when the most recent passthrough scrape of this upstream succeeded, else 0."),
+    ("llm_monitor_scrape_latency_ms", "gauge",
+     "Round-trip time of the most recent passthrough scrape, in milliseconds."),
+    ("llm_monitor_scrape_upstream_status", "gauge",
+     "Upstream HTTP status of the most recent passthrough scrape (0 = no answer)."),
+    ("llm_monitor_parse_errors_total", "counter",
+     "Exposition lines this proxy could not parse since it started."),
+    ("llm_monitor_parse_truncated", "gauge",
+     "1 when the last scrape hit the series cap and was cut short."),
+    ("llm_monitor_series_count", "gauge",
+     "Series kept from the last successful scrape of this upstream."),
+    ("llm_monitor_build_info", "gauge",
+     "Constant 1; labels carry the monitor version answering this route."),
+)
 
 # --- Prometheus text exposition format -------------------------------------
 #
@@ -319,6 +382,101 @@ def attach_metrics(result: dict) -> dict:
     return result
 
 
+def escape_label_value(value: str) -> str:
+    """Escape a label value the way the exposition format demands."""
+    return (
+        str(value).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+    )
+
+
+class ScrapeStats:
+    """The proxy's own series, so scrape health is visible as PromQL.
+
+    Keyed by the upstream base URL, because one proxy can front several servers
+    (``/metrics?url=...``) and each is scraped as its own target. Counters are
+    process-lifetime (they reset when the monitor restarts, which is exactly what
+    a counter reset means to PromQL); gauges describe the most recent scrape.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._by_upstream: dict[str, dict] = {}
+
+    def observe(
+        self,
+        upstream: str,
+        *,
+        ok: bool,
+        status: int | None,
+        latency_ms: float,
+        series_count: int | None = None,
+        parse_errors: int | None = None,
+        truncated: bool | None = None,
+    ) -> None:
+        with self._lock:
+            state = self._by_upstream.setdefault(
+                upstream,
+                {
+                    "success_total": 0,
+                    "parse_errors_total": 0,
+                },
+            )
+            state["ok"] = 1 if ok else 0
+            state["latency_ms"] = round(float(latency_ms), 3)
+            state["status"] = int(status) if status is not None else 0
+            if ok:
+                state["success_total"] += 1
+            if parse_errors:
+                state["parse_errors_total"] += int(parse_errors)
+            if series_count is not None:
+                state["series_count"] = int(series_count)
+            if truncated is not None:
+                state["truncated"] = 1 if truncated else 0
+
+    def snapshot(self) -> dict[str, dict]:
+        with self._lock:
+            return {k: dict(v) for k, v in self._by_upstream.items()}
+
+    def render(self, only: str | None = None) -> str:
+        """Render the self-metrics as exposition text (never empty).
+
+        ``only`` limits the output to one upstream: a Prometheus scrape of
+        ``/metrics?url=A`` should not carry the numbers of servers B and C, or
+        every ``sum(llm_monitor_*)`` would count them once per target.
+        """
+        snapshot = self.snapshot()
+        if only is not None:
+            snapshot = {k: v for k, v in snapshot.items() if k == only}
+        lines: list[str] = []
+        for name, kind, help_text in SELF_METRICS:
+            lines.append(f"# HELP {name} {help_text}")
+            lines.append(f"# TYPE {name} {kind}")
+            if name == "llm_monitor_build_info":
+                lines.append(
+                    'llm_monitor_build_info{version="%s"} 1' % escape_label_value(VERSION)
+                )
+                continue
+            for upstream, state in sorted(snapshot.items()):
+                label = 'upstream="%s"' % escape_label_value(upstream)
+                if name == "llm_monitor_scrape_success_total":
+                    value = state.get("success_total", 0)
+                elif name == "llm_monitor_scrape_ok":
+                    value = state.get("ok", 0)
+                elif name == "llm_monitor_scrape_latency_ms":
+                    value = state.get("latency_ms", 0)
+                elif name == "llm_monitor_scrape_upstream_status":
+                    value = state.get("status", 0)
+                elif name == "llm_monitor_parse_errors_total":
+                    value = state.get("parse_errors_total", 0)
+                elif name == "llm_monitor_parse_truncated":
+                    value = state.get("truncated", 0)
+                else:  # llm_monitor_series_count
+                    value = state.get("series_count", 0)
+                lines.append(f"{name}{{{label}}} {value}")
+        lines.append("")
+        return "\n".join(lines)
+
+
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
@@ -371,13 +529,20 @@ def describe_bytes(raw: bytes, content_type: str) -> object:
         return text
 
 
-def read_body(response, *, deadline: float, timeout: float) -> bytes:
+def read_body(
+    response, *, deadline: float, timeout: float, cut: list | None = None
+) -> bytes:
     """Drain ``response`` honouring ``deadline`` and :data:`MAX_BODY_BYTES`.
 
     ``urlopen(timeout=...)`` bounds every *single* socket operation, not the
     request as a whole, so a server that trickles a byte every few seconds could
     keep a request open forever. Reading in chunks and re-checking the wall-clock
     deadline between reads keeps the per-request cap honest.
+
+    ``cut`` (optional) is a list the size cap appends ``True`` to, so a caller can
+    tell "the whole body" from "the first :data:`MAX_BODY_BYTES` of it" -- the
+    passthrough uses that to say so out loud instead of handing out a torn body
+    that looks complete.
     """
     # read1() returns as soon as *any* data is available; read(n) happily blocks
     # until it has n bytes (or the stream ends), which for a chunked body that
@@ -394,6 +559,8 @@ def read_body(response, *, deadline: float, timeout: float) -> bytes:
         chunks.append(chunk)
         total += len(chunk)
         if total >= MAX_BODY_BYTES:
+            if cut is not None:
+                cut.append(True)
             return b"".join(chunks)[:MAX_BODY_BYTES]
 
 
@@ -545,12 +712,179 @@ def proxy_get(url: str, *, timeout: float = UPSTREAM_TIMEOUT_SECONDS) -> dict:
     )
 
 
-def config_payload(upstream: str) -> dict:
+def fetch_raw(url: str, *, deadline: float, timeout: float = UPSTREAM_TIMEOUT_SECONDS) -> dict:
+    """GET ``url`` and hand back the *bytes* (no JSON envelope, no decoding).
+
+    The passthrough has to be byte-identical to what the model server answered --
+    ``describe_bytes`` would turn the exposition text into a Python str and the
+    envelope would wrap it in JSON, and Prometheus could eat neither.
+    """
+    started = time.monotonic()
+    cut: list[bool] = []
+
+    def elapsed_ms() -> float:
+        return (time.monotonic() - started) * 1000.0
+
+    req = urlrequest.Request(
+        url,
+        method="GET",
+        headers={
+            "Accept": "text/plain, */*",
+            "User-Agent": USER_AGENT,
+            "Connection": "close",
+        },
+    )
+
+    def outcome(*, ok, status, raw, error, content_type=""):
+        return {
+            "ok": bool(ok),
+            "url": url,
+            "status": int(status) if status is not None else None,
+            "latency_ms": elapsed_ms(),
+            "content_type": content_type,
+            "body": raw or b"",
+            "error": error,
+            "truncated": bool(cut),
+        }
+
+    try:
+        with urlrequest.urlopen(req, timeout=timeout) as resp:
+            status = int(resp.status)
+            content_type = resp.headers.get("Content-Type") or ""
+            raw = read_body(resp, deadline=deadline, timeout=timeout, cut=cut)
+        if 200 <= status < 400:
+            return outcome(
+                ok=True, status=status, raw=raw, error=None, content_type=content_type
+            )
+        return outcome(
+            ok=False,
+            status=status,
+            raw=b"",
+            error=f"HTTP {status}",
+            content_type=content_type,
+        )
+    except urlerror.HTTPError as exc:  # subclass of URLError: must come first
+        return outcome(
+            ok=False,
+            status=exc.code,
+            raw=b"",
+            error=f"HTTP {exc.code} {exc.reason}",
+            content_type=(exc.headers.get("Content-Type") if exc.headers else "") or "",
+        )
+    except (TimeoutError, urlerror.URLError) as exc:
+        reason = getattr(exc, "reason", exc)
+        if isinstance(exc, TimeoutError) or "timed out" in str(reason).lower():
+            message = f"timed out after {timeout:g}s"
+        else:
+            message = f"unreachable: {reason}"
+        return outcome(ok=False, status=None, raw=b"", error=message)
+    except Exception as exc:  # noqa: BLE001 - the scrape fails, the proxy does not
+        return outcome(
+            ok=False, status=None, raw=b"", error=f"{type(exc).__name__}: {exc}"
+        )
+
+
+def proxy_raw(url: str, *, timeout: float = UPSTREAM_TIMEOUT_SECONDS) -> dict:
+    """Raw-bytes twin of :func:`proxy_get`, with the same hard cap.
+
+    Same thread-and-join trick, so a wedged upstream cannot hold a scrape open
+    for longer than ``timeout`` seconds; the caller turns a failure into an
+    HTTP 502, which is what makes Prometheus record a scrape failure instead of
+    parsing garbage as a sample set.
+    """
+    started = time.monotonic()
+    deadline = started + timeout
+    outcome: dict[str, dict] = {}
+
+    def worker() -> None:
+        try:
+            outcome["result"] = fetch_raw(url, deadline=deadline, timeout=timeout)
+        except Exception as exc:  # noqa: BLE001
+            outcome["result"] = {
+                "ok": False,
+                "url": url,
+                "status": None,
+                "latency_ms": (time.monotonic() - started) * 1000.0,
+                "content_type": "",
+                "body": b"",
+                "error": f"{type(exc).__name__}: {exc}",
+                "truncated": False,
+            }
+
+    thread = threading.Thread(target=worker, name="llm-monitor-scrape", daemon=True)
+    thread.start()
+    thread.join(timeout)
+    if "result" in outcome:
+        return outcome["result"]
+
+    return {
+        "ok": False,
+        "url": url,
+        "status": None,
+        "latency_ms": (time.monotonic() - started) * 1000.0,
+        "content_type": "",
+        "body": b"",
+        "error": f"timed out after {timeout:g}s",
+        "truncated": False,
+    }
+
+
+def render_passthrough(result: dict, stats: "ScrapeStats", upstream: str) -> bytes:
+    """Upstream exposition bytes + the proxy's own series, as one body.
+
+    The upstream text is copied verbatim (only a missing final newline is
+    repaired, which the format requires anyway); the ``llm_monitor_*`` block is
+    appended after it. Nothing is renamed or relabelled: the monitor's own
+    numbers are additional series, never edits of the server's.
+
+    The ``upstream`` label is the base URL the operator addressed (``--url`` or
+    ``?url=``), not the full ``.../metrics`` URL, so it matches how the same
+    server is named everywhere else in the tooling.
+    """
+    raw = result.get("body") or b""
+    if not isinstance(raw, bytes):
+        raw = str(raw).encode("utf-8", errors="replace")
+    text = raw.decode("utf-8", errors="replace")
+    parsed = parse_prometheus(text) if text.strip() else None
+    stats.observe(
+        upstream,
+        ok=True,
+        status=result.get("status"),
+        latency_ms=result.get("latency_ms") or 0.0,
+        series_count=None if parsed is None else parsed["count"],
+        parse_errors=None if parsed is None else len(parsed["errors"]),
+        truncated=None if parsed is None else parsed["truncated"],
+    )
+    if raw and not raw.endswith(b"\n"):
+        raw += b"\n"
+    if result.get("truncated"):
+        # A body cut off at the cap is not the exposition: say so in a comment
+        # line (which every Prometheus parser ignores) rather than let a torn
+        # scrape look complete.
+        raw += (
+            b"# llm-monitor: upstream body truncated at "
+            + str(MAX_BODY_BYTES).encode("ascii")
+            + b" bytes; this scrape is incomplete\n"
+        )
+    marker = (
+        b"# llm-monitor "
+        + VERSION.encode("ascii")
+        + b" self-metrics (appended by monitor/serve.py, not served by the upstream)\n"
+    )
+    return raw + marker + stats.render(only=upstream).encode("utf-8")
+
+
+def config_payload(upstream: str, *, grafana_url: str = "", prometheus_url: str = "") -> dict:
     """Body of /api/config: lets the UI render the config field unhardcoded."""
     return {
         "upstream": upstream,
         "endpoints": list(PUBLIC_ENDPOINTS),
         "default_upstream": DEFAULT_UPSTREAM,
+        # Additive keys (the three above are unchanged for back-compat): where
+        # the historical view lives, and which version of the monitor this is.
+        "grafana_url": grafana_url,
+        "prometheus_url": prometheus_url,
+        "version": VERSION,
     }
 
 
@@ -589,8 +923,12 @@ class MonitorHandler(SimpleHTTPRequestHandler):
         try:
             if path == "/api/config":
                 self._send_config(include_body)
+            elif path == "/api/scrape-health":
+                self._send_scrape_health(include_body)
             elif path in PROXY_ROUTES:
                 self._send_proxy(path, parts.query, include_body)
+            elif path == PASSTHROUGH_ROUTE:
+                self._send_passthrough(parts.query, include_body)
             elif path.startswith("/api") or path.startswith("/api/"):
                 self._send_json(
                     HTTPStatus.NOT_FOUND,
@@ -633,8 +971,185 @@ class MonitorHandler(SimpleHTTPRequestHandler):
     def upstream(self) -> str:
         return getattr(self.server, "monitor_upstream", DEFAULT_UPSTREAM)
 
+    @property
+    def grafana_url(self) -> str:
+        return getattr(self.server, "monitor_grafana_url", "") or ""
+
+    @property
+    def prometheus_url(self) -> str:
+        return getattr(self.server, "monitor_prometheus_url", "") or ""
+
+    @property
+    def scrape_stats(self) -> ScrapeStats:
+        stats = getattr(self.server, "monitor_scrape_stats", None)
+        if stats is None:  # a bare ThreadingHTTPServer (tests) still answers
+            stats = ScrapeStats()
+            self.server.monitor_scrape_stats = stats
+        return stats
+
+    def _send_text(
+        self, status: HTTPStatus, text: str, *, content_type: str, include_body: bool
+    ) -> None:
+        data = text.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        if include_body:
+            self.wfile.write(data)
+
+    def _resolved_upstream(self, query: str) -> tuple[str | None, str | None]:
+        """``?url=`` override + the server default, with validation.
+
+        Returns ``(upstream, error)``; exactly one of the two is non-None.
+        """
+        params = urlparse.parse_qs(query, keep_blank_values=True)
+        override = params.get("url", [""])[0]
+        try:
+            return (
+                normalize_upstream(override) if override.strip() else self.upstream,
+                None,
+            )
+        except UpstreamError as exc:
+            return None, f"invalid ?url= override: {exc}"
+
+    def _send_scrape_health(self, include_body: bool) -> None:
+        """Thin proxy of ``<prometheus>/api/v1/targets``: monitor the monitor.
+
+        The browser must not talk to Prometheus directly (that reintroduces the
+        CORS problem this proxy exists to solve), so the page asks *this* server
+        and gets the envelope plus a ``scrape_health`` digest. Prometheus being
+        down is an ``ok:false`` envelope, never a 500.
+        """
+        base = self.prometheus_url
+        digest = {
+            "configured": bool(base),
+            "reachable": False,
+            "prometheus_url": base or None,
+            "targets_total": 0,
+            "targets_up": 0,
+            "jobs": [],
+        }
+        if not base:
+            payload = envelope(
+                ok=True,
+                url=None,
+                status=None,
+                latency_ms=0.0,
+                content_type="application/json",
+                body=dict(digest, error=None),
+                error=None,
+            )
+            payload["scrape_health"] = payload["body"]
+            self._send_json(HTTPStatus.OK, payload, include_body)
+            return
+
+        try:
+            url = target_url(base, "/api/v1/targets")
+        except UpstreamError as exc:
+            payload = envelope(
+                ok=False,
+                url=base,
+                status=int(HTTPStatus.BAD_REQUEST),
+                latency_ms=0.0,
+                content_type="application/json",
+                body=dict(digest, error=str(exc)),
+                error=f"invalid prometheus URL: {exc}",
+            )
+            payload["scrape_health"] = payload["body"]
+            self._send_json(HTTPStatus.OK, payload, include_body)
+            return
+
+        result = proxy_get(url)
+        body = result.get("body")
+        targets = []
+        if isinstance(body, dict):
+            data = body.get("data")
+            if isinstance(data, dict) and isinstance(data.get("activeTargets"), list):
+                targets = [t for t in data["activeTargets"] if isinstance(t, dict)]
+        jobs = []
+        for target in targets:
+            labels = target.get("labels") if isinstance(target.get("labels"), dict) else {}
+            jobs.append(
+                {
+                    "job": str(labels.get("job", "")),
+                    "instance": str(labels.get("instance", "")),
+                    "health": str(target.get("health") or "unknown"),
+                    "last_error": str(target.get("lastError") or ""),
+                }
+            )
+        digest["targets_total"] = len(jobs)
+        digest["targets_up"] = sum(1 for j in jobs if j["health"] == "up")
+        digest["reachable"] = bool(result.get("ok"))
+        digest["error"] = result.get("error")
+        payload = envelope(
+            ok=bool(result.get("ok")),
+            url=result.get("url"),
+            status=result.get("status"),
+            latency_ms=result.get("latency_ms") or 0.0,
+            content_type=result.get("content_type") or "application/json",
+            body=digest,
+            error=result.get("error"),
+        )
+        payload["scrape_health"] = digest
+        self._send_json(HTTPStatus.OK, payload, include_body)
+
+    def _send_passthrough(self, query: str, include_body: bool) -> None:
+        """``GET /metrics``: the raw scrape passthrough, plain text end to end.
+
+        Prometheus scrapes this URL, so it must never see the JSON envelope, an
+        HTML error page or a 200-with-garbage: a failed scrape answers 502 with
+        a one-line reason and Prometheus records a scrape failure.
+        """
+        upstream, error = self._resolved_upstream(query)
+        if upstream is None:
+            self.scrape_stats.observe(
+                query[:200] or "(invalid)",
+                ok=False,
+                status=int(HTTPStatus.BAD_REQUEST),
+                latency_ms=0.0,
+            )
+            self._send_text(
+                HTTPStatus.BAD_REQUEST,
+                f"llm-monitor passthrough: {error}\n",
+                content_type="text/plain; charset=utf-8",
+                include_body=include_body,
+            )
+            return
+
+        url = target_url(upstream, PASSTHROUGH_UPSTREAM_PATH)
+        result = proxy_raw(url)
+        if not result["ok"]:
+            self.scrape_stats.observe(
+                upstream,
+                ok=False,
+                status=result.get("status"),
+                latency_ms=result.get("latency_ms") or 0.0,
+            )
+            reason = f"llm-monitor passthrough: GET {url} failed -> {result.get('error')}\n"
+            self._send_text(
+                HTTPStatus.BAD_GATEWAY,
+                reason,
+                content_type="text/plain; charset=utf-8",
+                include_body=include_body,
+            )
+            return
+
+        body = render_passthrough(result, self.scrape_stats, upstream)
+        self._send_text(
+            HTTPStatus.OK,
+            body.decode("utf-8", errors="replace"),
+            content_type=PROMETHEUS_CONTENT_TYPE,
+            include_body=include_body,
+        )
+
     def _send_config(self, include_body: bool) -> None:
-        config = config_payload(self.upstream)
+        config = config_payload(
+            self.upstream,
+            grafana_url=self.grafana_url,
+            prometheus_url=self.prometheus_url,
+        )
         payload = envelope(
             ok=True,
             url=None,
@@ -722,6 +1237,29 @@ class MonitorServer(ThreadingHTTPServer):
     daemon_threads = True  # a stuck request cannot block shutdown
     allow_reuse_address = True
     monitor_upstream = DEFAULT_UPSTREAM
+    monitor_grafana_url = ""
+    monitor_prometheus_url = ""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Shared across handler threads: one row of self-metrics per upstream.
+        self.monitor_scrape_stats = ScrapeStats()
+
+
+def resolve_optional_url(cli_value: str | None, env_name: str) -> str:
+    """Validate an opt-in URL (Grafana / Prometheus); "" means "not configured".
+
+    Same validation as the model-server upstream (absolute http(s), host
+    required), so a typo fails loudly at startup instead of producing dead links
+    in the page. CLI flag beats env, mirroring :func:`resolve_upstream`.
+    """
+    for raw, source in ((cli_value, "flag"), (os.environ.get(env_name), f"env {env_name}")):
+        if raw and raw.strip():
+            try:
+                return normalize_upstream(raw)
+            except UpstreamError as exc:
+                raise SystemExit(f"error: invalid URL from {source}: {exc}") from exc
+    return ""
 
 
 def resolve_upstream(cli_url: str | None) -> tuple[str, str]:
@@ -738,6 +1276,8 @@ def resolve_upstream(cli_url: str | None) -> tuple[str, str]:
         raise SystemExit(f"error: invalid upstream from {source}: {exc}") from exc
 
 
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="serve.py",
@@ -746,17 +1286,34 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "dashboard (stdlib only)."
         ),
         epilog=(
-            "Proxy routes: /api/health -> <upstream>/health, "
-            "/api/models -> <upstream>/v1/models,\n"
-            "              /api/cache -> <upstream>/cache, "
-            "/api/metrics -> <upstream>/metrics (Prometheus text, also\n"
-            "                                returned parsed as JSON),\n"
-            "              /api/config -> active config (no upstream call).\n\n"
+            "Proxy routes (JSON envelope): /api/health -> <upstream>/health, "
+            "/api/models\n"
+            "  -> <upstream>/v1/models, /api/cache -> <upstream>/cache, "
+            "/api/metrics\n"
+            "  -> <upstream>/metrics (Prometheus text, also returned parsed as\n"
+            "     JSON), /api/config -> active config (no upstream call),\n"
+            "  /api/scrape-health -> <prometheus>/api/v1/targets digest.\n\n"
+            "Scrape passthrough (plain text, NOT an envelope):\n"
+            "  GET /metrics -> <upstream>/metrics verbatim + llm_monitor_*\n"
+            "     self-metrics; a non-2xx upstream answers 502 with a one-line\n"
+            "     reason so Prometheus records a scrape failure.\n"
+            "     Appended: llm_monitor_scrape_success_total, llm_monitor_scrape_ok,\n"
+            "     llm_monitor_scrape_latency_ms,\n"
+            "     llm_monitor_scrape_upstream_status,\n"
+            "     llm_monitor_parse_errors_total, llm_monitor_parse_truncated,\n"
+            "     llm_monitor_series_count, llm_monitor_build_info{version=\"...\"}.\n\n"
             "Each proxy route accepts ?url=<http(s) base> to override the\n"
-            "upstream for that one request.\n\n"
+            "upstream for that one request (so /metrics?url=A and\n"
+            "/metrics?url=B can be scraped as separate targets).\n\n"
             f"Upstream precedence: --url > ${ENV_UPSTREAM} > {DEFAULT_UPSTREAM}\n\n"
+            "INFORMATION DISCLOSURE: ?url= lets a caller make this server fetch\n"
+            "an arbitrary URL, and GET /metrics hands out the whole exposition\n"
+            "(model ids, traffic shape, prompt-cache behaviour). That is why the\n"
+            "bind address defaults to loopback; --host 0.0.0.0 is a deliberate\n"
+            "choice about who on your network may read this data.\n\n"
             "Example:\n"
-            "  python3 monitor/serve.py --url http://llm.home:8001 --port 8090\n"
+            "  python3 monitor/serve.py --url http://llm.home:8001 --port 8090 \\\n"
+            "      --grafana-url http://localhost:3000 --prometheus-url http://localhost:9090\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -766,9 +1323,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=f"upstream base URL (env ${ENV_UPSTREAM}, default {DEFAULT_UPSTREAM})",
     )
     parser.add_argument(
+        "--grafana-url",
+        default=None,
+        help=(
+            "base URL of the Grafana that owns the historical view; enables the "
+            "dashboard deep links on the metrics card "
+            f"(env ${ENV_GRAFANA_URL}, default: unset = no links)"
+        ),
+    )
+    parser.add_argument(
+        "--prometheus-url",
+        default=None,
+        help=(
+            "base URL of the Prometheus scraping this box; enables the "
+            "scrape-health read-out, proxied so the page never calls "
+            f"Prometheus directly (env ${ENV_PROMETHEUS_URL}, default: unset)"
+        ),
+    )
+    parser.add_argument(
         "--host",
         default=DEFAULT_HOST,
-        help=f"bind address (default {DEFAULT_HOST})",
+        help=(
+            f"bind address (default {DEFAULT_HOST}, loopback; --host 0.0.0.0 is an "
+            "information-disclosure decision -- see INFORMATION DISCLOSURE below)"
+        ),
     )
     parser.add_argument(
         "--port",
@@ -782,13 +1360,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     upstream, source = resolve_upstream(args.url)
+    grafana_url = resolve_optional_url(args.grafana_url, ENV_GRAFANA_URL)
+    prometheus_url = resolve_optional_url(args.prometheus_url, ENV_PROMETHEUS_URL)
 
     server = MonitorServer((args.host, args.port), MonitorHandler)
     server.monitor_upstream = upstream
+    server.monitor_grafana_url = grafana_url
+    server.monitor_prometheus_url = prometheus_url
 
+    extras = []
+    if grafana_url:
+        extras.append(f"grafana {grafana_url}")
+    if prometheus_url:
+        extras.append(f"prometheus {prometheus_url}")
     print(
         f"llm-monitor listening on http://{args.host}:{args.port} "
-        f"(upstream {upstream} via {source})",
+        f"(upstream {upstream} via {source})"
+        + ("" if not extras else " [" + ", ".join(extras) + "]"),
         file=sys.stderr,
         flush=True,
     )

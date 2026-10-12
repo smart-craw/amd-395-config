@@ -27,7 +27,7 @@
         <path d="M5 21l6-8 5 5 4-6 7 9" class="brand-line"></path>
       </svg>
       <span class="brand-name">llm&nbsp;monitor</span>
-      <span class="brand-sub">vLLM / llama.cpp</span>
+      <span class="brand-sub">vLLM / llama.cpp · live status</span>
     </div>
 
     <div class="status-cluster">
@@ -43,6 +43,10 @@
         <span id="last-updated">never updated</span>
         <span class="dot-sep" aria-hidden="true">·</span>
         <span id="next-poll">—</span>
+        <span class="dot-sep" aria-hidden="true">·</span>
+        <span id="scrape-health" class="scrape-health scrape-health-off">history: not configured</span>
+        <span class="dot-sep" aria-hidden="true">·</span>
+        <a id="grafana-home" class="history-link" href="#" hidden rel="noreferrer noopener">open Grafana</a>
       </p>
     </div>
   </header>
@@ -241,13 +245,22 @@
       <article class="card card-wide" id="card-metrics" aria-labelledby="metrics-title">
         <header class="card-head">
           <div class="card-heading">
-            <h2 id="metrics-title">Metrics</h2>
+            <h2 id="metrics-title">Metrics <span class="live-tag" title="a live scrape, not a history">live</span></h2>
             <code class="card-path">/metrics</code>
           </div>
           <span id="metrics-badge" class="badge badge-neutral">—</span>
         </header>
 
         <div class="card-body">
+          <!-- Grafana owns history (ADR 0001). The links are deep links into the
+               provisioned dashboard, built from /api/config's grafana_url; with no
+               Grafana configured the muted hint explains what this page is not. -->
+          <div class="grafana-links" id="metrics-grafana-links" hidden>
+            <span class="grafana-links-key">history in Grafana</span>
+            <nav class="grafana-links-nav" id="metrics-grafana-nav" aria-label="Grafana panels for this server"></nav>
+          </div>
+          <p id="metrics-grafana-hint" class="grafana-hint" hidden></p>
+
           <div class="gauge">
             <div class="gauge-top">
               <span id="metrics-gauge-label" class="gauge-label">kv cache</span>
@@ -264,11 +277,11 @@
 
           <div class="chart">
             <div class="chart-head">
-              <span class="chart-title">generate tok/s</span>
+              <span class="chart-title">generate tok/s <span class="chart-scope">this tab only</span></span>
               <span id="metrics-throughput-stats" class="chart-stats num">awaiting data</span>
             </div>
             <svg id="metrics-throughput" class="spark" viewBox="0 0 300 60" preserveAspectRatio="none"
-                 role="img" aria-label="rolling generation throughput history from /metrics"></svg>
+                 role="img" aria-label="rolling generation throughput history for this browser tab from /metrics"></svg>
           </div>
 
           <dl class="kv" id="metrics-kv"></dl>
@@ -301,6 +314,8 @@
 
     <footer class="page-foot">
       <span>served by <code>monitor/serve.py</code> — same-origin proxy, no external assets</span>
+      <span id="foot-scope">live status only: every number here is the last scrape or a
+        few minutes of this tab. Windowed rates, percentiles and history are Grafana's job.</span>
       <span id="foot-uptime" class="num"></span>
     </footer>
   </main>

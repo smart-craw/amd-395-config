@@ -1,0 +1,39 @@
+# Minimal Alertmanager routing: local, single receiver, no outbound network.
+#
+# Alertmanager is NOT part of the default stack (see README: "Alertmanager is
+# deliberately not deployed"). Copy this to alertmanager.yml, uncomment the
+# service block in compose.yaml, and uncomment `rule_files`' alerting section in
+# prometheus.yml when you decide that this box may notify you somewhere.
+#
+# The `webhook_configs` entry below points at loopback on purpose: a real receiver
+# (email smarthost, Telegram, Slack, PagerDuty) is an outbound-network dependency
+# the ADR rules against by default, so the decision to add one is deliberate and
+# belongs in its own review. Until then, the receiver just records that an alert
+# fired — the box keeps the notification local.
+
+global:
+  resolve_timeout: 5m
+
+route:
+  # Group the KV/queue alerts together: they are the same incident twice.
+  group_by: ["alertname", "instance"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 3h
+  receiver: local
+
+receivers:
+  - name: local
+    webhook_configs:
+      - url: http://127.0.0.1:9095/hook
+        send_resolved: true
+
+inhibit_rules:
+  # A dead server already explains every pressure alert about it.
+  - source_matchers: ['alertname = "LLMServerDown"']
+    target_matchers: ['alertname =~ "LLMKVCachePressure.*|LLMQueueing|LLMDecodeThroughputCollapse"']
+    equal: ["instance"]
+  # Critical KV makes the warning redundant.
+  - source_matchers: ['alertname = "LLMKVCachePressureCritical"']
+    target_matchers: ['alertname = "LLMKVCachePressureWarn"']
+    equal: ["instance"]

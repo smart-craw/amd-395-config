@@ -71,8 +71,27 @@
   ];
   const DEFAULT_POLL_MS = 5000;
 
-  /** ~60 latency samples kept per endpoint, in memory only. */
+  /** ~60 latency samples kept per endpoint, in memory only.
+   *
+   * This is the whole storage budget of the page, and it is why the traces can only
+   * answer "what has THIS TAB been seeing" (~15 min at the 15s poll). Windowed
+   * rates, percentiles and anything older than the tab live in Prometheus/Grafana —
+   * see docs/adr/0001-prometheus-grafana-owns-metrics.md. Labels on the page say so.
+   */
   const HISTORY_SAMPLES = 60;
+
+  /** Grafana deep links: panel ids reserved by ADR 0001 C4. Do not renumber them
+   *  here if the dashboard changes — the dashboard's ids are the contract. */
+  const GRAFANA_PANELS = [
+    { id: 1, label: "decode" },
+    { id: 2, label: "prompt" },
+    { id: 3, label: "TTFT p99" },
+    { id: 4, label: "KV pressure" },
+    { id: 5, label: "queue" },
+    { id: 6, label: "cache & spec" },
+    { id: 7, label: "scrape health" },
+  ];
+  const GRAFANA_DASHBOARD_PATH = "/d/llm-server/llm-server";
   /** A card goes "stale" once its last success is older than 3 poll intervals. */
   const STALE_FACTOR = 3;
 
@@ -230,6 +249,13 @@
     upstream: "",
     /** what /api/config reports as the server-side default */
     configUpstream: "",
+    /** /api/config extras (ADR 0001 C4/C6): empty means "not configured" */
+    grafanaUrl: "",
+    prometheusUrl: "",
+    monitorVersion: "",
+    /** last /api/scrape-health digest, or null when Prometheus is not configured */
+    scrapeHealth: null,
+    scrapeHealthError: "",
     pollMs: DEFAULT_POLL_MS,
     /** bumped whenever the target changes so in-flight responses can be dropped */
     generation: 0,
@@ -259,8 +285,7 @@
       // metrics card only:
       metrics: null, // parsed scrape from the last poll
       lastMetrics: null, // last scrape that parsed, for degraded renders
-      rateHistory: [], // generation tok/s samples
-      rateBase: null, // previous counter sample, for the tok/s fallback
+      rateHistory: [], // generation tok/s samples (the server's own gauge)
       notServed: false, // optional route answered 404: this server has no such endpoint
       note: null, // muted one-liner next to the error strip
     };
@@ -282,6 +307,11 @@
     banner: $("#banner"),
     bannerText: $("#banner-text"),
     footUptime: $("#foot-uptime"),
+    scrapeHealth: $("#scrape-health"),
+    grafanaHome: $("#grafana-home"),
+    grafanaLinks: $("#metrics-grafana-links"),
+    grafanaNav: $("#metrics-grafana-nav"),
+    grafanaHint: $("#metrics-grafana-hint"),
     cards: {},
   };
 
@@ -742,9 +772,11 @@
     const current = samples[samples.length - 1];
     stats.textContent =
       samples.length < 2
-        ? "now " + fmt(current) + " \u00b7 1 sample"
-        : "min " + fmt(lo0) + " \u00b7 max " + fmt(hi0) +
-          " \u00b7 now " + fmt(current) + " \u00b7 " + samples.length + " samples";
+        ? "now " + fmt(current) + " \u00b7 1 sample in this tab"
+        : "min " + fmt(lo0) + " \u00b7 max " + fmt(hi0) + " \u00b7 now " + fmt(current) +
+          // "in this tab", not "history": the buffer is HISTORY_SAMPLES polls long and
+          // dies with the page. Grafana is where history lives (ADR 0001).
+          " \u00b7 " + samples.length + " samples in this tab";
   }
 
   /** Card chrome shared by all cards: error strip + retry, failure pulse, badge tone. */
@@ -943,33 +975,48 @@
   //   env.body    "llamacpp:requests_processing 0\n…"      (raw panel, verbatim)
   //   env.metrics {format, count, truncated, errors, families, series}
   //
-  // Nothing here assumes a metric exists. llama.cpp, vLLM and the halogen router
-  // answer with different sets, so every tile looks its metric up by the exact
-  // name this box uses, falls back to a name pattern, and is left out when
-  // neither matches. If the parse found nothing the card still shows the raw
-  // text: never blank, never a guess.
+  // Nothing here assumes a metric exists. Every tile looks its metric up by the exact
+  // name this box uses and is left out when that name is absent; if the parse found
+  // nothing at all the card still shows the raw text — never blank, never a guess.
 
   /**
-   * What each tile wants. `exact` is a metric name observed on
-   * http://llm.home:8081/metrics; `fuzzy` is the best-effort match for a server
-   * that names the same thing differently.
+   * What each tile reads: one entry per figure, one exact metric name each, as
+   * observed on this box's own server (monitor/README.md, "Why /metrics is parsed
+   * server-side").
+   *
+   * PARITY (workspace-szw.11, monitoring/PARITY.md): this table used to carry a
+   * best-effort name regex per signal, and the page used to *compute* draft
+   * acceptance, prompt-cache hit ratio and lifetime tokens/s by dividing one
+   * instantaneous counter snapshot by another. All of that is gone, and the paired
+   * page-vs-Grafana run is why: every figure here was compared against the
+   * dashboard's own expression over the same scrape, and each one either matched a
+   * Grafana panel (so the browser arithmetic was redundant — the panels and the
+   * `llm:*` recording rules do it with a real window, counter-reset handling and
+   * promtool tests) or was a raw gauge with no arithmetic in it at all.
+   *
+   * Which leaves these rules, stricter than the ones they replace:
+   *
+   *   1. **No derived figures.** A ratio, a rate, a difference, an average: those are
+   *      PromQL's job (ADR 0001). Add a tile only for a number this box publishes that
+   *      Grafana does not already show — and label which kind of number it is.
+   *   2. **No name-drift regexes.** A server family that spells things differently
+   *      gets a line in monitoring/prometheus/recording_rules.yml, which promtool can
+   *      check and an alert can read. A regex in the browser is re-downloaded on every
+   *      paint, is invisible to alerting, and matches names nobody reviewed.
+   *   3. **A tile whose metric is absent is absent, not zero.** Same rule as the rest
+   *      of the page.
    */
   const METRIC_SIGNALS = {
-    genRate: { exact: "llamacpp:predicted_tokens_seconds", fuzzy: /(pred|gen|decode)[a-z_:]*tokens_(seconds|per_second)$/i },
-    promptRate: { exact: "llamacpp:prompt_tokens_seconds", fuzzy: /prompt[a-z_:]*tokens_(seconds|per_second)$/i },
-    processing: { exact: "llamacpp:requests_processing", fuzzy: /requests?_(processing|active|running|inflight)$/i },
-    deferred: { exact: "llamacpp:requests_deferred", fuzzy: /requests?_(deferred|queued|waiting)$/i },
-    requests: { exact: "halogen:requests_total", fuzzy: /(^|:)requests_total$/i },
-    structured: { exact: "halogen:structured_requests_total", fuzzy: /structured_requests_total$/i },
-    promptTokens: { exact: "llamacpp:prompt_tokens_total", fuzzy: /(^|:)prompt_tokens_total$/i },
-    genTokens: { exact: "llamacpp:tokens_predicted_total", fuzzy: /(tokens_predicted|predicted_tokens|generation_tokens)_total$/i },
-    genSeconds: { exact: "llamacpp:tokens_predicted_seconds_total", fuzzy: /(tokens_predicted|predicted_tokens)_seconds_total$/i },
-    cachedPrompt: { exact: "halogen:prompt_tokens_cached_total", fuzzy: /prompt_tokens_cached_total$/i },
-    draftTotal: { exact: "halogen:draft_tokens_total", fuzzy: /(^|:)draft_tokens_total$/i },
-    draftAccepted: { exact: "halogen:draft_tokens_accepted_total", fuzzy: /draft_tokens_accepted_total$/i },
-    kvRatio: { exact: "llamacpp:kv_cache_usage_ratio", fuzzy: /(kv|cache)[a-z_]*usage[a-z_]*ratio$/i },
-    kvTokens: { exact: "llamacpp:kv_cache_tokens", fuzzy: /kv_cache_tokens$/i },
-    kvPool: { exact: "halogen:kv_pool_positions", fuzzy: /kv_pool_(positions|tokens)$/i },
+    genRate: { exact: "llamacpp:predicted_tokens_seconds" },
+    promptRate: { exact: "llamacpp:prompt_tokens_seconds" },
+    processing: { exact: "llamacpp:requests_processing" },
+    deferred: { exact: "llamacpp:requests_deferred" },
+    requests: { exact: "halogen:requests_total" },
+    structured: { exact: "halogen:structured_requests_total" },
+    promptTokens: { exact: "llamacpp:prompt_tokens_total" },
+    kvRatio: { exact: "llamacpp:kv_cache_usage_ratio" },
+    kvTokens: { exact: "llamacpp:kv_cache_tokens" },
+    kvPool: { exact: "halogen:kv_pool_positions" },
   };
 
   /** envelope.metrics -> lookup-friendly view, or null when there is nothing. */
@@ -1014,17 +1061,19 @@
   }
 
   /**
-   * The one number for one signal. A name can carry several series (one per
-   * label set: ``some:histogram_bucket{model="a"}`` and ``{model="b"}``), and a
-   * sum is the only honest single figure for a counter across label sets.
+   * The one number for one signal: the exact metric named above, summed across its
+   * label sets (``some:metric{model="a"}`` and ``{model="b"}`` are one figure here).
+   *
+   * That sum is a decision, and monitoring/PARITY.md names the consequence: a panel
+   * may aggregate the same family differently (`max` on the KV panel, or split by the
+   * $model variable), which is a difference of definition rather than an error. There
+   * is no name-pattern fallback any more — an exact miss means this server does not
+   * publish this figure, and the tile is simply not rendered.
    */
   function signalValue(view, key) {
     const signal = METRIC_SIGNALS[key];
     if (!view || !signal) return null;
-    let hits = (signal.exact && view.byName.get(signal.exact)) || null;
-    for (let i = 0; (!hits || !hits.length) && i < view.names.length; i += 1) {
-      if (signal.fuzzy.test(view.names[i])) hits = view.byName.get(view.names[i]);
-    }
+    const hits = (signal.exact && view.byName.get(signal.exact)) || null;
     if (!hits || !hits.length) return null;
     let total = 0;
     let counted = 0;
@@ -1044,6 +1093,8 @@
     };
   }
 
+  /** Only the KV gauge divides anything now, and it is a fallback rather than a
+   *  figure: see metricsGauge and monitoring/PARITY.md ("what stayed"). */
   function divide(numerator, denominator) {
     if (!isNum(numerator) || !isNum(denominator) || denominator <= 0) return null;
     return numerator / denominator;
@@ -1054,10 +1105,18 @@
     return ratio === null ? null : clamp(ratio * 100, 0, 999);
   }
 
-  /** Pull every figure the card shows out of one scrape, in one pass. */
+  /**
+   * Pull every figure the card shows out of one scrape, in one pass.
+   *
+   * These are the raw series, read once, with no arithmetic between them and the
+   * tile: no ratios, no lifetime divisions, no counter-over-counter averages. The
+   * page used to compute draft acceptance and the prompt-cache hit ratio here, and
+   * workspace-szw.11 deleted them once the paired run showed the panels' windowed
+   * versions are the numbers an operator should act on.
+   */
   function metricsSummary(view) {
     const pick = (key) => signalValue(view, key);
-    const out = {
+    return {
       genRate: pick("genRate"),
       promptRate: pick("promptRate"),
       processing: pick("processing"),
@@ -1065,41 +1124,40 @@
       requests: pick("requests"),
       structured: pick("structured"),
       promptTokens: pick("promptTokens"),
-      genTokens: pick("genTokens"),
-      genSeconds: pick("genSeconds"),
-      cachedPrompt: pick("cachedPrompt"),
-      draftTotal: pick("draftTotal"),
-      draftAccepted: pick("draftAccepted"),
       kvRatio: pick("kvRatio"),
       kvTokens: pick("kvTokens"),
       kvPool: pick("kvPool"),
     };
-    const num = (found) => (found && found.value !== null ? found.value : null);
-    const seen = num(out.promptTokens) || 0;
-    const cached = num(out.cachedPrompt) || 0;
-    out.genLifetime = divide(num(out.genTokens), num(out.genSeconds)); // tokens / s, lifetime
-    out.acceptPct = percent(num(out.draftAccepted), num(out.draftTotal));
-    out.cacheHitPct = seen + cached > 0 ? percent(cached, seen + cached) : null;
-    return out;
   }
 
-  /** Tiles worth a big number, in reading order; a missing metric skips its tile. */
+  /** Tiles worth a big number, in reading order; a missing metric skips its tile.
+   *
+   * Every label says which kind of number it is, because these are not
+   * interchangeable and reading one as another is how a quiet box gets mistaken for
+   * a healthy one:
+   *   instant     a gauge, read as-is right now
+   *   server avg  the server's own "average since my last scrape" gauge — a
+   *               duty-cycle figure that is re-averaged by whoever reads /metrics
+   *               last, and is *not* the windowed rate Grafana shows
+   *   lifetime    a counter, accumulated since the process started (a total, not a
+   *               rate: the per-second version of this is Grafana's)
+   * Anything that needs a window lives in PromQL (ADR 0001); the deep links above
+   * carry the windowed versions of all four.
+   */
   function metricsTiles(summary, genNow) {
     const tiles = [];
     const num = (found) => (found && found.value !== null ? found.value : null);
 
     if (isNum(genNow)) {
       tiles.push({
-        label: "generate tok/s",
+        label: "generate tok/s \u00b7 server avg",
         value: fmtRate(genNow),
-        sub: isNum(summary.genLifetime)
-          ? "lifetime avg " + fmtRate(summary.genLifetime)
-          : shortMetricName(summary.genRate ? summary.genRate.name : ""),
+        sub: shortMetricName(summary.genRate ? summary.genRate.name : ""),
       });
     }
     if (num(summary.promptRate) !== null) {
       tiles.push({
-        label: "prompt tok/s",
+        label: "prompt tok/s \u00b7 server avg",
         value: fmtRate(summary.promptRate.value),
         sub:
           num(summary.promptTokens) !== null
@@ -1110,37 +1168,35 @@
     if (num(summary.processing) !== null) {
       const deferred = num(summary.deferred);
       tiles.push({
-        label: "in flight",
+        label: "in flight \u00b7 instant",
         value: fmtInt(summary.processing.value),
-        sub: deferred === null ? "now" : fmtInt(deferred) + " deferred",
+        sub: deferred === null ? "no deferred series" : fmtInt(deferred) + " deferred",
         tone: deferred > 0 ? "t-warn" : "",
       });
     }
     if (num(summary.requests) !== null) {
       tiles.push({
-        label: "requests",
+        label: "requests \u00b7 lifetime",
         value: fmtInt(summary.requests.value),
-        sub: num(summary.structured) !== null ? fmtInt(summary.structured.value) + " under a JSON schema" : "completed",
-      });
-    }
-    if (isNum(summary.acceptPct)) {
-      tiles.push({
-        label: "draft accept",
-        value: pctLabel(summary.acceptPct),
-        sub: fmtInt(summary.draftAccepted.value) + " / " + fmtInt(summary.draftTotal.value) + " drafted",
-      });
-    }
-    if (isNum(summary.cacheHitPct)) {
-      tiles.push({
-        label: "prompt cache hit",
-        value: pctLabel(summary.cacheHitPct),
-        sub: fmtInt(summary.cachedPrompt.value) + " cached / " + fmtInt(summary.promptTokens.value) + " processed",
+        sub: num(summary.structured) !== null ? fmtInt(summary.structured.value) + " under a JSON schema" : "completed since start",
       });
     }
     return tiles;
   }
 
-  /** KV-cache fill for the progress bar: the reported ratio, else used / pool. */
+  /**
+   * KV-cache fill for the progress bar.
+   *
+   * The reported ratio is a raw gauge and is what Grafana's KV panel reads, so the
+   * two views agree exactly (measured: the largest difference over the parity run was
+   * 0.3%, and it was the two scrapes happening at different instants).
+   *
+   * The `used / pool` fallback is the one division that stayed, for the servers that
+   * publish kv_cache_tokens and kv_pool_positions but no ratio — and it stayed
+   * because Grafana has no equivalent: the KV panel selects the ratio family only.
+   * Deleting it would lose a number rather than move one, which is the test this
+   * ticket applies to everything else.
+   */
   function metricsGauge(summary) {
     if (!summary) return null;
     const num = (found) => (found && found.value !== null ? found.value : null);
@@ -1249,25 +1305,19 @@
   /**
    * One tok/s sample per successful poll, for the throughput chart.
    *
-   * llama.cpp reports "since the last scrape" gauges and those are used as-is. A
-   * server without them gets the honest fallback: the delta of its tokens
-   * counter over the wall-clock gap between the two polls.
+   * The chart plots the server's own average-since-last-scrape gauge, and only that.
+   * It used to fall back to dividing the tokens counter's delta by the wall-clock gap
+   * between two polls — a rate window invented in the browser, with no counter-reset
+   * handling (a server restart mid-chart produced a negative delta and a discarded
+   * point) and no test that could catch it. That is exactly the arithmetic workspace-
+   * szw.11 removed: a server that publishes no throughput gauge gets no in-tab curve
+   * and a note saying where the number lives (Grafana panel 1, which computes it from
+   * the counters the same way, with a window and a reset-aware function).
    */
   function noteThroughput(card, view) {
     if (!view) return;
-    const now = nowMs();
     const reported = signalValue(view, "genRate");
-    let rate = reported && reported.value !== null ? reported.value : null;
-    if (rate === null) {
-      const counter = signalValue(view, "genTokens");
-      const base = card.rateBase;
-      if (counter && counter.value !== null) {
-        card.rateBase = { value: counter.value, at: now };
-        if (base && counter.value >= base.value && now > base.at) {
-          rate = (counter.value - base.value) / ((now - base.at) / 1000);
-        }
-      }
-    }
+    const rate = reported && reported.value !== null ? reported.value : null;
     if (!isNum(rate) || rate < 0) return;
     card.rateHistory.push(rate);
     if (card.rateHistory.length > HISTORY_SAMPLES) card.rateHistory.shift();
@@ -1335,6 +1385,15 @@
     }
     if (view && view.truncated) {
       notes.push("only the first " + fmtInt(view.count) + " series were kept");
+    }
+    if (view && !summary.genRate) {
+      // The one chart on this card plots the server's own average gauge, and a server
+      // that does not publish it gets no curve. Say so instead of drawing an empty box:
+      // the number exists, it just lives behind the decode link (Grafana panel 1).
+      notes.push(
+        "no generate-throughput gauge on this server \u2014 the windowed rate is " +
+          (state.grafanaUrl ? "Grafana's (panel 1)" : "a PromQL rate over the counters below")
+      );
     }
     card.note = notes.length ? clip(notes.join("  \u00b7  "), 190) : null;
 
@@ -1430,6 +1489,149 @@
     });
   }
 
+  // --- Grafana deep links and scrape health (ADR 0001 C4 / C6) --------------
+
+  /** `host:port` of the upstream being polled — Grafana's `instance` label. */
+  function upstreamInstance() {
+    const base = state.upstream || state.configUpstream || "";
+    if (!base) return "";
+    try {
+      return new URL(base).host;
+    } catch (_) {
+      return "";
+    }
+  }
+
+  /**
+   * The model id to pass as `var-model`, or "" for "do not filter".
+   *
+   * Only sent when the server serves exactly one model: with two models loaded,
+   * pinning the link to the first one would silently hide the other's history.
+   */
+  function grafanaModelVar() {
+    const card = state.cards.models;
+    const body = card && card.hasGood ? card.lastGood : null;
+    const list = body && Array.isArray(body.data) ? body.data : [];
+    const ids = list
+      .map((entry) => (entry && typeof entry.id === "string" ? entry.id : ""))
+      .filter(Boolean);
+    return ids.length === 1 ? ids[0] : "";
+  }
+
+  /**
+   * ADR 0001 C4 link shape:
+   *   <grafana>/d/llm-server/llm-server?orgId=1&var-instance=<host:port>
+   *            [&var-model=<id>][&viewPanel=<id>][&refresh=30s]
+   * Returns "" when no Grafana is configured — the links are then not rendered at
+   * all, which is a supported configuration, not a broken one.
+   */
+  function grafanaLink(panelId) {
+    if (!state.grafanaUrl) return "";
+    const params = ["orgId=1"];
+    const instance = upstreamInstance();
+    if (instance) params.push("var-instance=" + encodeURIComponent(instance));
+    const model = grafanaModelVar();
+    if (model) params.push("var-model=" + encodeURIComponent(model));
+    if (panelId) params.push("viewPanel=" + encodeURIComponent(String(panelId)));
+    params.push("refresh=30s");
+    return state.grafanaUrl + GRAFANA_DASHBOARD_PATH + "?" + params.join("&");
+  }
+
+  function clearChildren(node) {
+    while (node && node.firstChild) node.removeChild(node.firstChild);
+  }
+
+  /** Config values are text, never markup, and may be absent on an older server. */
+  function asText(value) {
+    return typeof value === "string" ? value : "";
+  }
+
+  /** Rebuild the metrics card's Grafana row, or the honest note that replaces it. */
+  function renderGrafanaLinks() {
+    if (!ui.grafanaNav || !ui.grafanaLinks || !ui.grafanaHint) return;
+    clearChildren(ui.grafanaNav);
+    if (ui.grafanaHome) {
+      const home = grafanaLink(0);
+      ui.grafanaHome.hidden = !home;
+      if (home) ui.grafanaHome.setAttribute("href", home);
+    }
+    if (!state.grafanaUrl) {
+      ui.grafanaLinks.hidden = true;
+      ui.grafanaHint.hidden = false;
+      ui.grafanaHint.textContent =
+        "no Grafana configured for this monitor \u2014 everything on this card is the " +
+        "last scrape, and nothing here has a past. Start serve.py with --grafana-url " +
+        "(or $LLM_MONITOR_GRAFANA_URL) to link the historical panels.";
+      return;
+    }
+    ui.grafanaHint.hidden = true;
+    ui.grafanaHint.textContent = "";
+    ui.grafanaLinks.hidden = false;
+    GRAFANA_PANELS.forEach((entry) => {
+      const link = document.createElement("a");
+      link.className = "grafana-link";
+      link.setAttribute("href", grafanaLink(entry.id));
+      link.setAttribute("rel", "noreferrer noopener");
+      link.setAttribute("target", "_blank");
+      link.textContent = entry.label;
+      link.title = "Grafana panel " + entry.id + " \u2014 " + entry.label;
+      ui.grafanaNav.appendChild(link);
+    });
+  }
+
+  /**
+   * "Is history being recorded?" — read from the monitor's own /api/scrape-health,
+   * never from the browser against Prometheus (that is the CORS problem this proxy
+   * exists to avoid). Unset prometheus_url means "no history layer", which is fine.
+   */
+  function renderScrapeHealth() {
+    if (!ui.scrapeHealth) return;
+    const node = ui.scrapeHealth;
+    node.classList.remove("scrape-health-ok", "scrape-health-bad", "scrape-health-off");
+    if (!state.prometheusUrl) {
+      node.textContent = "history: not configured";
+      node.title =
+        "start serve.py with --prometheus-url (or $LLM_MONITOR_PROMETHEUS_URL) to " +
+        "see whether Prometheus is scraping this box";
+      node.classList.add("scrape-health-off");
+      return;
+    }
+    const health = state.scrapeHealth;
+    if (state.scrapeHealthError || !health || !health.reachable) {
+      node.textContent = "history: Prometheus unreachable";
+      node.title = clip(state.scrapeHealthError || "prometheus did not answer", 160);
+      node.classList.add("scrape-health-bad");
+      return;
+    }
+    const total = health.targets_total || 0;
+    const up = health.targets_up || 0;
+    if (!total) {
+      node.textContent = "history: no targets configured";
+      node.classList.add("scrape-health-bad");
+      return;
+    }
+    const failing = (health.jobs || []).filter((job) => job.health !== "up");
+    node.textContent = "history: " + up + "/" + total + " targets up";
+    node.title = (health.jobs || [])
+      .map((job) => job.job + "/" + job.instance + ": " + job.health +
+        (job.last_error ? " \u2014 " + job.last_error : ""))
+      .join("\n");
+    node.classList.add(failing.length ? "scrape-health-bad" : "scrape-health-ok");
+  }
+
+  async function pollScrapeHealth() {
+    if (!state.prometheusUrl) {
+      state.scrapeHealth = null;
+      state.scrapeHealthError = "";
+      renderScrapeHealth();
+      return;
+    }
+    const env = await fetchEnvelope("api/scrape-health", {});
+    state.scrapeHealth = env && env.scrape_health ? env.scrape_health : null;
+    state.scrapeHealthError = env && env.ok ? "" : env && (env.error || "prometheus unreachable");
+    renderScrapeHealth();
+  }
+
   function statusInfo() {
     const attempted = ENDPOINTS.some((ep) => state.cards[ep.key].attempts > 0);
     if (!attempted) {
@@ -1520,6 +1722,8 @@
     renderStatus();
     renderBanner();
     renderClock();
+    renderGrafanaLinks();
+    renderScrapeHealth();
   }
 
   // --- polling -------------------------------------------------------------
@@ -1606,6 +1810,9 @@
     const results = await Promise.all(
       ENDPOINTS.map(async (ep) => [ep.key, await fetchEnvelope(ep.route, { signal: signal, useUpstream: true })])
     );
+    // Cheap and only when configured: "is history being recorded" rides along with
+    // the poll so the page can say so without a second timer.
+    pollScrapeHealth();
 
     state.busy = false;
     if (state.generation !== generation || (signal && signal.aborted)) return;
@@ -1667,7 +1874,6 @@
       card.metrics = null;
       card.lastMetrics = null;
       card.rateHistory = [];
-      card.rateBase = null;
       card.notServed = false;
       card.note = null;
     });
@@ -1787,8 +1993,15 @@
     const env = await fetchEnvelope("api/config", {});
     if (env.ok && env.body && typeof env.body === "object") {
       state.configUpstream = env.body.upstream || env.body.default_upstream || "";
+      // Additive keys from /api/config (ADR 0001 C6). Missing keys mean an older
+      // serve.py, which is the same as "not configured": no links, no complaints.
+      state.grafanaUrl = asText(env.body.grafana_url).replace(/\/+$/, "");
+      state.prometheusUrl = asText(env.body.prometheus_url).replace(/\/+$/, "");
+      state.monitorVersion = asText(env.body.version);
     }
     renderTarget();
+    renderGrafanaLinks();
+    renderScrapeHealth();
   }
 
   function init() {

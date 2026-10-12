@@ -1,0 +1,238 @@
+# GENERATED FILE — do not edit. Edit alert_thresholds.env and run:
+#
+#     python3 monitoring/render_rules.py
+#
+# Template for monitoring/prometheus/rules.yml. Dollar-brace placeholders get
+# their values from alert_thresholds.env (monitoring/.env wins if it defines
+# them), so the numbers below are tuned per box without touching PromQL.
+#
+# House style for every rule here:
+#   * `for:` and labels.severity are mandatory;
+#   * annotations.summary names the CONSEQUENCE (what the user feels), not the
+#     metric;
+#   * annotations stay static — no {{ $labels.* }} templating — so that
+#     `promtool test rules` (monitoring/prometheus/unit-tests.yml) can pin the
+#     exact operator-facing sentence, and so the same text survives whatever
+#     Alertmanager template is wired up later. Which target fired rides on the
+#     labels (instance / job / upstream), which is where Alertmanager routes on it
+#     anyway. See monitoring/README.md#alerts.
+
+groups:
+  - name: llm-availability
+    rules:
+      - alert: LLMServerDown
+        expr: 'up{job=~"llm-server.*"} == 0'
+        for: ${SERVER_DOWN_FOR}
+        labels:
+          severity: critical
+          team: llm
+        annotations:
+          summary: "The model server is not answering /metrics: every request to it will fail or queue until it comes back. Check systemctl --user status llm-server, then whether the port in monitoring/prometheus/targets/llm-servers.json is the one the server actually listens on."
+
+      - alert: LLMMetricsAbsent
+        expr: 'absent(llamacpp:tokens_predicted_total)'
+        for: ${METRICS_ABSENT_FOR}
+        labels:
+          severity: warning
+          team: llm
+        annotations:
+          summary: "No model-server metrics have been scraped for ${METRICS_ABSENT_FOR}, so Grafana will read \"No data\" even if the server is healthy. The monitor page is still fully usable — it reads /health, /v1/models and /cache, which are not Prometheus metrics. Usual causes: the server has no /metrics route at all (stock llama.cpp build, mock mode \"nometrics\"), it answers /metrics with JSON or 404, or the scrape job is mispointed. A server that never exposes /metrics is a supported configuration: silence this alert rather than distrust the dashboard."
+
+  - name: llm-monitor-health
+    rules:
+      - alert: LLMScrapeFailing
+        expr: 'min_over_time(llm_monitor_scrape_ok[1m]) == 0'
+        for: ${SCRAPE_FAIL_FOR}
+        labels:
+          severity: warning
+          team: llm
+        annotations:
+          summary: "The monitor is up but its own scrape of the model server has been failing for ${SCRAPE_FAIL_FOR}: the live page and the passthrough are serving stale or empty data, so a flat-lined Grafana panel right now means \"the monitor is blind\", not \"the model is idle\". Look at journalctl --user -u llm-monitor and curl the proxy's /metrics."
+
+      - alert: LLMMonitorAbsent
+        expr: 'absent_over_time(llm_monitor_build_info[${MONITOR_ABSENT_FOR}])'
+        for: 0m
+        labels:
+          severity: warning
+          team: llm
+        annotations:
+          summary: "Nothing has scraped the monitor's /metrics passthrough for ${MONITOR_ABSENT_FOR}, so scrape health has no history: serve.py is not running, or the llm-server-via-proxy job is missing or mispointed (see the llm_upstream label in prometheus.yml)."
+
+      - alert: LLMScrapeParseErrors
+        expr: 'increase(llm_monitor_parse_errors_total[${PARSE_ERROR_WINDOW}]) > 0'
+        for: 0m
+        labels:
+          severity: warning
+          team: llm
+        annotations:
+          summary: "The monitor could not parse part of the model server's /metrics in the last ${PARSE_ERROR_WINDOW}: a metric family may be silently missing from the parsed views and from the KV/queueing alerts that read it. The unparsable lines are listed on the monitor page's metrics card (serve.py reports them as metrics.errors)."
+
+  - name: llm-server-pressure
+    rules:
+      - alert: LLMKVCachePressureWarn
+        expr: 'llamacpp:kv_cache_usage_ratio > ${KV_PRESSURE_WARN}'
+        for: ${KV_PRESSURE_WARN_FOR}
+        labels:
+          severity: warning
+          team: llm
+        annotations:
+          summary: "The KV cache has been over ${KV_PRESSURE_WARN} for ${KV_PRESSURE_WARN_FOR}: new requests are about to wait for context space and long prompts start evicting cached prefixes, so latency climbs before anything actually fails."
+
+      - alert: LLMKVCachePressureCritical
+        expr: 'llamacpp:kv_cache_usage_ratio > ${KV_PRESSURE_CRITICAL}'
+        for: ${KV_PRESSURE_CRITICAL_FOR}
+        labels:
+          severity: critical
+          team: llm
+        annotations:
+          summary: "The KV cache is effectively full (over ${KV_PRESSURE_CRITICAL} for ${KV_PRESSURE_CRITICAL_FOR}): the server is in an eviction storm, prefills are being redone and throughput collapses under queueing. Shorten the context, lower the slot count, or stop the largest client."
+
+      - alert: LLMQueueing
+        expr: 'llamacpp:requests_deferred > 0'
+        for: ${QUEUEING_FOR}
+        labels:
+          severity: warning
+          team: llm
+        annotations:
+          summary: "Requests have been deferred for ${QUEUEING_FOR}: arrivals are waiting for a slot instead of generating, which is the \"why is it slow\" half of the picture; read it together with the KV-cache alerts."
+
+  - name: llm-server-behaviour
+    rules:
+      # Baseline-guarded: fires only against the metric's own recent average, and
+      # only while that baseline is real traffic, so an idle box that stops
+      # generating does not "collapse" to zero.
+      - alert: LLMDecodeThroughputCollapse
+        expr: 'sum(rate(llamacpp:tokens_predicted_total[${THROUGHPUT_COLLAPSE_WINDOW}])) < ${THROUGHPUT_COLLAPSE_FRACTION} * avg_over_time(sum(rate(llamacpp:tokens_predicted_total[${THROUGHPUT_COLLAPSE_WINDOW}]))[${THROUGHPUT_COLLAPSE_BASELINE}:${THROUGHPUT_COLLAPSE_STEP}]) and on() avg_over_time(sum(rate(llamacpp:tokens_predicted_total[${THROUGHPUT_COLLAPSE_WINDOW}]))[${THROUGHPUT_COLLAPSE_BASELINE}:${THROUGHPUT_COLLAPSE_STEP}]) > ${THROUGHPUT_COLLAPSE_MIN_TOKENS_PER_SECOND}'
+        for: ${THROUGHPUT_COLLAPSE_FOR}
+        labels:
+          severity: warning
+          team: llm
+        annotations:
+          summary: "Decode throughput has stayed below ${THROUGHPUT_COLLAPSE_FRACTION} of its own ${THROUGHPUT_COLLAPSE_BASELINE} baseline for ${THROUGHPUT_COLLAPSE_FOR}: generation is roughly twice as slow as this box just demonstrated, with no change in load. Usual suspects on this hardware: thermal or GTT pressure, a second model taking shared memory, or a speculative-decode path that stopped helping."
+
+      - alert: LLMPromptCacheCold
+        expr: 'rate(halogen:prompt_tokens_cached_total[${THROUGHPUT_COLLAPSE_WINDOW}]) / clamp_min(rate(llamacpp:prompt_tokens_total[${THROUGHPUT_COLLAPSE_WINDOW}]) + rate(halogen:prompt_tokens_cached_total[${THROUGHPUT_COLLAPSE_WINDOW}]), 1) < ${PROMPT_CACHE_COLD_RATIO} and on() rate(llamacpp:prompt_tokens_total[${THROUGHPUT_COLLAPSE_WINDOW}]) > ${PROMPT_CACHE_MIN_PROMPT_TOKENS_PER_SECOND}'
+        for: ${PROMPT_CACHE_COLD_FOR}
+        labels:
+          severity: warning
+          team: llm
+        annotations:
+          summary: "The prompt cache is missing more than ${PROMPT_CACHE_COLD_RATIO} of prompt tokens while traffic is flowing: something restarted, the cache is too small for the working set, or slots are evicting each other's prefixes — time-to-first-token is paying for it. halogen:* names only exist on the halogen front door, so on a plain llama.cpp server this rule has no data and stays dark."
+
+      # Belt and braces: a wedged target normally shows up as LLMServerDown or
+      # LLMMetricsAbsent, because Prometheus marks a failed scrape stale
+      # immediately. This one catches the rarer case where the scrape succeeds
+      # but the samples stop advancing (a caching proxy in front of the server,
+      # or an exporter replaying a buffered response).
+      - alert: LLMStaleTarget
+        expr: 'time() - timestamp(up{job=~"llm-server.*"}) > ${STALE_TARGET_SECONDS}'
+        for: 0m
+        labels:
+          severity: warning
+          team: llm
+        annotations:
+          summary: "Samples from this target have stopped advancing: whatever is answering is replaying old data, so every panel reading it shows history as if it were now."
+
+  # --------------------------------------------------------------------- #
+  # Host + GPU telemetry (workspace-szw.13): node_exporter on the host with
+  # --collector.drm, scraped as the `host` job
+  # (prometheus/targets/host.json). Two groups, split by what they say:
+  #   host-telemetry = is the telemetry itself there (blind vs idle),
+  #   host-pressure  = the GPU/host memory and thermal ceilings.
+  # The house style holds: `for:`, severity, and a summary that names the
+  # consequence and the first command to run.
+  # --------------------------------------------------------------------- #
+  - name: host-telemetry
+    rules:
+      - alert: NodeExporterAbsent
+        expr: 'absent_over_time(node_exporter_build_info{job="host"}[${NODE_EXPORTER_ABSENT_FOR}])'
+        for: 0m
+        labels:
+          severity: warning
+          team: host
+        annotations:
+          summary: "Nothing has scraped the host exporter for ${NODE_EXPORTER_ABSENT_FOR}, so every GPU and host panel reads \"No data\" while the model server is likely fine: check systemctl --user status node-exporter, then curl http://127.0.0.1:9100/metrics on the host, then whether the target in prometheus/targets/host.json can reach it from the container network (the runbook's Host + GPU telemetry section is the decision tree for that last one)."
+
+      - alert: NodeExporterCollectorFailing
+        expr: 'node_scrape_collector_success{job="host"} == 0'
+        for: ${NODE_COLLECTOR_FAIL_FOR}
+        labels:
+          severity: warning
+          team: host
+        annotations:
+          summary: "A node_exporter collector has been failing for ${NODE_COLLECTOR_FAIL_FOR} (the collector label says which): that collector's series are missing or stale, so whatever panel reads them is showing history or nothing. If collector=\"drm\": the exporter was started without --collector.drm, or it is containerised with only /sys/class/drm mounted — the card0/device symlink dangles and the whole card disappears from the scrape. Mount all of /sys read-only, or run it on the host as monitoring/node-exporter.service does."
+
+      - alert: NodeGpuTelemetryAbsent
+        expr: 'absent_over_time(node_drm_memory_gtt_used_bytes{job="host"}[${NODE_GPU_TELEMETRY_ABSENT_FOR}])'
+        for: 0m
+        labels:
+          severity: warning
+          team: host
+        annotations:
+          summary: "No GPU memory series have been scraped for ${NODE_GPU_TELEMETRY_ABSENT_FOR} even though the exporter may be healthy: the drm collector found no amdgpu card at all, which it reports as success, so this is the only rule that can see it. Usual causes: kernel or BIOS change, the module reloaded late, or the exporter pointed at an incomplete /sys. python3 spikes/amd-gpu-metrics/amdgpu_sysfs_probe.py probe prints the whole capability matrix in one command."
+
+  - name: host-pressure
+    rules:
+      # GTT — the pool the model grows on a shared-memory APU. Weights + KV land
+      # here, and gtt_total is the amdgpu.gttsize= from the root README. VRAM is
+      # the BIOS carve-out and is deliberately not alerted on.
+      - alert: NodeGttPressureHigh
+        expr: 'node_drm_memory_gtt_used_bytes / node_drm_memory_gtt_size_bytes > ${GTT_PRESSURE_WARN}'
+        for: ${GTT_PRESSURE_WARN_FOR}
+        labels:
+          severity: warning
+          team: host
+        annotations:
+          summary: "GPU (GTT) memory has been over ${GTT_PRESSURE_WARN} of this box's budget for ${GTT_PRESSURE_WARN_FOR}: the next allocation the driver tries may fail — that is an allocation error in the model server's log, not a slowdown, and the runbook entry \"the box ran out of GTT\" says what to cut first. Re-tune this threshold against host:gtt_usage_ratio:max_2d once two days of real traffic have been recorded; the recorded baseline is in Prometheus, not in a notebook."
+
+      # Baseline-free by construction: this predicts the ceiling from the observed
+      # slope, so it protects a box whose steady-state nobody has measured yet
+      # without guessing a number. A steady model cannot fire it (flat slope).
+      - alert: NodeGttExhausting
+        expr: 'predict_linear(node_drm_memory_gtt_used_bytes[${GTT_EXHAUSTION_SLOPE_WINDOW}], ${GTT_EXHAUSTION_HORIZON}) > node_drm_memory_gtt_size_bytes'
+        for: ${GTT_EXHAUSTION_FOR}
+        labels:
+          severity: critical
+          team: host
+        annotations:
+          summary: "GPU (GTT) memory is growing fast enough to exceed this box's whole GTT budget within ${GTT_EXHAUSTION_HORIZON}s at the rate of the last ${GTT_EXHAUSTION_SLOPE_WINDOW}: something is loading or growing while there is no room left. Stop the second model or the largest context first; lowering the KV pool or the slot count is the smaller lever, and the amdgpu.gttsize= kernel parameter is the last one (it needs a reboot)."
+
+      # Hottest amdgpu sensor, because the junction/hotspot is what throttles and
+      # the sensor names differ per kernel — see alert_thresholds.env.
+      - alert: NodeGpuTempHigh
+        expr: 'max by (job, instance) (node_hwmon_temp_celsius{chip="amdgpu"}) > ${GPU_TEMP_WARN}'
+        for: ${GPU_TEMP_WARN_FOR}
+        labels:
+          severity: warning
+          team: host
+        annotations:
+          summary: "The hottest GPU sensor has been over ${GPU_TEMP_WARN} C for ${GPU_TEMP_WARN_FOR}: this part is about to start thermal throttling, so decode throughput will drop with no change in load (it also shows up as LLMDecodeThroughputCollapse). Check airflow and whether a fan curve is being ignored; this is the second cause of a slow box after GTT pressure."
+
+      - alert: NodeGpuTempCritical
+        expr: 'max by (job, instance) (node_hwmon_temp_celsius{chip="amdgpu"}) > ${GPU_TEMP_CRITICAL}'
+        for: ${GPU_TEMP_CRITICAL_FOR}
+        labels:
+          severity: critical
+          team: host
+        annotations:
+          summary: "The hottest GPU sensor has been over ${GPU_TEMP_CRITICAL} C for ${GPU_TEMP_CRITICAL_FOR}: at or past the junction maximum, where the driver throttles hard and a sustained soak can shorten the part's life. Stop the load now — unload the model, do not just idle the client."
+
+      # PSI: GPU memory *is* system RAM on this box, so exhaustion shows up here
+      # as stalls before it shows up as an allocation failure.
+      - alert: NodeMemoryPressureHigh
+        expr: 'rate(node_pressure_memory_waiting_seconds_total[${PSI_MEMORY_WINDOW}]) > ${PSI_MEMORY_WAIT_WARN}'
+        for: ${PSI_MEMORY_WAIT_WARN_FOR}
+        labels:
+          severity: warning
+          team: host
+        annotations:
+          summary: "Tasks have been stalled on memory for more than ${PSI_MEMORY_WAIT_WARN} of the wall clock for ${PSI_MEMORY_WAIT_WARN_FOR}: reclaim or swap-in is on the critical path, which on this box usually means the GPU (GTT) budget has been squeezed rather than a runaway process. Look at the GPU & host row's Memory pools panel and the swap series beside it."
+
+      - alert: NodeMemoryPressureCritical
+        expr: 'rate(node_pressure_memory_waiting_seconds_total[${PSI_MEMORY_WINDOW}]) > ${PSI_MEMORY_WAIT_CRITICAL}'
+        for: ${PSI_MEMORY_WAIT_CRITICAL_FOR}
+        labels:
+          severity: critical
+          team: host
+        annotations:
+          summary: "Tasks have been stalled on memory for more than ${PSI_MEMORY_WAIT_CRITICAL} of the wall clock for ${PSI_MEMORY_WAIT_CRITICAL_FOR}: the box is thrashing, everything is slow including the model server's own scheduling, and the OOM killer is the next event. Free memory now (unload the smallest model first, then stop the Grafana container per the go/no-go) before touching anything else."

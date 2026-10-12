@@ -1,0 +1,42 @@
+{
+ "healthy": {
+  "decode_tok_s": 72.9496,
+  "prompt_tok_s": 1415.51,
+  "requests_in_flight": 2.0,
+  "requests_total": 522.0,
+  "kv_usage_pct": 62.5,
+  "draft_accept_pct": 81.38641002826337,
+  "cache_hit_pct": 98.45992093965539,
+  "lifetime_decode_tok_s": 61.24824618625918
+ },
+ "fanout_and_nan": {
+  "decode_tok_s": null,
+  "prompt_tok_s": null,
+  "requests_in_flight": null,
+  "requests_total": null,
+  "kv_usage_pct": null,
+  "draft_accept_pct": null,
+  "cache_hit_pct": null,
+  "lifetime_decode_tok_s": null
+ },
+ "fanout_counters": {
+  "decode_tok_s": null,
+  "prompt_tok_s": null,
+  "requests_in_flight": null,
+  "requests_total": null,
+  "kv_usage_pct": 60.0,
+  "draft_accept_pct": 60.0,
+  "cache_hit_pct": 90.0,
+  "lifetime_decode_tok_s": 50.0
+ },
+ "nonfinite_and_percent_edges": {
+  "decode_tok_s": null,
+  "prompt_tok_s": null,
+  "requests_in_flight": null,
+  "requests_total": null,
+  "kv_usage_pct": 62.5,
+  "draft_accept_pct": null,
+  "cache_hit_pct": null,
+  "lifetime_decode_tok_s": null
+ }
+}

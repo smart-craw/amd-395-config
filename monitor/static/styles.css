@@ -661,6 +661,120 @@ code {
   overflow-wrap: anywhere;
 }
 
+/* ------------------------------------------------------------------------ */
+/* Live status vs Grafana history (ADR 0001).                                */
+/* The page is the "right now" view; these are the pieces that say so, and    */
+/* the deep links that hand the historical questions to Grafana.             */
+/* ------------------------------------------------------------------------ */
+
+.live-tag {
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: 0.6rem;
+  letter-spacing: 0.08em;
+  padding: 0.1rem 0.4rem;
+  text-transform: uppercase;
+  vertical-align: 0.16em;
+}
+
+.chart-scope {
+  color: var(--text-mute);
+  font-size: 0.66rem;
+  letter-spacing: 0.04em;
+  text-transform: none;
+}
+
+.scrape-health {
+  font-size: 0.72rem;
+}
+
+.scrape-health-ok {
+  color: var(--ok);
+}
+
+.scrape-health-bad {
+  color: var(--bad);
+}
+
+.scrape-health-off {
+  color: var(--text-mute);
+}
+
+.history-link {
+  color: var(--accent);
+  font-size: 0.72rem;
+  text-decoration: none;
+}
+
+.history-link:hover,
+.history-link:focus-visible {
+  text-decoration: underline;
+}
+
+.grafana-links {
+  align-items: baseline;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.7rem;
+  margin-bottom: var(--s-4);
+  padding: 0.5rem 0.65rem;
+}
+
+.grafana-links[hidden] {
+  display: none;
+}
+
+.grafana-links-key {
+  color: var(--text-mute);
+  flex: 0 0 auto;
+  font-size: 0.68rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.grafana-links-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.grafana-link {
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: 0.72rem;
+  padding: 0.12rem 0.55rem;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.grafana-link:hover,
+.grafana-link:focus-visible {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  text-decoration: none;
+}
+
+.grafana-hint {
+  background: var(--surface-2);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--r-sm);
+  color: var(--text-mute);
+  font-size: 0.72rem;
+  line-height: 1.45;
+  margin: 0 0 var(--s-4);
+  overflow-wrap: anywhere;
+  padding: 0.5rem 0.65rem;
+}
+
+.grafana-hint[hidden] {
+  display: none;
+}
+
 .card-note[hidden] {
   display: none;
 }

@@ -1,0 +1,45 @@
+# paired samples: 2880 rows over 0.50 h (2026-10-11 01:38:21 -> 2026-10-11 02:08:06)
+
+figure                            window  n    class tally                                                                   page (mean)  panel (mean)  delta % (mean / max)  same-source check                                       arith check
+prompt-cache hit ratio [deleted]  15m     120  exact×120                                                                     98.384       98.792        +0.41% / 0.99%        —                                                       True×120   
+prompt-cache hit ratio [deleted]  1m      120  exact×67, lifetime-vs-window×53                                               98.384       99.105        +0.72% / 1.92%        —                                                       True×120   
+prompt-cache hit ratio [deleted]  5m      120  exact×100, lifetime-vs-window×20                                              98.384       98.88         +0.50% / 1.48%        —                                                       True×120   
+decode tok/s                      15m     120  idle-zero×46, reader-reset×37, window×30, blip-not-scraped×5, exact×2         33.207       37.26         +46.69% / 100.00%     skew×43, reader-reset×37, equal×35, blip-not-scraped×5  —          
+decode tok/s                      1m      120  idle-zero×46, reader-reset×37, window×30, blip-not-scraped×5, exact×2         33.207       39.508        +61.47% / 100.00%     skew×43, reader-reset×37, equal×35, blip-not-scraped×5  —          
+decode tok/s                      5m      120  idle-zero×46, reader-reset×37, window×29, blip-not-scraped×5, exact×3         33.207       39.514        +59.47% / 100.00%     skew×43, reader-reset×37, equal×35, blip-not-scraped×5  —          
+draft acceptance [deleted]        15m     120  lifetime-vs-window×93, exact×27                                               80.596       78.306        -2.84% / 6.89%        —                                                       True×120   
+draft acceptance [deleted]        1m      120  lifetime-vs-window×113, exact×7                                               80.596       76.728        -4.86% / 24.40%       —                                                       True×120   
+draft acceptance [deleted]        5m      120  lifetime-vs-window×98, exact×22                                               80.596       77.733        -3.57% / 11.48%       —                                                       True×120   
+KV cache usage                    15m     120  exact×117, UNEXPLAINED: the page shows a number Grafana's series never had×3  73.936       73.861        -0.08% / 0.93%        equal×117, MISMATCH×3                                   —          
+KV cache usage                    1m      120  exact×117, UNEXPLAINED: the page shows a number Grafana's series never had×3  73.936       73.861        -0.08% / 0.93%        equal×117, MISMATCH×3                                   —          
+KV cache usage                    5m      120  exact×117, UNEXPLAINED: the page shows a number Grafana's series never had×3  73.936       73.861        -0.08% / 0.93%        equal×117, MISMATCH×3                                   —          
+lifetime decode tok/s [deleted]   15m     120  lifetime-vs-window×117, exact×3                                               42.116       37.26         -13.83% / 92.40%      equal×120                                               —          
+lifetime decode tok/s [deleted]   1m      120  lifetime-vs-window×119, exact×1                                               42.116       39.508        -18.95% / 97.48%      equal×120                                               —          
+lifetime decode tok/s [deleted]   5m      120  lifetime-vs-window×119, exact×1                                               42.116       39.514        -10.57% / 87.86%      equal×120                                               —          
+prompt tok/s                      15m     120  idle-zero×75, reader-reset×28, window×14, blip-not-scraped×3                  388.412      51.381        +69.10% / 100.00%     equal×64, reader-reset×28, skew×25, blip-not-scraped×3  —          
+prompt tok/s                      1m      120  idle-zero×52, reader-reset×28, exact×23, window×14, blip-not-scraped×3        388.412      55.4          +43.94% / 100.00%     equal×64, reader-reset×28, skew×25, blip-not-scraped×3  —          
+prompt tok/s                      5m      120  idle-zero×75, reader-reset×28, window×14, blip-not-scraped×3                  388.412      55.769        +69.52% / 100.00%     equal×64, reader-reset×28, skew×25, blip-not-scraped×3  —          
+requests in flight                15m     120  exact×94, exact-with-skew×19, blip-not-scraped×7                              0.75         0.775         +3.10% / 100.00%      equal×94, skew×19, blip-not-scraped×7                   —          
+requests in flight                1m      120  exact×94, exact-with-skew×19, blip-not-scraped×7                              0.75         0.775         +3.10% / 100.00%      equal×94, skew×19, blip-not-scraped×7                   —          
+requests in flight                5m      120  exact×94, exact-with-skew×19, blip-not-scraped×7                              0.75         0.775         +3.10% / 100.00%      equal×94, skew×19, blip-not-scraped×7                   —          
+requests completed                15m     120  unit-change×120                                                               1623.7       0.1           -99.99% / 100.00%     —                                                       True×120   
+requests completed                1m      120  unit-change×120                                                               1623.7       0.117         -99.99% / 100.00%     —                                                       True×120   
+requests completed                5m      120  unit-change×120                                                               1623.7       0.116         -99.99% / 100.00%     —                                                       True×120   
+
+- **blip-not-scraped**: a gauge excursion shorter than the scrape interval: the page, polling faster than Prometheus, saw it; the TSDB never did. The one direction the page can know more than Grafana.
+- **clamp**: the panel's clamp_min() turns a 0/0 into 0 where the page renders nothing
+- **counter-reset**: a counter that restarted: rate()/increase() adds the reset back, the page's lifetime division silently treats it as a smaller lifetime total
+- **exact**: same series, same math: any real delta is a bug on one side
+- **exact-with-skew**: same series, but the two scrapes were taken apart in time
+- **idle-zero**: the server reports 0 for its average gauge when nothing is running, while rate() still spreads the last burst across the window
+- **label-fanout**: one metric name carrying several label sets: the page sums them into one number, a panel filtered by $model/$job keeps them apart
+- **lifetime-vs-window**: the page divides counters accumulated since server start, the panel divides rate() over a window: the page is a running average that an idle minute cannot move
+- **nan-handling**: NaN/+Inf: the parser gives the page value=null (rendered em-dash, excluded from sums), PromQL keeps NaN (rendered No data)
+- **no-data**: one side has no datapoint at all
+- **reader-reset**: llamacpp's `*_tokens_seconds` gauges average over the interval since *whoever last read /metrics*, so the page's own poll changes what Prometheus sees seconds later: the same quantity differs between the two views by construction. Probe P7 measures the spread on this box.
+- **sum-vs-max**: both sides read the same family but aggregate differently: the page sums every label set, the KV panel takes max()
+- **unit-change**: the page shows a counter total, the panel shows a per-second rate: different units, no agreement expected
+- **window**: the page reads the server's own average-since-scrape gauge, the panel computes rate() over a window: different quantities, both correct
+
+UNEXPLAINED (the ticket's stop condition):
+  - UNEXPLAINED: the page shows a number Grafana's series never had

@@ -1,0 +1,141 @@
+# Prometheus configuration for the LLM box. Committed, reviewed like code.
+#
+# This file is read read-only inside the container at /etc/prometheus/prometheus.yml,
+# so every relative path below (rules.yml, targets/*.json) resolves inside
+# monitoring/prometheus/. Nothing here is generated at start-up: Prometheus only
+# expands environment variables in `external_labels`, never in scrape targets, so
+# a render step would have to run *before* `docker compose up` — see the note in
+# monitoring/README.md ("Why the target list is a file, not a .env variable").
+#
+# Retention (time AND size) is set by --storage.tsdb.* flags in compose.yaml, not
+# here, so it can be tuned from monitoring/.env.
+
+global:
+  # 15s matches the dashboard's own refresh and keeps the retention budget below
+  # honest (see the sizing math in monitoring/README.md).
+  scrape_interval: 15s
+  # Same 5 s cap monitor/serve.py uses for its own upstream calls: a model server
+  # that is too busy to answer /metrics in 5 s is too busy, full stop.
+  scrape_timeout: 5s
+  evaluation_interval: 15s
+  external_labels:
+    # Distinguishes this box's data if a second box is ever federated in.
+    box: strix-halo
+
+rule_files:
+  # Generated from rules.yml.tmpl + alert_thresholds.env by
+  # monitoring/render_rules.py (committed so `docker compose up` needs no build
+  # step; CI fails if the committed render drifts from the thresholds file).
+  - rules.yml
+  - recording_rules.yml
+
+scrape_configs:
+  # ---------------------------------------------------------------- #
+  # 1. The model server, scraped DIRECTLY. This is the preferred path:
+  #    one hop, no proxy in the middle, native metric names.
+  #    Targets live in targets/llm-servers.json (git) — add a server by
+  #    adding an entry there, no restart needed (file_sd refreshes).
+  # ---------------------------------------------------------------- #
+  - job_name: llm-server
+    file_sd_configs:
+      - files:
+          - targets/llm-servers.json
+        refresh_interval: 60s
+    metric_relabel_configs:
+      # Drop noise, never rename (ADR workspace-szw.1): native names such as
+      # llamacpp:prompt_tokens_total are kept verbatim so upstream docs and
+      # copy-pasted queries keep working. Vendor variance is absorbed by
+      # {__name__=~"llamacpp:x|vllm:x"} selectors in the dashboard instead.
+      - source_labels: [__name__]
+        regex: "go_.*|runtime_.*"
+        action: drop
+
+  # ---------------------------------------------------------------- #
+  # 2. The same server through the monitor's passthrough. Keep BOTH jobs
+  #    as shipped: this one keeps ONLY the monitor's own llm_monitor_*
+  #    series, so it adds "is the monitor itself working" without adding a
+  #    second copy of every model-server series.
+  #
+  #    ⚠ DUPLICATION: if you scrape the same server both directly and
+  #    through the passthrough with the keep-rule below removed, every
+  #    sum(rate(...)) in a dashboard double-counts it. Pick ONE source of
+  #    the model server's numbers:
+  #      * direct reachable  -> leave this keep-rule in place (default), or
+  #                             comment this whole job out;
+  #      * direct unreachable-> comment out the llm-server job above AND
+  #                             drop the keep-rule below, so the passthrough
+  #                             becomes the only source.
+  #    monitoring/README.md ("The two llm scrape jobs") is the runbook version
+  #    of this note; the dashboard's $job variable is how you pin a single
+  #    source if you ever do feed both.
+  # ---------------------------------------------------------------- #
+  - job_name: llm-server-via-proxy
+    # host.docker.internal resolves to the host via host-gateway (compose.yaml).
+    static_configs:
+      - targets: ["host.docker.internal:8090"]
+        labels:
+          via: proxy
+          # The upstream the proxy is pointed at; becomes ?url= below. Must
+          # match serve.py's --url (or llm-monitor.service's
+          # LLM_MONITOR_UPSTREAM) or the passthrough scrapes a different
+          # server than the direct job does.
+          llm_upstream: "http://llm.home:8080"
+    metrics_path: /metrics
+    relabel_configs:
+      # One proxy can front several servers: the llm_upstream label becomes the
+      # ?url= query parameter, so /metrics?url=http://llm.home:8001 is scraped
+      # as its own target (and llm_monitor_* carries the same upstream label).
+      - source_labels: [llm_upstream]
+        target_label: __param_url
+    metric_relabel_configs:
+      # Default: only the monitor's self-metrics come from this job (see the
+      # duplication note above). Remove to use the proxy as the metric source.
+      - source_labels: [__name__]
+        regex: "llm_monitor_.*"
+        action: keep
+
+  # ---------------------------------------------------------------- #
+  # 3. The box itself: node_exporter running ON THE HOST as a systemd user
+  #    unit, loopback-bound, with --collector.drm for the amdgpu GPU
+  #    (GTT / VRAM bytes, gpu_busy_percent; hwmon is default-on and carries
+  #    the temps and the package power). No ROCm anywhere — the Vulkan path
+  #    reads the same sysfs the ROCm path would, so installing ROCm to read
+  #    these numbers would be paying for a stack to read what the kernel
+  #    already gives away. See monitoring/node-exporter.service and
+  #    spikes/amd-gpu-metrics/FINDINGS.md (workspace-szw.10) for the matrix.
+  #
+  #    Reachability, because this is the one bit that crosses namespaces:
+  #    the exporter binds 127.0.0.1:9100 on the HOST and must not bind
+  #    anywhere else (it publishes this machine's hardware inventory), so the
+  #    Prometheus container has to come to the host's loopback. The target
+  #    here is therefore `host.docker.internal` — the same host-gateway path
+  #    the llm-server-via-proxy job already uses to reach serve.py on
+  #    127.0.0.1:8090 (extra_hosts in compose.yaml). With rootless docker
+  #    (the topology every *user* unit in this repo assumes) that gateway
+  #    forwards to the host's loopback scope, which is what makes a
+  #    loopback-only exporter scrapeable at all. With rootful docker it does
+  #    not: the target then sits in `host.docker.internal`'s bridge scope and
+  #    the scrape fails with "connection refused". Two fixes, both documented
+  #    in monitoring/README.md ("Host + GPU telemetry"): give the prometheus
+  #    service `network_mode: host` (keeps everything on loopback, and it is
+  #    the option that changes no exposure at all), or bind the exporter to a
+  #    specific bridge address as well — which is an exposure decision of the
+  #    same class as workspace-szw.12, not a default.
+  #
+  #    No metric_relabel_configs: nothing is dropped, so the series count in
+  #    the footprint table (monitoring/README.md#footprint) is exactly the set
+  #    this job ingests, and `process_resident_memory_bytes{job="host"}` stays
+  #    available to check the exporter's own budget from inside Prometheus.
+  # ---------------------------------------------------------------- #
+  - job_name: host
+    file_sd_configs:
+      - files:
+          - targets/host.json
+        refresh_interval: 60s
+
+  # ---------------------------------------------------------------- #
+  # 4. Prometheus itself: scrape health is only visible if it is scraped.
+  # ---------------------------------------------------------------- #
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

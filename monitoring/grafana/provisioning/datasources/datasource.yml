@@ -1,0 +1,23 @@
+# Grafana datasource, provisioned from git (never clicked into existence).
+#
+# `uid: prometheus` is stable and referenced by the dashboard's datasource
+# template variable, so a re-provision never orphans the panels (a datasource
+# created in the UI gets a random uid, and every panel then points at a
+# datasource that a fresh checkout does not have).
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    # Container-network service name; nothing here leaves the box.
+    jsonData:
+      httpMethod: POST
+      timeInterval: 15s
+      # Matches the scrape interval: a shorter step cannot invent resolution
+      # the TSDB does not have, it only makes panels lie more finely.
+      manageAlerts: false

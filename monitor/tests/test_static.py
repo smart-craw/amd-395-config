@@ -47,6 +47,11 @@ REQUIRED_CLASSES = [
     "kv-item", "kv-key", "kv-value",
     "card-error", "card-note", "chip-stale", "empty-state", "banner",
     "card-wide", "metric-sub",
+    # live status vs Grafana history (ADR 0001)
+    "live-tag", "chart-scope", "scrape-health", "scrape-health-ok",
+    "scrape-health-bad", "scrape-health-off", "history-link",
+    "grafana-links", "grafana-links-key", "grafana-links-nav", "grafana-link",
+    "grafana-hint",
 ]
 
 #: Element ids the four cards are built from, with the per-card extras spelled
@@ -239,3 +244,94 @@ class ScriptSafetyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class HistoryBelongsToGrafanaTests(unittest.TestCase):
+    """ADR 0001: the page is the live view, Grafana is the system of record.
+
+    These are the assertions that stop the page from quietly becoming a history
+    dashboard again: what it labels things, and what it links to.
+    """
+
+    def test_the_page_says_it_is_live_not_historical(self):
+        self.assertIn('id="foot-scope"', HTML)
+        self.assertRegex(HTML, r"foot-scope[^<]*</span>|Grafana")
+        self.assertIn("Grafana", HTML)
+        self.assertIn('class="live-tag"', HTML)
+        self.assertIn('class="chart-scope"', HTML)
+        # the trace caption admits what it is
+        self.assertIn("samples in this tab", JS)
+
+    def test_the_page_keeps_its_side_of_the_parity_bargain(self):
+        """workspace-szw.11: Grafana owns derived math, the page shows raw gauges.
+
+        The freeze (workspace-szw.6) said nothing new may be derived in the browser and
+        that the existing derivations leave when parity signs off. Parity signed off
+        (monitoring/PARITY.md), they left, and this test is what keeps them out:
+        vendor-name regexes and counter-over-counter ratios are both easy to re-add
+        in a moment of convenience and both belong in Prometheus.
+        """
+        self.assertIn("workspace-szw.11", JS, "the parity note must name its ticket")
+        self.assertIn("monitoring/PARITY.md", JS, "the parity note must link the write-up")
+        marker = JS.index("PARITY (workspace-szw.11")
+        signals = JS.index("const METRIC_SIGNALS")
+        self.assertLess(marker, signals, "METRIC_SIGNALS is not marked with the parity rules")
+
+        # No fuzzy name matching in the browser: name drift is a recording-rule change.
+        self.assertNotIn("fuzzy", JS, "a vendor-name regex came back to app.js")
+        self.assertNotIn(".test(view.names", JS, "a name-pattern fallback came back to app.js")
+
+        # The deleted arithmetic stays deleted, by name and by metric.
+        for gone in (
+            "acceptPct",
+            "cacheHitPct",
+            "genLifetime",
+            "rateBase",
+            "draft_tokens_accepted_total",
+            "draft_tokens_total",
+            "prompt_tokens_cached_total",
+            "tokens_predicted_seconds_total",
+        ):
+            self.assertNotIn(gone, JS, f"{gone} came back")
+
+    def test_surviving_tiles_are_all_raw_readings(self):
+        """Every tile label says which kind of raw number it is, and none is a ratio."""
+        for kind in ("server avg", "instant", "lifetime"):
+            self.assertIn(kind, JS, f"a tile is missing the {kind!r} qualifier")
+        labels = re.findall(r'label: "([a-z][^"]*tok/s[^"]*|[a-z][^"]*instant[^"]*|[a-z][^"]*lifetime[^"]*)"', JS)
+        self.assertTrue(labels, "no tile labels found to check")
+        for label in labels:
+            self.assertNotIn("%", label, f"{label} renders a computed percentage")
+
+    def test_scrape_health_and_grafana_handles_exist(self):
+        for element_id in (
+            "scrape-health",
+            "grafana-home",
+            "metrics-grafana-links",
+            "metrics-grafana-nav",
+            "metrics-grafana-hint",
+        ):
+            self.assertIn(f'id="{element_id}"', HTML, f"#{element_id} is missing")
+
+    def test_grafana_links_follow_the_reserved_panel_ids(self):
+        """ADR 0001 C4: ids 1-7 are reserved, and var-instance is host:port."""
+        ids = [int(n) for n in re.findall(r"\{\s*id:\s*(\d+),\s*label:", JS)]
+        self.assertEqual(ids, [1, 2, 3, 4, 5, 6, 7], f"GRAFANA_PANELS drifted: {ids}")
+        self.assertIn('GRAFANA_DASHBOARD_PATH = "/d/llm-server/llm-server"', JS)
+        self.assertIn('"orgId=1"', JS)
+        self.assertIn("var-instance=", JS)
+        self.assertIn("var-model=", JS)
+        # dynamic values go through escaping: a gguf path contains / and :
+        self.assertIn("encodeURIComponent(instance)", JS)
+        self.assertIn("encodeURIComponent(model)", JS)
+
+    def test_the_metrics_client_is_marked_parity_checked(self):
+        """The browser must not grow more PromQL-shaped arithmetic."""
+        marker = JS.index("PARITY (workspace-szw.11")
+        signals = JS.index("const METRIC_SIGNALS")
+        self.assertLess(marker, signals, "METRIC_SIGNALS is not marked with the parity rules")
+        self.assertIn("workspace-szw.11", JS, "the parity note must name the parity check")
+
+    def test_history_questions_link_out_instead_of_being_answered_here(self):
+        """No client-side rate window may pretend to be a Prometheus rate()."""
+        self.assertNotIn("rate(", JS, "PromQL does not belong in the browser")
