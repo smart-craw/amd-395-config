@@ -1,0 +1,43 @@
+services:
+  halogen-qwen3.8-flash-next:
+    restart: unless-stopped
+    networks:
+      - halogen-internal # isolate
+    image: ghcr.io/peonist-ai/halogen-flash-server:{{ HALOGEN_TAG }}
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    security_opt:
+      - seccomp:unconfined
+    ipc: host
+    ulimits:
+      memlock: -1
+    environment:
+      # these can be overriden by the calling client on a per-request basis
+      HALOGEN_TEMPERATURE: 1.0
+      HALOGEN_TOP_P: 0.95
+      HALOGEN_TOP_K: 20
+      HALOGEN_MIN_P: 0.0
+      HALOGEN_PRESENCE_PENALTY: 0.0
+    volumes:
+      - {{ MODEL_LOCATION }}:/models:ro
+
+  nginx-openai:
+    restart: unless-stopped
+    networks:
+      - halogen-internal # so litellm can hit halogen
+      - public-inbound
+    image: ghcr.io/smart-craw/smart-craw-llm-proxy:{{ SC_LLM_PROXY_TAG }}
+    ports:
+      - "8080:8080" # only this is exposed to the host/LAN
+    environment:
+      BACKEND_SERVICE: http://halogen-qwen3.8-flash-next:8731
+    depends_on:
+      halogen-qwen3.8-flash-next:
+        condition: service_started
+
+networks:
+  public-inbound:
+    driver: bridge
+  halogen-internal:
+    internal: true
