@@ -36,8 +36,12 @@ Contracts this file must not break
   start at 20, row ids at 100, so a row can never shadow a panel id — with ids
   colliding a `viewPanel=` link is ambiguous, which is what this generator fixed).
   Renumbering 1-7 breaks links that are already bookmarked.
+* **70-89 are the History & rollups row's**, and its panels pass `pid=` explicitly
+  for that reason: `FREE_IDS` allocates in definition order, so a row inserted in
+  the middle of the dashboard would otherwise renumber every later panel (a diff of
+  forty panels that did not change, and `viewPanel=` links that moved silently).
 * Likewise the dashboard uid (`llm-server`), the ADR C4 panel titles, and the
-  template variable names (`job`, `instance`, `model`).
+  template variable names (`job`, `instance`, `model`, `window`).
 * No plugins, no CDN assets, no off-box URL, and the datasource is referenced only
   through the `${datasource}` variable (its uid is set in git:
   `provisioning/datasources/datasource.yml` -> `prometheus`).
@@ -68,7 +72,21 @@ RESERVED = {
     7: "Scrape health (llm_monitor_*) + staleness",
 }
 FREE_IDS = iter(range(20, 1000))
-ROW_IDS = iter(range(100, 900))
+
+#: Row ids, pinned by title. `ROW_IDS` alone would number rows by position, so
+#: inserting one row renumbers every row below it — and a row's id is what a
+#: `panelId=` Grafana URL points at, so that is a silent move of every bookmark that
+#: pointed at a row. Adding a row means adding a line here (the next free block starts
+#: at 107).
+ROW_ID_BY_TITLE = {
+    "Overview": 100,
+    "History & rollups": 101,
+    "Latency": 102,
+    "Cache & KV": 103,
+    "Speculative decode": 104,
+    "Scrape health": 105,
+    "GPU & host": 106,
+}
 
 #: monitoring/prometheus/prometheus.yml scrape_interval. Panels pin their minimum
 #: step to it: a finer step cannot invent resolution the TSDB does not have, it just
@@ -251,6 +269,35 @@ RULE_CACHE = "llm:prompt_cache_hit_ratio"
 RULE_DRAFT = "llm:draft_acceptance_ratio"
 RULE_RUNNING = "llm:requests_running"
 RULE_QUEUED = "llm:requests_queued"
+
+#: Windowed rollups (amd-frx): the same measurements folded over an hour, a day,
+#: a week, by the `llm-rollups` group in ../prometheus/recording_rules.yml. These
+#: are what make a history panel cheap: one stored series per window instead of a
+#: browser re-deriving a week of samples on every redraw.
+RULE_DECODE_MEAN_1H = "llm:decode_tokens_per_second:mean_1h"
+RULE_DECODE_MEAN_24H = "llm:decode_tokens_per_second:mean_24h"
+RULE_DECODE_MEAN_7D = "llm:decode_tokens_per_second:mean_7d"
+RULE_DECODE_MAX_24H = "llm:decode_tokens_per_second:max_24h"
+RULE_PROMPT_MEAN_24H = "llm:prompt_tokens_per_second:mean_24h"
+RULE_REQUESTS_MEAN_24H = "llm:requests_per_second:mean_24h"
+RULE_DECODED_TOKENS_1H = "llm:decoded_tokens:sum_1h"
+RULE_DECODED_TOKENS_24H = "llm:decoded_tokens:sum_24h"
+RULE_DECODED_TOKENS_7D = "llm:decoded_tokens:sum_7d"
+RULE_PROMPT_TOKENS_24H = "llm:prompt_tokens_processed:sum_24h"
+RULE_REQUESTS_DONE_24H = "llm:requests_completed:sum_24h"
+RULE_CACHE_MEAN_24H = "llm:prompt_cache_hit_ratio:mean_24h"
+RULE_DRAFT_MEAN_24H = "llm:draft_acceptance_ratio:mean_24h"
+RULE_KV_MAX_24H = "llm:kv_cache_usage_ratio:max_24h"
+RULE_SCRAPE_OK_24H = "llm:scrape_success_ratio:mean_24h"
+
+#: Prometheus' own self-scrape (the `prometheus` job in prometheus.yml): the
+#: history budget itself. Pinned to `job="prometheus"` rather than $job, because
+#: "how much history is this box keeping, and how much of the size budget has it
+#: used" must not empty out when $job is pinned to a model server.
+PROM_RETENTION_SECONDS = "prometheus_tsdb_retention_limit_seconds"
+PROM_RETENTION_BYTES = "prometheus_tsdb_retention_limit_bytes"
+PROM_BLOCKS_BYTES = "prometheus_tsdb_storage_blocks_bytes"
+PROM_HEAD_SERIES = "prometheus_tsdb_head_series"
 RULE_TTFT = {p: "llm:time_to_first_token_seconds:p%d" % int(round(p * 100)) for p in (0.5, 0.9, 0.99)}
 RULE_TPOT = {p: "llm:time_per_output_token_seconds:p%d" % int(round(p * 100)) for p in (0.5, 0.9, 0.99)}
 RULE_E2E = {p: "llm:end_to_end_response_seconds:p%d" % int(round(p * 100)) for p in (0.5, 0.9, 0.99)}
@@ -319,6 +366,60 @@ def suffix(stems: str, tail: str) -> str:
 
 def rate(selector: str) -> str:
     return "sum(rate(%s[$__rate_interval]))" % selector
+
+
+def window_rate(names: str, window: str) -> str:
+    """`sum(rate(<sel>[<window>]))` — the mean rate over a *fixed* window.
+
+    The point-in-time answer to "how fast over the last <window>", which is what a
+    stat tile wants and what a timeseries of these becomes when Grafana evaluates
+    it across a range: the history of the average, not just the average. rate()
+    already divides by the window, so this is a per-second number however long the
+    window is, and it survives a counter reset (a restart shortens the measured
+    span rather than spiking).
+    """
+    return "sum(rate(%s[%s]))" % (sel(names), window)
+
+
+def window_rate_by(names: str, labels: str, window: str) -> str:
+    return "sum by (%s) (rate(%s[%s]))" % (labels, sel(names), window)
+
+
+def window_increase(names: str, window: str) -> str:
+    """`sum(increase(<sel>[<window>]))` — how much of a counter happened per window.
+
+    A total is the one thing a mean cannot give ("tokens decoded yesterday", not
+    "the average rate yesterday"), and increase() absorbs counter resets, which is
+    what makes these restart-safe where a lifetime ratio is not.
+    """
+    return "sum(increase(%s[%s]))" % (sel(names), window)
+
+
+def window_max(expr: str, window: str, step: str = "5m") -> str:
+    """`max_over_time(<expr>[window:step])` — the peak inside a window.
+
+    The inner expression has to be evaluated at `step`, so the peak is the peak of
+    that grid: 5m matches both the rollup group's interval and the width a
+    throughput line can meaningfully move in.
+    """
+    return "max_over_time(%s[%s:%s])" % (expr, window, step)
+
+
+def self_sel(names: str) -> str:
+    """Prometheus's own series (the `prometheus` job), deliberately not $job-filtered."""
+    return '{__name__=~"%s",job="prometheus"}' % names
+
+
+def window_cache_hit_ratio(window: str) -> str:
+    """Prompt-cache hit ratio pooled over a window: cached / (missed + cached).
+
+    The same llama.cpp convention as PROMPT_CACHE_HIT_RATIO (prompt_tokens_total
+    counts misses only), with increase() instead of rate() so the number is the
+    token-weighted answer for the window rather than a mean of ratios.
+    """
+    cached = window_increase(CACHE_CACHED, window)
+    missed = window_increase(PROMPT_TOKENS, window)
+    return "%s / clamp_min(%s + %s, 1)" % (cached, missed, cached)
 
 
 def rate_by(selector: str, labels: str) -> str:
@@ -428,6 +529,25 @@ def family_count(tail: str, *stems: str) -> str:
     return "count by (instance, job) (%s)" % sel(suffix("|".join(stems), tail), model=False)
 
 
+def window_max_of_rate(names: str, window: str, step: str = "5m") -> str:
+    """The raw twin of an `llm:*:max_24h` rule: the peak windowed rate in a window.
+
+    Needs a subquery step because the inner `sum(rate(...))` is computed, not stored
+    — the same reason `host:gtt_usage_ratio:max_2d` writes `[2d:15m]`.
+    """
+    return window_max("sum(rate(%s[5m]))" % sel(names), window, step)
+
+
+def window_window_mean(expr: str, window: str, step: str = "5m") -> str:
+    """Mean of a computed expression over a window (subquery, so the step is required)."""
+    return "avg_over_time(%s[%s:%s])" % (expr, window, step)
+
+
+def window_draft_ratio(window: str) -> str:
+    """Speculative-decode acceptance pooled over a window (accepted / proposed)."""
+    return ratio(window_increase(DRAFT_ACCEPTED, window), window_increase(DRAFT_TOTAL, window))
+
+
 def ratio(numerator: str, denominator: str) -> str:
     """`numerator / clamp_min(denominator, 1)` — the house ratio shape."""
     return "%s / clamp_min(%s, 1)" % (numerator, denominator)
@@ -523,7 +643,15 @@ def describe(notes: str, targets: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def target(expr: str, legend: str, ref: str = "A") -> dict:
+def target(expr: str, legend: str, ref: str = "A", step: str | None = None) -> dict:
+    """One panel query.
+
+    `step` is the panel's minimum step. It defaults to the scrape interval because a
+    finer step cannot invent resolution the TSDB does not have — but a *coarser* one
+    is sometimes the honest number: a 24 h moving average drawn at 15 s resolution
+    plots 1 500 points of the same average and pays for a day of samples per point
+    to do it. Panels that average over hours set 5m and say so.
+    """
     return {
         "datasource": DATASOURCE,
         "editorMode": "code",
@@ -531,8 +659,9 @@ def target(expr: str, legend: str, ref: str = "A") -> dict:
         "legendFormat": legend,
         "range": True,
         "refId": ref,
-        # Min step == the scrape interval (see SCRAPE_INTERVAL).
-        "interval": SCRAPE_INTERVAL,
+        # Min step == the scrape interval (see SCRAPE_INTERVAL) unless the panel's
+        # own window makes a coarser step the honest one.
+        "interval": step or SCRAPE_INTERVAL,
         "intervalFactor": 1,
     }
 
@@ -640,9 +769,9 @@ def stat(title, notes, targets, *, w=4, h=4, **kwargs):
                   **kwargs)
 
 
-def markdown(title, text, *, w=24, h=2):
+def markdown(title, text, *, w=24, h=2, pid=None):
     return {
-        "id": next(FREE_IDS),
+        "id": pid or next(FREE_IDS),
         "type": "text",
         "title": title,
         "description": text,
@@ -692,6 +821,42 @@ def query_variable(name, label, query, *, hint, refresh=2):
         "sort": 1,
         "description": hint,
     }
+
+
+def custom_variable(name, label, choices, *, chosen, hint):
+    """A fixed list the reader picks from (no query, so nothing can fail to resolve).
+
+    Used for the rollup window: a query variable would have to ask Prometheus for
+    durations it does not have, and a free-text box is a dashboard where a typo
+    renders as an empty panel. The list is also what `check_monitoring.py` reads to
+    hold the widest window against the retention the compose file defaults to.
+    """
+    return {
+        "name": name,
+        "label": label,
+        "type": "custom",
+        "query": ",".join(choices),
+        "current": {"text": chosen, "value": chosen, "selected": True},
+        "options": [
+            {"text": c, "value": c, "selected": c == chosen} for c in choices
+        ],
+        "hide": 0,
+        "includeAll": False,
+        "multi": False,
+        "definition": ",".join(choices),
+        "refresh": 0,
+        "regex": "",
+        "skipUrlSync": False,
+        "sort": 0,
+        "description": hint,
+    }
+
+
+#: Durations the History row may average over. Every entry has to be shorter than
+#: PROMETHEUS_RETENTION_TIME (compose.yaml); 7d is the widest one shipped because a
+#: week is the horizon at which "yesterday was weird" becomes "this box has a
+#: pattern", and it is a tenth of the retention the stack defaults to.
+WINDOW_CHOICES = ["5m", "15m", "1h", "6h", "24h", "7d"]
 
 
 VARIABLES = [
@@ -748,6 +913,22 @@ VARIABLES = [
              "`model` — hence the alias in the selector. An empty list means no model "
              "label anywhere: All (.*) then keeps every panel working, and the per-model "
              "panel draws one line called 'unknown'.",
+    ),
+    custom_variable(
+        "window",
+        "Rollup window",
+        WINDOW_CHOICES,
+        chosen="1h",
+        hint=(
+            "How wide the History row's windows are. Every value here is a PromQL "
+            "duration spliced straight into rate() / increase(), and the widest one is "
+            "the ceiling on how far back a panel can average - so it, and every literal "
+            "window in a panel or a recording rule, has to stay inside "
+            "PROMETHEUS_RETENTION_TIME, which is what check_monitoring.py enforces. A "
+            "window longer than retention does not error: it silently averages only the "
+            "part still on disk, which is the most misleading failure this dashboard "
+            "could have."
+        ),
     ),
 ]
 
@@ -947,6 +1128,268 @@ def overview_row():
         ),
     ]
     return ("Overview", panels, False)
+
+
+def history_row():
+    """The history row (amd-frx): averages over hours and days, not just right now.
+
+    Panel ids are pinned to the 70-89 block on purpose. `FREE_IDS` hands out ids in
+    definition order, so a row inserted second would otherwise renumber every panel
+    in the five rows below it — a diff of forty unchanged panels, and any bookmarked
+    `viewPanel=` link to them, silently moved. 1-7 stay ADR 0001 C4's; 70-89 are
+    this row's.
+    """
+    panels = [
+        markdown(
+            "What 'history' means on this box",
+            "Everything above this line answers *right now*. This row answers **how "
+            "fast was it yesterday, how much work happened last week, was the cache "
+            "warm overnight** — the same measurements folded over a window.\n\n"
+            "* **Where the numbers come from.** Each panel plots the raw expression "
+            "(computed at query time from the counters) and the pre-computed "
+            "`llm:*:mean_1h|mean_24h|sum_24h` rollups from "
+            "`monitoring/prometheus/recording_rules.yml` beside them, for the same "
+            "reason the other rows plot `(rule)` aliases: a panel must still render "
+            "where the rules have never run.\n\n"
+            "* **A mean over a window is a mean over the samples that exist.** Six "
+            "hours of a 24 h window with the server down contributes nothing to the "
+            "mean, so these read *mean throughput while it was up*. That is the useful "
+            "meaning; a mean that charged downtime to the average would say the box got "
+            "slower. `llm:scrape_success_ratio:mean_24h`, in the next chart down, is "
+            "how you tell the two apart.\n\n"
+            "* **Totals use `increase()`, not a mean times a window.** A restart "
+            "shortens the measured span instead of double-counting it, which is the "
+            "failure mode the 'Lifetime tok/s' tile above has.\n\n"
+            "* **Nothing here looks further back than retention allows.** Every window "
+            "in this row, and the widest value `$window` offers, is smaller than "
+            "`PROMETHEUS_RETENTION_TIME` (default 30 d), and `check_monitoring.py` "
+            "fails the build when that stops being true — because a window longer than "
+            "retention does not error, it silently averages whatever is left on disk. "
+            "The three tiles at the bottom of this row are that budget itself.",
+            w=24, h=6, pid=70,
+        ),
+        stat(
+            "decode tok/s · mean last hour",
+            "Mean generation throughput over the last hour: rate() over a fixed 1 h "
+            "window, which divides by its own window and so is a per-second number, "
+            "beside the `llm:decode_tokens_per_second:mean_1h` rollup that computes the "
+            "same thing inside Prometheus every 5m.\n\n"
+            "Where the two differ, the rollup is the lagging one: it folds the 5 m "
+            "aliases and is rewritten every 5 m, while the raw line is evaluated exactly "
+            "now.",
+            [
+                target(window_rate(DECODE_TOKENS, "1h"), "raw: 1 h mean"),
+                target(var(RULE_DECODE_MEAN_1H), "llm:decode_tokens_per_second:mean_1h (rule)"),
+            ],
+            pid=71, unit="short", decimals=1, w=4, h=5,
+        ),
+        stat(
+            "decode tok/s · mean last day",
+            "The same fold over 24 h: a full day of decode averaged into one number, the "
+            "night included. Compare with the 1 h tile to its left — a day mean well "
+            "below the hour mean means the box has been getting busier (or slower) since "
+            "midnight, not that anything is wrong now.\n\n"
+            "Idle hours *are* in this mean (an idle server still reports a 0 rate); hours "
+            "with no samples at all are not, which is what the note at the top of the row "
+            "is about.",
+            [
+                target(window_rate(DECODE_TOKENS, "24h"), "raw: 24 h mean"),
+                target(var(RULE_DECODE_MEAN_24H), "llm:decode_tokens_per_second:mean_24h (rule)"),
+            ],
+            pid=72, unit="short", decimals=1, w=4, h=5,
+        ),
+        stat(
+            "decode tok/s · mean last week",
+            "Seven days: the box's steady state rather than today's mood. This is the "
+            "number to quote when deciding whether a change (a quantisation, a different "
+            "slot count, another model) actually helped.\n\n"
+            "The rule side reads a 10 m-step subquery rather than every 30 s sample "
+            "(`[7d:10m]`), so it is a sampled mean — accurate to far less than the "
+            "variation worth noticing on a week's scale, and bounded in cost the same "
+            "way `host:gtt_usage_ratio:max_2d` is. On a Prometheus that just lost its "
+            "TSDB the rule side stays empty until the 10 m grid has a point (~10 min), "
+            "and is only a week-representative once it has a week.",
+            [
+                target(window_rate(DECODE_TOKENS, "7d"), "raw: 7 d mean"),
+                target(var(RULE_DECODE_MEAN_7D), "llm:decode_tokens_per_second:mean_7d (rule)"),
+            ],
+            pid=73, unit="short", decimals=1, w=4, h=5,
+        ),
+        stat(
+            "decode tok/s · peak last day",
+            "The best five minutes of the last day: "
+            "`max_over_time(sum(rate(<decode tokens>[5m]))[24h:5m])` and the "
+            "`llm:decode_tokens_per_second:max_24h` rollup. A mean cannot answer 'what "
+            "is this box capable of', and a capacity decision taken from a mean is a "
+            "decision taken against the idle half of the day.",
+            [
+                target(window_max_of_rate(DECODE_TOKENS, "24h"), "raw: 24 h peak of the 5 m rate"),
+                target(var(RULE_DECODE_MAX_24H), "llm:decode_tokens_per_second:max_24h (rule)"),
+            ],
+            pid=74, unit="short", decimals=1, w=4, h=5,
+        ),
+        stat(
+            "tokens decoded · last day",
+            "Not a rate: how much generation actually happened — "
+            "`sum(increase(<decode tokens>[24h]))` plus the `llm:decoded_tokens:sum_24h` "
+            "rollup. The throughput tiles say how fast, this says how much, and the pair "
+            "is what a cost or energy estimate needs.\n\n"
+            "`increase()` absorbs counter resets, so a restart overnight costs the hours "
+            "it was down and nothing else (unlike dividing two lifetime counters).",
+            [
+                target(window_increase(DECODE_TOKENS, "24h"), "raw: tokens in 24 h"),
+                target(var(RULE_DECODED_TOKENS_24H), "llm:decoded_tokens:sum_24h (rule)"),
+            ],
+            pid=75, unit="short", decimals=0, w=4, h=5,
+        ),
+        stat(
+            "requests · last day",
+            "Completed requests in the last 24 h, from the same counter the requests/s "
+            "panels rate, plus the `llm:requests_completed:sum_24h` rollup. Divide the "
+            "tokens tile above by this for tokens per request, which is the shape of the "
+            "traffic: the same tok/s means something different at 40-token answers and "
+            "at 2 000-token ones.",
+            [
+                target(window_increase(REQUESTS_TOTAL, "24h"), "raw: requests in 24 h"),
+                target(var(RULE_REQUESTS_DONE_24H), "llm:requests_completed:sum_24h (rule)"),
+            ],
+            pid=76, unit="short", decimals=0, w=4, h=5,
+        ),
+        ts(
+            "Decode tok/s — averaged over $window",
+            "The history of the average, not just the average: `rate()` over a fixed "
+            "$window evaluated at every step, so the line is a moving mean of throughput "
+            "$window wide. The $window picker is the whole point — 5 m is a zoomed-in "
+            "chart, 24 h is a daily shape, 7 d is the trend under the noise.\n\n"
+            "Two fixed rollups are drawn for reference, so a wide window still reads "
+            "against a narrow one: `llm:decode_tokens_per_second:mean_1h` and `:mean_24h`. "
+            "With $window = 1 h the raw line and the 1 h rollup are the same answer "
+            "computed twice (once at query time, once by Prometheus every 5 m); where "
+            "they disagree the rollup is up to one rule interval behind.\n\n"
+            "The minimum step here is 5 m, not the 15 s scrape: a $window-wide average "
+            "cannot show 15 s of detail no matter how many points are plotted, and every "
+            "extra point pays for a window of samples to compute it.",
+            [
+                target(window_rate(DECODE_TOKENS, "$window"), "mean over $window (raw)", step="5m"),
+                target(window_rate_by(DECODE_TOKENS, "instance, job", "$window"),
+                       "{{instance}} {{job}} over $window", step="5m"),
+                target(var(RULE_DECODE_MEAN_1H), "1 h mean (rule)"),
+                target(var(RULE_DECODE_MEAN_24H), "24 h mean (rule)"),
+            ],
+            pid=77, unit="short", decimals=2, w=12, h=8,
+        ),
+        ts(
+            "Work done per $window",
+            "Totals, not rates: `increase()` over $window for decode tokens (left axis), "
+            "prompt tokens (left axis) and completed requests (right axis, because a "
+            "request count is three orders of magnitude below a token count and on a "
+            "shared axis it would be a flat line).\n\n"
+            "This answers 'what did this box produce yesterday' without a spreadsheet, "
+            "and the shape it draws is the workload's own rhythm: the night that looks "
+            "merely low on a throughput chart is unmistakable here, because an idle night "
+            "is a 0 total rather than a low average.",
+            [
+                target(window_increase(DECODE_TOKENS, "$window"), "decode tokens / $window", "A", step="5m"),
+                target(window_increase(PROMPT_TOKENS, "$window"), "prompt tokens / $window", "B", step="5m"),
+                target(window_increase(REQUESTS_TOTAL, "$window"), "requests / $window", "C", step="5m"),
+                target(var(RULE_DECODED_TOKENS_24H), "decode tokens / 24 h (rule)", "D"),
+            ],
+            pid=78, unit="short", decimals=0, w=12, h=8,
+            overrides=[axis("C", unit="short", decimals=0, placement="right", label="requests")],
+        ),
+        ts(
+            "Cache, speculation and KV pressure over $window",
+            "Three ratios that share a 0-1 axis, each pooled over $window (increases "
+            "divided by increases, which is the token-weighted answer rather than a mean "
+            "of five-minute ratios):\n\n"
+            "* prompt-cache hit ratio, `cached / (processed + cached)` — llama.cpp's "
+            "prompt counter counts cache MISSES, so the denominator is both halves;\n"
+            "* speculative-decode acceptance, `accepted / proposed`;\n"
+            "* the KV pool's **peak** usage inside the window, "
+            "`max_over_time(max(...)[...])` — a 30 s saturation that a 24 h mean smooths "
+            "into nothing still shows up here, which is the whole answer to 'was the KV "
+            "pool the limit overnight'.\n\n"
+            "`llm:prompt_cache_hit_ratio:mean_24h` and `llm:kv_cache_usage_ratio:max_24h` "
+            "are drawn as the fixed-window references.",
+            [
+                target(window_cache_hit_ratio("$window"), "prompt-cache hit ratio over $window", step="5m"),
+                target(window_draft_ratio("$window"), "draft acceptance over $window", step="5m"),
+                target(window_max(gauge_max(sel(KV_RATIO)), "$window"), "KV peak over $window", step="5m"),
+                target(var(RULE_CACHE_MEAN_24H), "prompt-cache hit ratio, 24 h (rule)"),
+                target(var(RULE_KV_MAX_24H), "KV peak, 24 h (rule)"),
+            ],
+            pid=79, unit="percentunit", decimals=2, min=0, max=1, w=12, h=8,
+        ),
+        ts(
+            "Was the history itself complete? scrape success over $window",
+            "A flat line is either an idle server or a blind monitor, and on a history "
+            "row that difference matters more than anywhere else: a 24 h mean computed "
+            "from six hours of samples is not a 24 h mean. `avg_over_time` of the "
+            "monitor's own `llm_monitor_scrape_ok` gauge over $window, beside "
+            "`llm:scrape_success_ratio:mean_24h` (which folds the 10 m alias the Scrape "
+            "health row plots).\n\n"
+            "1 = the monitor's most recent scrape had succeeded for the whole window. "
+            "Below that, part of the window has no data in it, and every mean on this row "
+            "describes the hours that reported rather than the hours that were quiet.",
+            [
+                target("avg(avg_over_time(%s[$window]))" % raw(MONITOR_SCRAPE_OK),
+                       "mean over $window (raw)", step="5m"),
+                target(var(RULE_SCRAPE_OK_24H), "llm:scrape_success_ratio:mean_24h (rule)"),
+            ],
+            pid=80, unit="percentunit", decimals=3, min=0, max=1, w=12, h=8,
+            no_value="no llm_monitor_* series: the passthrough job is not being scraped",
+        ),
+        stat(
+            "history configured",
+            "`prometheus_tsdb_retention_limit_seconds` — how far back Prometheus keeps "
+            "anything, as Prometheus itself reports it: the "
+            "`--storage.tsdb.retention.time` flag behind `PROMETHEUS_RETENTION_TIME` in "
+            "`monitoring/.env`. Grafana renders the seconds as a duration, so this tile "
+            "is the row's own speed limit: no window on this row may exceed it.\n\n"
+            "Pinned to `job=\"prometheus\"` on purpose — the monitoring stack's own "
+            "health must not empty out when `$job` is pinned to a model server.",
+            [target("avg(%s)" % self_sel(PROM_RETENTION_SECONDS), "retention time")],
+            pid=81, unit="s", decimals=0, w=8, h=5,
+            no_value="the prometheus self-scrape job is not being scraped",
+        ),
+        stat(
+            "history on disk",
+            "`sum(prometheus_tsdb_storage_blocks_bytes)` — the compacted history sitting "
+            "on disk right now, against the 2 GB `retention.size` cap the stack ships "
+            "(sizing arithmetic: monitoring/README.md, 'Retention sizing').\n\n"
+            "Pinned to `job=\"prometheus\"` for the same reason as the tile beside it.",
+            [target("sum(%s)" % self_sel(PROM_BLOCKS_BYTES), "TSDB blocks")],
+            pid=82, unit="bytes", decimals=0, w=8, h=5,
+            no_value="the prometheus self-scrape job is not being scraped",
+        ),
+        stat(
+            "size budget used",
+            "On-disk TSDB over the `retention.size` budget: "
+            "`(sum(storage_blocks_bytes) and (sum(retention_limit_bytes) > 0)) / "
+            "clamp_min(sum(retention_limit_bytes), 1)`. The `and (sum(...) > 0)` guard is "
+            "why a box running with no size cap reads **No data** here instead of a "
+            "divide-by-nothing 100 %: with no cap there is no budget to have used.\n\n"
+            "This is the early-warning tile. Hitting the size cap is not an outage — "
+            "Prometheus deletes whole blocks of the oldest data — but it does mean the "
+            "history is shorter than `history configured` claims, and that the windows on "
+            "this row are averaging what is left.",
+            [
+                target(
+                    "(sum(%s) and (sum(%s) > 0)) / clamp_min(sum(%s), 1)"
+                    % (self_sel(PROM_BLOCKS_BYTES), self_sel(PROM_RETENTION_BYTES),
+                       self_sel(PROM_RETENTION_BYTES)),
+                    "used / cap",
+                )
+            ],
+            pid=83, unit="percentunit", decimals=1, min=0,
+            thresholds=[{"color": "green", "value": None},
+                        {"color": "yellow", "value": 0.75},
+                        {"color": "red", "value": 0.9}],
+            w=8, h=5,
+            no_value="no retention.size cap configured (or no self-scrape)",
+        ),
+    ]
+    return ("History & rollups", panels, False)
 
 
 def latency_row():
@@ -1747,12 +2190,12 @@ def build() -> dict:
     out: list[dict] = []
     y = 0
     for title, panels, collapsed in [
-        overview_row(), latency_row(), cache_row(), spec_row(), scrape_row(),
+        overview_row(), history_row(), latency_row(), cache_row(), spec_row(), scrape_row(),
         gpu_host_row()
     ]:
         used = flow(panels, start_y=y + 1)
         entry: dict = {
-            "id": next(ROW_IDS),
+            "id": ROW_ID_BY_TITLE[title],
             "type": "row",
             "title": title,
             "collapsed": collapsed,

@@ -28,8 +28,8 @@ no CDN assets, both UIs bound to loopback.
 | `prometheus/targets/host.json` | the host exporter's target (hot-reloaded; loopback-scoped) |
 | `prometheus/rules.yml.tmpl` + `prometheus/alert_thresholds.env` | alert rules template + the thresholds to tune per box |
 | `prometheus/rules.yml` | **generated** from those two — committed, drift-checked |
-| `prometheus/recording_rules.yml` | the neutral `llm:*` aliases + the `host:*` baselines (hand-written) |
-| `prometheus/unit-tests.yml` | `promtool test rules` unit tests for the alert rules |
+| `prometheus/recording_rules.yml` | the neutral `llm:*` aliases, the `llm:*:mean_24h`-style windowed rollups and the `host:*` baselines (hand-written) |
+| `prometheus/unit-tests.yml` | `promtool test rules` unit tests: the alert rules and the windowed rollups |
 | `render_rules.py` | renders `rules.yml` from the template + thresholds (`--check` for CI) |
 | `grafana/provisioning/` | datasource + dashboard provider, mounted read-only |
 | `grafana/dashboards/` | provisioned dashboard JSON (see "The dashboard") |
@@ -301,14 +301,15 @@ fails — `node_scrape_collector_success{collector="drm"} 0`, verified in the sp
 Both caps are mandatory on this box (`compose.yaml`):
 
 ```
---storage.tsdb.retention.time=15d     # how far back
+--storage.tsdb.retention.time=30d     # how far back
 --storage.tsdb.retention.size=2GB     # the hard ceiling
 ```
 
-The time cap answers "was the KV cache full overnight" and the 7-day questions
-with margin. The **size** cap exists because this box trades RAM against model
-weight memory (see `amdgpu.gttsize` / `ttm.pages_limit` in the root README) and
-telemetry must never be the thing that wedges it.
+The time cap answers "was the KV cache full overnight", the 7-day averages on the
+History row and the 30-day range the time picker offers. The **size** cap exists
+because this box trades RAM against model weight memory (see `amdgpu.gttsize` /
+`ttm.pages_limit` in the root README) and telemetry must never be the thing that
+wedges it.
 
 Order-of-magnitude arithmetic, so the 2 GB ceiling is not a magic number:
 
@@ -323,8 +324,19 @@ Order-of-magnitude arithmetic, so the 2 GB ceiling is not a magic number:
 * ⇒ `3 000 × 5760 × 1.5 B ≈ 26 MB/day` → **~0.4 GB over 15 days**, i.e. the size
   cap is insurance for a second server, a chattier `/metrics`, or a leaked
   high-cardinality label — not the normal working limit. With the host job in the
-  mix the same arithmetic gives ~4 300 series → **~37 MB/day, ~0.55 GB over 15 d**,
-  still inside the 2 GB cap with room.
+  mix the same arithmetic gives ~4 300 series → **~37 MB/day, ~1.1 GB over the 30 d
+  the time cap now allows**, still inside the 2 GB cap with room.
+* the **windowed rollups** (recording_rules.yml, group `llm-rollups`) are the cheap
+  part of the budget by a wide margin: 15 rules × one series per
+  (job, instance, model), written every 5 m → two servers labelled gives ~30 series
+  × 288 samples/day × 1.5 B ≈ **13 kB/day**. Rollups are what make a long history
+  affordable, so if the budget ever has to shrink, cut the raw retention and keep
+  them (see [History and rollups](#history-and-rollups)).
+
+Raising the **time** cap is cheap in exactly this way, because the size cap below it
+is unchanged: 30 d costs ~1.1 GB where 15 d cost ~0.55 GB, and 2 GB remains the
+worst case either way. The cap is what bounds the disk; the time cap only decides how
+far back a question can be answered.
 
 Read the real numbers instead of trusting the estimate:
 
@@ -335,7 +347,53 @@ du -sh "$(docker volume inspect --format '{{ .Mountpoint }}' llm-monitoring_prom
 ```
 
 Lower `PROMETHEUS_RETENTION_SIZE` (or `_TIME`) in `.env` and restart if it grows;
-nothing else changes.
+nothing else changes — except that every window in the dashboard and in
+`recording_rules.yml` has to stay inside whatever `_TIME` becomes, which is what
+`check_monitoring.py` now enforces (see
+[History and rollups](#history-and-rollups)).
+
+## History and rollups
+
+The dashboard is not a point-in-time readout any more than the TSDB is. The
+**History & rollups** row answers the windowed questions — *mean decode tok/s over
+the last hour / day / week, peak of the last day, tokens and requests per day, cache
+hit ratio pooled over a day, KV peak overnight* — and it does it from two places at
+once, the same way every other row does:
+
+* **computed at query time** from the counters: `sum(rate(x[$window]))`,
+  `sum(increase(x[$window]))`, `max_over_time(sum(rate(x[5m]))[24h:5m])`;
+* **pre-computed by Prometheus** as the `llm:*:mean_1h|mean_24h|mean_7d|sum_24h|max_24h`
+  aliases in `prometheus/recording_rules.yml`, group `llm-rollups` (interval 5 m),
+  which the panels plot beside their raw twins.
+
+Four things about those numbers are worth knowing before quoting one:
+
+* **A window mean averages the samples that exist.** `avg_over_time` over a 24 h
+  window in which the server was down for six hours divides by the eighteen hours
+  that reported, not by 24 h. That is deliberate — a mean that charged downtime to
+  the average would say the box got slower — but it means a mean and
+  `llm:scrape_success_ratio:mean_24h` have to be read together, which is why they are
+  on the same row.
+* **`:mean_` on a ratio is pooled, not averaged.** The cache-hit and
+  draft-acceptance rollups divide increases by increases, so a busy hour weighs what
+  it should instead of being outvoted by eleven quiet ones.
+* **Totals use `increase()`.** Counter resets are absorbed, so a restart overnight
+  costs the hours it was down and does not re-base the number the way dividing two
+  lifetime counters does.
+* **A window never outgrows retention.** Every literal window in a panel or a
+  recording rule, every value the `$window` picker offers, and the furthest range the
+  time picker offers must fit inside `PROMETHEUS_RETENTION_TIME`. Not for tidiness:
+  a `[30d]` window on a box with 15 d of retention does not fail and does not warn,
+  it silently answers from the half it has, and a chart cannot be made to look more
+  correct than that. `check_monitoring.py --promtool` fails the build instead
+  (`check_history_horizon`).
+
+Want more history than retention gives? Keep the rollups and raise the time cap; the
+raw series are what costs, the rollups are three orders of magnitude cheaper and are
+the series worth keeping a year of. Remote-writing them somewhere with a longer clock
+is the next step up, and it is deliberately **not** in this stack: it needs a second
+box or a second daemon, and the ADR's rule is that the box keeps its own telemetry
+without a second moving part.
 
 ## Footprint
 
@@ -622,6 +680,7 @@ file's docstring for why. Rows, and the question each answers:
 | row | the question |
 | --- | --- |
 | Overview | decode / prompt tok/s, requests running / queued / per second, structured share, per-model tok/s, KV % and the tile-sized now-values |
+| History & rollups | the windowed questions: mean decode tok/s over the last hour / day / week, the peak of the last day, tokens and requests per day, cache / speculation / KV pooled over a window, and how much history the box is actually configured to keep |
 | Latency | TTFT, time-per-output-token and end-to-end at p50/p90/p99 — the panel set the bespoke page could not render at all |
 | Cache & KV | "was the KV cache full overnight?", tokens vs pool, prompt-cache hit ratio vs reprocessed tokens |
 | Speculative decode | draft acceptance, drafts per accepted token, the speculation time budget and whether speculation is still paying |
@@ -645,10 +704,12 @@ exposition text, and a dashboard of 60 unlabeled series answers no question.
 
 ### Template variables
 
-`$job`, `$instance`, `$model` (plus `$datasource`). All three are multi with
-**All** selected and `allValue: .*`, so an absent label widens the selector instead
-of emptying the panel. Notes that cost something to learn and are easy to undo by
-accident:
+`$job`, `$instance`, `$model`, `$window` (plus `$datasource`). The first three are
+multi with **All** selected and `allValue: .*`, so an absent label widens the
+selector instead of emptying the panel. `$window` is a **custom** variable (a fixed
+list, not a query) and is spliced into the History row's `rate()` / `increase()`
+windows: 5 m for a zoomed-in chart, 24 h for a daily shape, 7 d for the trend. Notes
+that cost something to learn and are easy to undo by accident:
 
 * Grafana parses `label_values(a, b)` with a regex that cannot contain a comma, and
   hands `a` to Prometheus as `match[]`, so `a` must be a plain **series selector** —
@@ -673,7 +734,9 @@ accident:
 ### Refresh, range, step
 
 `refresh: 15s` (the scrape interval — refreshing faster cannot show anything new),
-default range 6h, minimum step 15s on the dashboard and on every target. Grafana's
+default range 6h, minimum step 15s on the dashboard and on every target except the
+History row's moving averages, which ask for 5m: a 24 h average cannot resolve 15 s
+of detail, and every extra point costs a window of samples to compute. Grafana's
 own floor is `GF_DASHBOARDS_MIN_REFRESH_INTERVAL: 15s` in `compose.yaml`.
 
 ### What "no data" means, and what it does not
@@ -800,6 +863,16 @@ Adding a serving stack means adding its metric names to the selector constants i
 not twenty panel edits. `check_monitoring.py` fails if a panel plots an `llm:*` or
 `host:*` name that no rule records.
 
+The third group in that file, **`llm-rollups`** (amd-frx), is the windowed fold of the
+first group: `llm:decode_tokens_per_second:mean_1h`, `:mean_24h`, `:mean_7d`,
+`:max_24h`, `llm:decoded_tokens:sum_24h`, `llm:prompt_cache_hit_ratio:mean_24h`, and
+so on — the same measurements averaged over an hour, a day and a week so a panel can
+ask a history question without re-deriving a week of samples in the browser. They
+read the 5 m aliases rather than the raw counters (so they inherit the vendor-name
+union and the normalized `model` label), except the totals, which are `increase()`
+over the counters because a mean cannot express "how many". Semantics, cost and the
+retention rule that bounds them: [History and rollups](#history-and-rollups).
+
 ## Changing a panel
 
 Never in the UI: `allowUiUpdates: false`, `disableDeletion: true` and
@@ -874,12 +947,21 @@ docker compose -f monitoring/compose.yaml -f monitoring/compose.lan.yaml config 
 
 `check_monitoring.py --promtool` additionally borrows promtool's PromQL parser to
 **type-check every panel expression in the dashboard**: it writes each `expr` to a
-throwaway recording-rule file (`$__rate_interval` substituted for a real duration)
-and runs `promtool check rules` on it. That is what catches a `sum by (le) rate(x)`
-missing its parens, an `avg_over_time(max(...))` that would need a subquery step, or
-an unbalanced paren — none of which a JSON schema can see, and all of which otherwise
-surface as a panel that silently says "No data" a week later. CI runs it
-(`.github/workflows/test.yml`, `monitoring` job).
+throwaway recording-rule file (`$__rate_interval` and every `$window` value
+substituted for real durations, so a bad window is caught at the width it would be
+used at) and runs `promtool check rules` on it. That is what catches a
+`sum by (le) rate(x)` missing its parens, an `avg_over_time(max(...))` that would need
+a subquery step, or an unbalanced paren — none of which a JSON schema can see, and all
+of which otherwise surface as a panel that silently says "No data" a week later. CI
+runs it (`.github/workflows/test.yml`, `monitoring` job).
+
+And without promtool at all, `check_history_horizon` (amd-frx) holds the *history*
+contract: every literal window in a panel or recording rule, every value the `$window`
+picker offers and the furthest range the time picker offers must fit inside the
+retention `compose.yaml` defaults to (which must match what `.env.example` documents),
+and every windowed `llm:*` / `host:*` alias a panel plots must be a rule that exists.
+A window past the retention edge is not an error to Prometheus — it averages whatever
+is left — so the check is the only place that failure can be caught.
 
 `promtool` is a single static binary from the Prometheus release matching the
 pinned image (and it is inside the pinned image too: `docker compose -f
@@ -1093,6 +1175,16 @@ is the last resort, not the first.
 **“What was p99 TTFT yesterday?”** → Grafana ▸ LLM Server ▸ Latency, range on the
 incident window. If the range is shorter than `PROMETHEUS_RETENTION_TIME`, the
 answer does not exist — that is a retention decision, not a bug.
+
+**“What was this box's average throughput yesterday?”** → Grafana ▸ LLM Server ▸
+History & rollups. `decode tok/s · mean last day` is the number, `· mean last week`
+is the trend under it, `Decode tok/s — averaged over $window` is the shape between
+them, and `tokens decoded · last day` is what that throughput actually produced. If
+those tiles say `No data` while the Overview row is live, the `llm-rollups` rule
+group has not run (or has not run long enough for the window to fill): `curl -s
+'http://127.0.0.1:9090/api/v1/rules' | python3 -m json.tool | grep -A4 llm-rollups`
+says when it last evaluated, and `promtool query instant
+http://127.0.0.1:9090 'llm:decode_tokens_per_second:mean_24h'` says what it wrote.
 
 **“Was the KV cache saturated overnight?”** → Cache & KV row, range 12–24 h: the
 usage series with its 1 h average and the 80 %/97 % bands drawn on the chart. The
