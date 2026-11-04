@@ -1,6 +1,6 @@
 [
   {
-    "targets": ["halogen.llm.danielhstahl.com:443"],
+    "targets": ["halogen.llm.danielhstahl.com"],
     "labels": {
       "model": "qwen3.8-flash",
       "env": "home"
