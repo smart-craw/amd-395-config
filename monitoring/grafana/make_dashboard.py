@@ -36,6 +36,12 @@ Contracts this file must not break
   start at 20, row ids at 100, so a row can never shadow a panel id — with ids
   colliding a `viewPanel=` link is ambiguous, which is what this generator fixed).
   Renumbering 1-7 breaks links that are already bookmarked.
+* Query **refIds are unique inside a panel** and are referenced from two other places
+  in the output: the `byFrameRefID` field overrides (`axis()` below) and the
+  `PromQL sent by this panel:` block in each description. Grafana rejects a panel
+  where two queries share a refId — "multiple queries using the same RefId" — so
+  refIds are numbered by position (`assign_refs`), and the description and the
+  overrides are written from the refIds after that numbering, never before.
 * Likewise the dashboard uid (`llm-server`), the ADR C4 panel titles, and the
   template variable names (`job`, `instance`, `model`).
 * No plugins, no CDN assets, no off-box URL, and the datasource is referenced only
@@ -74,6 +80,11 @@ ROW_IDS = iter(range(100, 900))
 #: step to it: a finer step cannot invent resolution the TSDB does not have, it just
 #: lets a panel lie more finely.
 SCRAPE_INTERVAL = "15s"
+
+#: refIds, in the order queries are numbered by `assign_refs`. Grafana addresses
+#: queries by refId inside a panel, so they must be unique per panel; 26 is also the
+#: most Grafana's own editor offers.
+REF_IDS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 #: KV pressure bands, matching alert_thresholds.env (warn 0.90 / critical 0.97 on
 #: the alerts; the ticket asks for visible 80 % / 90 % guides on the panel, so the
@@ -510,6 +521,33 @@ def axis(ref, *, unit=None, decimals=None, placement=None, label=None, dashed=Fa
 
 
 
+def assign_refs(targets: list[dict]) -> list[dict]:
+    """Number a panel's queries A, B, C... in the order they are listed.
+
+    refIds have to be unique inside a panel: two queries sharing one is a hard error
+    in Grafana ("multiple queries using the same RefId") and, for the panels this
+    generator writes, the duplicate would also be the thing `axis()` overrides and
+    the description try to point at. Call sites pass a ref only where the letter is
+    load-bearing (an `axis()` override names one); the rest are filled in by
+    position, so adding a query to a panel cannot collide with its neighbours.
+
+    Called from `_panel` *before* `describe()`, so the documented PromQL block always
+    carries the refIds the panel actually sends.
+    """
+    taken = {t["refId"] for t in targets if t.get("refId")}
+    spare = [letter for letter in REF_IDS if letter not in taken]
+    for item in targets:
+        if not item.get("refId"):
+            if not spare:
+                raise ValueError(
+                    "a panel cannot have more queries than %d refIds" % len(REF_IDS))
+            item["refId"] = spare.pop(0)
+    refs = [item.get("refId") for item in targets]
+    if len(set(refs)) != len(refs):
+        raise ValueError("duplicate refIds in one panel: %s" % refs)
+    return targets
+
+
 def describe(notes: str, targets: list[dict]) -> str:
     """Panel description = the prose *and* the expressions it describes.
 
@@ -518,18 +556,23 @@ def describe(notes: str, targets: list[dict]) -> str:
     """
     lines = [notes.strip(), "", "PromQL sent by this panel:", "", "```promql"]
     for item in targets:
-        lines.append("%s: %s" % (item.get("refId", "A"), item.get("expr", "")))
+        # Strict on purpose: a missing refId here means `assign_refs` was skipped, and
+        # defaulting it would write a description that documents a query the panel
+        # does not send.
+        lines.append("%s: %s" % (item["refId"], item.get("expr", "")))
     lines.append("```")
     return "\n".join(lines)
 
 
-def target(expr: str, legend: str, ref: str = "A") -> dict:
+def target(expr: str, legend: str, ref: str | None = None) -> dict:
     return {
         "datasource": DATASOURCE,
         "editorMode": "code",
         "expr": expr,
         "legendFormat": legend,
         "range": True,
+        # Left empty unless the letter matters; `assign_refs` fills the blanks in by
+        # position. Key order here is the key order in the committed JSON.
         "refId": ref,
         # Min step == the scrape interval (see SCRAPE_INTERVAL).
         "interval": SCRAPE_INTERVAL,
@@ -582,6 +625,17 @@ def _panel(kind, title, notes, targets, *, pid, grid, unit="short", decimals=Non
            legend=None, repeat=None, max_per_row=2, overrides=None):
     pid = pid or next(FREE_IDS)
     w, h = grid
+    assign_refs(targets)
+    # An override that names a refId no query has renders as nothing at all: Grafana
+    # does not warn, the series just keeps the default unit/axis. Fail the build
+    # instead — this is the same class of silent breakage as a stale description.
+    refs = {t["refId"] for t in targets}
+    for override in overrides or []:
+        matcher = (override.get("matcher") or {})
+        if matcher.get("id") == "byFrameRefID" and matcher.get("options") not in refs:
+            raise ValueError(
+                "panel %r has an axis override for refId %r but its queries are %s"
+                % (title, matcher.get("options"), sorted(refs)))
     body: dict = {
         "id": pid,
         "type": kind,

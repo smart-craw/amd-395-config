@@ -690,6 +690,17 @@ def check_dashboard_contract() -> None:
         description = str(p.get("description") or "")
         title = p.get("title", "<untitled>")
         check("PromQL" in description, f"panel {title!r} description does not state its PromQL")
+        refs = [str(t.get("refId") or "") for t in p.get("targets") or []]
+        # Grafana addresses a query by refId inside a panel. Two queries with the same
+        # one is not a warning: the panel fails with "multiple queries using the same
+        # RefId" and renders nothing, and a byFrameRefID override pointing at a letter
+        # no query has silently applies to nothing.
+        check(all(refs), f"panel {title!r} has a query with no refId")
+        check(
+            len(set(refs)) == len(refs),
+            f"panel {title!r} has queries sharing a refId: {refs} — Grafana rejects the "
+            "panel outright ('multiple queries using the same RefId')",
+        )
         for t in p.get("targets") or []:
             expr = str(t.get("expr") or "")
             check(balanced(expr), f"panel {title!r} has an unbalanced expression: {expr}")
@@ -697,6 +708,27 @@ def check_dashboard_contract() -> None:
                 expr in description,
                 f"panel {title!r}: its description does not contain its own query "
                 f"({t.get('refId')}), so the note is stale or was hand-copied",
+            )
+        # ...and the stated PromQL is labelled with the refIds the panel really sends,
+        # in the order it sends them: the block is what a reader copies out of the
+        # panel to reproduce a query, and what `axis()` overrides are written against.
+        documented = re.findall(r"(?m)^([A-Z]): ", description)
+        if documented:
+            check(
+                documented == refs,
+                f"panel {title!r} documents its queries as {documented} but sends them as "
+                f"{refs}: the refIds in the note are stale",
+            )
+        for override in (p.get("fieldConfig") or {}).get("overrides") or []:
+            matcher = (override.get("matcher")
+                       or (override.get("options") or {}).get("matcher")
+                       or {})
+            if matcher.get("id") != "byFrameRefID":
+                continue
+            check(
+                matcher.get("options") in refs,
+                f"panel {title!r} overrides refId {matcher.get('options')!r}, which no "
+                f"query in it has ({refs}): the override applies to nothing",
             )
 
     # --- variables: declared, well-formed, and actually used --------------- #

@@ -164,7 +164,7 @@
       "id": 20,
       "type": "stat",
       "title": "requests in flight",
-      "description": "Instant gauges, no rate(): `sum(llamacpp:requests_processing)` and `sum(llamacpp:requests_deferred)` (halogen's `requests_running` / `requests_queued` spellings match too).\n\ndeferred > 0 means arrivals are waiting for a slot \u2014 the earliest sign the KV budget is the limit.\n\n'No data' here means one of: this server publishes no /metrics at all (the monitor page still works \u2014 it reads /health, /v1/models and /cache, which are not Prometheus metrics), the scrape target is down, or this build does not expose this family. The Scrape health row says which.\n\nPromQL sent by this panel:\n\n```promql\nA: sum({__name__=~\"llamacpp:requests_processing|halogen:requests_running|vllm:num_requests_running\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\nA: sum({__name__=~\"llamacpp:requests_deferred|halogen:requests_queued|vllm:num_requests_waiting\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\n```",
+      "description": "Instant gauges, no rate(): `sum(llamacpp:requests_processing)` and `sum(llamacpp:requests_deferred)` (halogen's `requests_running` / `requests_queued` spellings match too).\n\ndeferred > 0 means arrivals are waiting for a slot \u2014 the earliest sign the KV budget is the limit.\n\n'No data' here means one of: this server publishes no /metrics at all (the monitor page still works \u2014 it reads /health, /v1/models and /cache, which are not Prometheus metrics), the scrape target is down, or this build does not expose this family. The Scrape health row says which.\n\nPromQL sent by this panel:\n\n```promql\nA: sum({__name__=~\"llamacpp:requests_processing|halogen:requests_running|vllm:num_requests_running\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\nB: sum({__name__=~\"llamacpp:requests_deferred|halogen:requests_queued|vllm:num_requests_waiting\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\n```",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -199,7 +199,7 @@
           "expr": "sum({__name__=~\"llamacpp:requests_deferred|halogen:requests_queued|vllm:num_requests_waiting\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})",
           "legendFormat": "deferred",
           "range": false,
-          "refId": "A",
+          "refId": "B",
           "interval": "15s",
           "intervalFactor": 1,
           "instant": true
@@ -609,7 +609,7 @@
       "id": 1,
       "type": "timeseries",
       "title": "Decode throughput (tok/s)",
-      "description": "Windowed rate over the generation-token counter, summed across whatever survives the $job / $instance / $model filters, plus three reference lines:\n\n* **{{instance}}** \u2014 the same rate per target, so two servers on one box stay separate lines instead of being silently added together;\n* **server gauge** \u2014 `llamacpp:predicted_tokens_seconds`, the server's own 'average since last scrape' number, which is what the bespoke page rendered. Overlaid deliberately during the migration so the two definitions are comparable, and the first thing workspace-szw.11 deletes once rate() is trusted. Where they disagree, rate() is right: the gauge resets with the process and knows nothing about the window;\n* **(rule)** \u2014 the `llm:decode_tokens_per_second` alias.\n\nThis is the panel that answers 'what was decode throughput at 03:00', which the bespoke page could not answer at all.\n\nrate() needs two points, so the line starts at least one scrape interval in. A counter reset (server restart) shows as a gap, not a spike to zero.\n\nSeries tagged `(rule)` are the neutral llm:* aliases from monitoring/prometheus/recording_rules.yml \u2014 the vendor-drift seam ADR 0001 C3 names, and what alert rules should read. They are plotted *alongside* the raw expression, not instead of it, on purpose: a panel must still render against a server whose rules have never run, and 'No data' has to mean no data rather than no rule. Where the two disagree the rule is stale \u2014 or the windows differ: rules use a fixed 5m, panels use $__rate_interval.\n\n$job / $instance / $model default to All, whose allValue is .*, so an absent label widens the selector instead of emptying the panel.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\nA: sum by (instance, job) (rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\nA: sum({__name__=~\"llamacpp:predicted_tokens_seconds|llamacpp:tokens_predicted_seconds\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\nA: llm:decode_tokens_per_second{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
+      "description": "Windowed rate over the generation-token counter, summed across whatever survives the $job / $instance / $model filters, plus three reference lines:\n\n* **{{instance}}** \u2014 the same rate per target, so two servers on one box stay separate lines instead of being silently added together;\n* **server gauge** \u2014 `llamacpp:predicted_tokens_seconds`, the server's own 'average since last scrape' number, which is what the bespoke page rendered. Overlaid deliberately during the migration so the two definitions are comparable, and the first thing workspace-szw.11 deletes once rate() is trusted. Where they disagree, rate() is right: the gauge resets with the process and knows nothing about the window;\n* **(rule)** \u2014 the `llm:decode_tokens_per_second` alias.\n\nThis is the panel that answers 'what was decode throughput at 03:00', which the bespoke page could not answer at all.\n\nrate() needs two points, so the line starts at least one scrape interval in. A counter reset (server restart) shows as a gap, not a spike to zero.\n\nSeries tagged `(rule)` are the neutral llm:* aliases from monitoring/prometheus/recording_rules.yml \u2014 the vendor-drift seam ADR 0001 C3 names, and what alert rules should read. They are plotted *alongside* the raw expression, not instead of it, on purpose: a panel must still render against a server whose rules have never run, and 'No data' has to mean no data rather than no rule. Where the two disagree the rule is stale \u2014 or the windows differ: rules use a fixed 5m, panels use $__rate_interval.\n\n$job / $instance / $model default to All, whose allValue is .*, so an absent label widens the selector instead of emptying the panel.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\nB: sum by (instance, job) (rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\nC: sum({__name__=~\"llamacpp:predicted_tokens_seconds|llamacpp:tokens_predicted_seconds\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\nD: llm:decode_tokens_per_second{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -643,7 +643,7 @@
           "expr": "sum by (instance, job) (rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))",
           "legendFormat": "{{instance}} {{job}}",
           "range": true,
-          "refId": "A",
+          "refId": "B",
           "interval": "15s",
           "intervalFactor": 1
         },
@@ -656,7 +656,7 @@
           "expr": "sum({__name__=~\"llamacpp:predicted_tokens_seconds|llamacpp:tokens_predicted_seconds\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})",
           "legendFormat": "server gauge (avg since last scrape)",
           "range": true,
-          "refId": "A",
+          "refId": "C",
           "interval": "15s",
           "intervalFactor": 1
         },
@@ -669,7 +669,7 @@
           "expr": "llm:decode_tokens_per_second{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}",
           "legendFormat": "llm:decode_tokens_per_second (rule)",
           "range": true,
-          "refId": "A",
+          "refId": "D",
           "interval": "15s",
           "intervalFactor": 1
         }
@@ -734,7 +734,7 @@
       "id": 2,
       "type": "timeseries",
       "title": "Prompt throughput (tok/s)",
-      "description": "Prefill throughput: windowed rate over the prompt-token counter.\n\nllama.cpp counts only the prompt tokens that MISSED the prompt cache in this counter (halogen counts the served-from-cache ones separately), which is why the cache panel computes cached / (processed + cached) instead of cached / processed. `llamacpp:prompt_tokens_seconds` (the server's own average gauge) is overlaid for the same migration reason as on the decode panel, and leaves with it.\n\nrate() needs two points, so the line starts at least one scrape interval in. A counter reset (server restart) shows as a gap, not a spike to zero.\n\nSeries tagged `(rule)` are the neutral llm:* aliases from monitoring/prometheus/recording_rules.yml \u2014 the vendor-drift seam ADR 0001 C3 names, and what alert rules should read. They are plotted *alongside* the raw expression, not instead of it, on purpose: a panel must still render against a server whose rules have never run, and 'No data' has to mean no data rather than no rule. Where the two disagree the rule is stale \u2014 or the windows differ: rules use a fixed 5m, panels use $__rate_interval.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(rate({__name__=~\"llamacpp:prompt_tokens_total|vllm:prompt_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\nA: sum by (instance, job) (rate({__name__=~\"llamacpp:prompt_tokens_total|vllm:prompt_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\nA: sum({__name__=~\"llamacpp:prompt_tokens_seconds\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\nA: llm:prompt_tokens_per_second{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
+      "description": "Prefill throughput: windowed rate over the prompt-token counter.\n\nllama.cpp counts only the prompt tokens that MISSED the prompt cache in this counter (halogen counts the served-from-cache ones separately), which is why the cache panel computes cached / (processed + cached) instead of cached / processed. `llamacpp:prompt_tokens_seconds` (the server's own average gauge) is overlaid for the same migration reason as on the decode panel, and leaves with it.\n\nrate() needs two points, so the line starts at least one scrape interval in. A counter reset (server restart) shows as a gap, not a spike to zero.\n\nSeries tagged `(rule)` are the neutral llm:* aliases from monitoring/prometheus/recording_rules.yml \u2014 the vendor-drift seam ADR 0001 C3 names, and what alert rules should read. They are plotted *alongside* the raw expression, not instead of it, on purpose: a panel must still render against a server whose rules have never run, and 'No data' has to mean no data rather than no rule. Where the two disagree the rule is stale \u2014 or the windows differ: rules use a fixed 5m, panels use $__rate_interval.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(rate({__name__=~\"llamacpp:prompt_tokens_total|vllm:prompt_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\nB: sum by (instance, job) (rate({__name__=~\"llamacpp:prompt_tokens_total|vllm:prompt_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\nC: sum({__name__=~\"llamacpp:prompt_tokens_seconds\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\nD: llm:prompt_tokens_per_second{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -768,7 +768,7 @@
           "expr": "sum by (instance, job) (rate({__name__=~\"llamacpp:prompt_tokens_total|vllm:prompt_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))",
           "legendFormat": "{{instance}} {{job}}",
           "range": true,
-          "refId": "A",
+          "refId": "B",
           "interval": "15s",
           "intervalFactor": 1
         },
@@ -781,7 +781,7 @@
           "expr": "sum({__name__=~\"llamacpp:prompt_tokens_seconds\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})",
           "legendFormat": "server gauge (avg since last scrape)",
           "range": true,
-          "refId": "A",
+          "refId": "C",
           "interval": "15s",
           "intervalFactor": 1
         },
@@ -794,7 +794,7 @@
           "expr": "llm:prompt_tokens_per_second{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}",
           "legendFormat": "llm:prompt_tokens_per_second (rule)",
           "range": true,
-          "refId": "A",
+          "refId": "D",
           "interval": "15s",
           "intervalFactor": 1
         }
@@ -859,7 +859,7 @@
       "id": 5,
       "type": "timeseries",
       "title": "Requests running / queued",
-      "description": "Gauges, not rates: running vs deferred vs configured slot capacity. `deferred > 0` for minutes is queueing, and LLMQueueing in rules.yml fires on this same expression, so the panel and the alert cannot disagree.\n\nDeferred > 0 while running < slot capacity is a scheduling stall; deferred > 0 at full slots is plain saturation. Different incidents, and this is the panel that tells them apart.\n\nPromQL sent by this panel:\n\n```promql\nA: sum({__name__=~\"llamacpp:requests_processing|halogen:requests_running|vllm:num_requests_running\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\nA: sum({__name__=~\"llamacpp:requests_deferred|halogen:requests_queued|vllm:num_requests_waiting\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\nA: sum({__name__=~\"halogen:slot_capacity\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\nA: llm:requests_running{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\nA: llm:requests_queued{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
+      "description": "Gauges, not rates: running vs deferred vs configured slot capacity. `deferred > 0` for minutes is queueing, and LLMQueueing in rules.yml fires on this same expression, so the panel and the alert cannot disagree.\n\nDeferred > 0 while running < slot capacity is a scheduling stall; deferred > 0 at full slots is plain saturation. Different incidents, and this is the panel that tells them apart.\n\nPromQL sent by this panel:\n\n```promql\nA: sum({__name__=~\"llamacpp:requests_processing|halogen:requests_running|vllm:num_requests_running\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\nB: sum({__name__=~\"llamacpp:requests_deferred|halogen:requests_queued|vllm:num_requests_waiting\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\nC: sum({__name__=~\"halogen:slot_capacity\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\nD: llm:requests_running{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\nE: llm:requests_queued{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -893,7 +893,7 @@
           "expr": "sum({__name__=~\"llamacpp:requests_deferred|halogen:requests_queued|vllm:num_requests_waiting\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})",
           "legendFormat": "queued",
           "range": true,
-          "refId": "A",
+          "refId": "B",
           "interval": "15s",
           "intervalFactor": 1
         },
@@ -906,7 +906,7 @@
           "expr": "sum({__name__=~\"halogen:slot_capacity\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})",
           "legendFormat": "slot capacity (halogen)",
           "range": true,
-          "refId": "A",
+          "refId": "C",
           "interval": "15s",
           "intervalFactor": 1
         },
@@ -919,7 +919,7 @@
           "expr": "llm:requests_running{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}",
           "legendFormat": "llm:requests_running (rule)",
           "range": true,
-          "refId": "A",
+          "refId": "D",
           "interval": "15s",
           "intervalFactor": 1
         },
@@ -932,7 +932,7 @@
           "expr": "llm:requests_queued{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}",
           "legendFormat": "llm:requests_queued (rule)",
           "range": true,
-          "refId": "A",
+          "refId": "E",
           "interval": "15s",
           "intervalFactor": 1
         }
@@ -996,7 +996,7 @@
       "id": 26,
       "type": "timeseries",
       "title": "Requests / s and structured share",
-      "description": "Request rate from the completed-request counter, and the fraction of requests decoded under a JSON schema (`halogen:structured_requests_total / halogen:requests_total`).\n\nThe structured share is the useful one when a client changes behaviour: a schema jump usually precedes a decode-rate change, because grammar-constrained decoding does not overlap speculation well.\n\nrate() needs two points, so the line starts at least one scrape interval in. A counter reset (server restart) shows as a gap, not a spike to zero.\n\nclamp_min(<denominator>, 1) is deliberate. With no traffic the raw division is 0/0, PromQL turns that into NaN and Grafana drops the sample \u2014 a hole in the line that reads like a missing metric. A clamped 0 reads as 'no ratio to report', which is the truth. The bespoke page hid the same case behind divide() (monitor/static/app.js), which is one reason this panel exists.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(rate({__name__=~\"halogen:requests_total|llamacpp:requests_total|vllm:request_success_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\nA: sum by (instance, job) (rate({__name__=~\"halogen:requests_total|llamacpp:requests_total|vllm:request_success_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\nA: sum(rate({__name__=~\"halogen:structured_requests_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])) / clamp_min(sum(rate({__name__=~\"halogen:requests_total|llamacpp:requests_total|vllm:request_success_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])), 1)\nA: llm:requests_per_second{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
+      "description": "Request rate from the completed-request counter, and the fraction of requests decoded under a JSON schema (`halogen:structured_requests_total / halogen:requests_total`).\n\nThe structured share is the useful one when a client changes behaviour: a schema jump usually precedes a decode-rate change, because grammar-constrained decoding does not overlap speculation well.\n\nrate() needs two points, so the line starts at least one scrape interval in. A counter reset (server restart) shows as a gap, not a spike to zero.\n\nclamp_min(<denominator>, 1) is deliberate. With no traffic the raw division is 0/0, PromQL turns that into NaN and Grafana drops the sample \u2014 a hole in the line that reads like a missing metric. A clamped 0 reads as 'no ratio to report', which is the truth. The bespoke page hid the same case behind divide() (monitor/static/app.js), which is one reason this panel exists.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(rate({__name__=~\"halogen:requests_total|llamacpp:requests_total|vllm:request_success_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\nB: sum by (instance, job) (rate({__name__=~\"halogen:requests_total|llamacpp:requests_total|vllm:request_success_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\nC: sum(rate({__name__=~\"halogen:structured_requests_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])) / clamp_min(sum(rate({__name__=~\"halogen:requests_total|llamacpp:requests_total|vllm:request_success_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])), 1)\nD: llm:requests_per_second{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1030,7 +1030,7 @@
           "expr": "sum by (instance, job) (rate({__name__=~\"halogen:requests_total|llamacpp:requests_total|vllm:request_success_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))",
           "legendFormat": "{{instance}} {{job}}",
           "range": true,
-          "refId": "A",
+          "refId": "B",
           "interval": "15s",
           "intervalFactor": 1
         },
@@ -1043,7 +1043,7 @@
           "expr": "sum(rate({__name__=~\"halogen:structured_requests_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])) / clamp_min(sum(rate({__name__=~\"halogen:requests_total|llamacpp:requests_total|vllm:request_success_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])), 1)",
           "legendFormat": "share under a JSON schema",
           "range": true,
-          "refId": "A",
+          "refId": "C",
           "interval": "15s",
           "intervalFactor": 1
         },
@@ -1056,7 +1056,7 @@
           "expr": "llm:requests_per_second{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}",
           "legendFormat": "llm:requests_per_second (rule)",
           "range": true,
-          "refId": "A",
+          "refId": "D",
           "interval": "15s",
           "intervalFactor": 1
         }
@@ -1120,7 +1120,7 @@
       "id": 27,
       "type": "timeseries",
       "title": "Decode tok/s per model",
-      "description": "The per-model comparison the bespoke page could not do. `label_replace` folds llama.cpp's file_sd `model` label and vLLM's `model_name` onto one `model` label and turns 'no model label at all' into the literal `unknown`, so the legend is never blank. The $model filter is applied to both spellings (`{model=~'$model'} or {model_name=~'$model'}`) because PromQL cannot match 'either of two labels' in one selector and `label_match()` is an optional 3.x extension this box does not assume. The `(rule)` line is the same answer computed by Prometheus, where the rules normalize the label once.\n\nOn one llama.cpp server with no model label you get exactly one line called 'unknown' \u2014 correct, not broken. Name the model in the labels of monitoring/prometheus/targets/llm-servers.json to get a name here.\n\nPromQL sent by this panel:\n\n```promql\nA: sum by (model) (label_replace(label_replace(sum by (job, instance, model, model_name) (rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])) or sum by (job, instance, model, model_name) (rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model_name=~\"$model\"}[$__rate_interval])), \"model\", \"$1\", \"model_name\", \"(.+)\"), \"model\", \"unknown\", \"model\", \"^$\"))\nA: sum by (model) (label_replace(label_replace(llm:decode_tokens_per_second{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}, \"model\", \"$1\", \"model_name\", \"(.+)\"), \"model\", \"unknown\", \"model\", \"^$\"))\n```",
+      "description": "The per-model comparison the bespoke page could not do. `label_replace` folds llama.cpp's file_sd `model` label and vLLM's `model_name` onto one `model` label and turns 'no model label at all' into the literal `unknown`, so the legend is never blank. The $model filter is applied to both spellings (`{model=~'$model'} or {model_name=~'$model'}`) because PromQL cannot match 'either of two labels' in one selector and `label_match()` is an optional 3.x extension this box does not assume. The `(rule)` line is the same answer computed by Prometheus, where the rules normalize the label once.\n\nOn one llama.cpp server with no model label you get exactly one line called 'unknown' \u2014 correct, not broken. Name the model in the labels of monitoring/prometheus/targets/llm-servers.json to get a name here.\n\nPromQL sent by this panel:\n\n```promql\nA: sum by (model) (label_replace(label_replace(sum by (job, instance, model, model_name) (rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])) or sum by (job, instance, model, model_name) (rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model_name=~\"$model\"}[$__rate_interval])), \"model\", \"$1\", \"model_name\", \"(.+)\"), \"model\", \"unknown\", \"model\", \"^$\"))\nB: sum by (model) (label_replace(label_replace(llm:decode_tokens_per_second{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}, \"model\", \"$1\", \"model_name\", \"(.+)\"), \"model\", \"unknown\", \"model\", \"^$\"))\n```",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1154,7 +1154,7 @@
           "expr": "sum by (model) (label_replace(label_replace(llm:decode_tokens_per_second{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}, \"model\", \"$1\", \"model_name\", \"(.+)\"), \"model\", \"unknown\", \"model\", \"^$\"))",
           "legendFormat": "{{model}} (rule)",
           "range": true,
-          "refId": "A",
+          "refId": "B",
           "interval": "15s",
           "intervalFactor": 1
         }
@@ -1308,7 +1308,7 @@
       "id": 29,
       "type": "timeseries",
       "title": "Lifetime tok/s \u2014 the arithmetic the old tile did",
-      "description": "Two raw counters divided, no window: what `monitor/static/app.js` rendered before Prometheus existed here. Kept on purpose, as a floor to sanity-check the windowed rates against and as the thing to delete with the JS once parity is signed off (workspace-szw.11).\n\nIt cannot say WHEN anything was slow, it averages the whole lifetime since start, and a restart silently re-bases it \u2014 which is the entire argument for the panels above.\n\nclamp_min(<denominator>, 1) is deliberate. With no traffic the raw division is 0/0, PromQL turns that into NaN and Grafana drops the sample \u2014 a hole in the line that reads like a missing metric. A clamped 0 reads as 'no ratio to report', which is the truth. The bespoke page hid the same case behind divide() (monitor/static/app.js), which is one reason this panel exists.\n\nPromQL sent by this panel:\n\n```promql\nA: sum({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}) / clamp_min(sum({__name__=~\"llamacpp:tokens_predicted_seconds_total|llamacpp:predicted_tokens_seconds_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}), 1)\nA: sum(rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\n```",
+      "description": "Two raw counters divided, no window: what `monitor/static/app.js` rendered before Prometheus existed here. Kept on purpose, as a floor to sanity-check the windowed rates against and as the thing to delete with the JS once parity is signed off (workspace-szw.11).\n\nIt cannot say WHEN anything was slow, it averages the whole lifetime since start, and a restart silently re-bases it \u2014 which is the entire argument for the panels above.\n\nclamp_min(<denominator>, 1) is deliberate. With no traffic the raw division is 0/0, PromQL turns that into NaN and Grafana drops the sample \u2014 a hole in the line that reads like a missing metric. A clamped 0 reads as 'no ratio to report', which is the truth. The bespoke page hid the same case behind divide() (monitor/static/app.js), which is one reason this panel exists.\n\nPromQL sent by this panel:\n\n```promql\nA: sum({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}) / clamp_min(sum({__name__=~\"llamacpp:tokens_predicted_seconds_total|llamacpp:predicted_tokens_seconds_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}), 1)\nB: sum(rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\n```",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1342,7 +1342,7 @@
           "expr": "sum(rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))",
           "legendFormat": "windowed rate for comparison",
           "range": true,
-          "refId": "A",
+          "refId": "B",
           "interval": "15s",
           "intervalFactor": 1
         }
@@ -1447,7 +1447,7 @@
           "id": 3,
           "type": "timeseries",
           "title": "Time to first token \u2014 p50 / p90 / p99",
-          "description": "Prefill + queue time before the first token: the latency a user actually notices, and the one the bespoke page could not render at all.\n\n`sum by (le)` happens *before* histogram_quantile: averaging per-series quantiles is meaningless, and aggregating first is what lets several servers or models share one honest line instead of shifting each other's answer. `le` must survive that aggregation because it is what histogram_quantile reads.\n\nThe `(rule)` series are the recorded `llm:time_to_first_token_seconds:*` quantiles (ADR 0001 C3, added with these panels); if a rule is missing or stale the raw series still draw.\n\nSeries tagged `(rule)` are the neutral llm:* aliases from monitoring/prometheus/recording_rules.yml \u2014 the vendor-drift seam ADR 0001 C3 names, and what alert rules should read. They are plotted *alongside* the raw expression, not instead of it, on purpose: a panel must still render against a server whose rules have never run, and 'No data' has to mean no data rather than no rule. Where the two disagree the rule is stale \u2014 or the windows differ: rules use a fixed 5m, panels use $__rate_interval.\n\nPromQL sent by this panel:\n\n```promql\nA: histogram_quantile(0.5, sum by (le) (rate({__name__=~\"llama:time_to_first_token_seconds_bucket|llamacpp:time_to_first_token_seconds_bucket|llamacpp:ttft_seconds_bucket|vllm:time_to_first_token_seconds_bucket\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])))\nA: histogram_quantile(0.9, sum by (le) (rate({__name__=~\"llama:time_to_first_token_seconds_bucket|llamacpp:time_to_first_token_seconds_bucket|llamacpp:ttft_seconds_bucket|vllm:time_to_first_token_seconds_bucket\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])))\nA: histogram_quantile(0.99, sum by (le) (rate({__name__=~\"llama:time_to_first_token_seconds_bucket|llamacpp:time_to_first_token_seconds_bucket|llamacpp:ttft_seconds_bucket|vllm:time_to_first_token_seconds_bucket\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])))\nA: sum(rate({__name__=~\"llama:time_to_first_token_seconds_sum|llamacpp:time_to_first_token_seconds_sum|llamacpp:ttft_seconds_sum|vllm:time_to_first_token_seconds_sum\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])) / clamp_min(sum(rate({__name__=~\"llama:time_to_first_token_seconds_count|llamacpp:time_to_first_token_seconds_count|llamacpp:ttft_seconds_count|vllm:time_to_first_token_seconds_count\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])), 1)\nA: llm:time_to_first_token_seconds:p50{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\nA: llm:time_to_first_token_seconds:p90{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\nA: llm:time_to_first_token_seconds:p99{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
+          "description": "Prefill + queue time before the first token: the latency a user actually notices, and the one the bespoke page could not render at all.\n\n`sum by (le)` happens *before* histogram_quantile: averaging per-series quantiles is meaningless, and aggregating first is what lets several servers or models share one honest line instead of shifting each other's answer. `le` must survive that aggregation because it is what histogram_quantile reads.\n\nThe `(rule)` series are the recorded `llm:time_to_first_token_seconds:*` quantiles (ADR 0001 C3, added with these panels); if a rule is missing or stale the raw series still draw.\n\nSeries tagged `(rule)` are the neutral llm:* aliases from monitoring/prometheus/recording_rules.yml \u2014 the vendor-drift seam ADR 0001 C3 names, and what alert rules should read. They are plotted *alongside* the raw expression, not instead of it, on purpose: a panel must still render against a server whose rules have never run, and 'No data' has to mean no data rather than no rule. Where the two disagree the rule is stale \u2014 or the windows differ: rules use a fixed 5m, panels use $__rate_interval.\n\nPromQL sent by this panel:\n\n```promql\nA: histogram_quantile(0.5, sum by (le) (rate({__name__=~\"llama:time_to_first_token_seconds_bucket|llamacpp:time_to_first_token_seconds_bucket|llamacpp:ttft_seconds_bucket|vllm:time_to_first_token_seconds_bucket\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])))\nB: histogram_quantile(0.9, sum by (le) (rate({__name__=~\"llama:time_to_first_token_seconds_bucket|llamacpp:time_to_first_token_seconds_bucket|llamacpp:ttft_seconds_bucket|vllm:time_to_first_token_seconds_bucket\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])))\nC: histogram_quantile(0.99, sum by (le) (rate({__name__=~\"llama:time_to_first_token_seconds_bucket|llamacpp:time_to_first_token_seconds_bucket|llamacpp:ttft_seconds_bucket|vllm:time_to_first_token_seconds_bucket\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])))\nD: sum(rate({__name__=~\"llama:time_to_first_token_seconds_sum|llamacpp:time_to_first_token_seconds_sum|llamacpp:ttft_seconds_sum|vllm:time_to_first_token_seconds_sum\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])) / clamp_min(sum(rate({__name__=~\"llama:time_to_first_token_seconds_count|llamacpp:time_to_first_token_seconds_count|llamacpp:ttft_seconds_count|vllm:time_to_first_token_seconds_count\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])), 1)\nE: llm:time_to_first_token_seconds:p50{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\nF: llm:time_to_first_token_seconds:p90{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\nG: llm:time_to_first_token_seconds:p99{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -1481,7 +1481,7 @@
               "expr": "histogram_quantile(0.9, sum by (le) (rate({__name__=~\"llama:time_to_first_token_seconds_bucket|llamacpp:time_to_first_token_seconds_bucket|llamacpp:ttft_seconds_bucket|vllm:time_to_first_token_seconds_bucket\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])))",
               "legendFormat": "p90",
               "range": true,
-              "refId": "A",
+              "refId": "B",
               "interval": "15s",
               "intervalFactor": 1
             },
@@ -1494,7 +1494,7 @@
               "expr": "histogram_quantile(0.99, sum by (le) (rate({__name__=~\"llama:time_to_first_token_seconds_bucket|llamacpp:time_to_first_token_seconds_bucket|llamacpp:ttft_seconds_bucket|vllm:time_to_first_token_seconds_bucket\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])))",
               "legendFormat": "p99",
               "range": true,
-              "refId": "A",
+              "refId": "C",
               "interval": "15s",
               "intervalFactor": 1
             },
@@ -1507,7 +1507,7 @@
               "expr": "sum(rate({__name__=~\"llama:time_to_first_token_seconds_sum|llamacpp:time_to_first_token_seconds_sum|llamacpp:ttft_seconds_sum|vllm:time_to_first_token_seconds_sum\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])) / clamp_min(sum(rate({__name__=~\"llama:time_to_first_token_seconds_count|llamacpp:time_to_first_token_seconds_count|llamacpp:ttft_seconds_count|vllm:time_to_first_token_seconds_count\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])), 1)",
               "legendFormat": "mean (works without buckets)",
               "range": true,
-              "refId": "A",
+              "refId": "D",
               "interval": "15s",
               "intervalFactor": 1
             },
@@ -1520,7 +1520,7 @@
               "expr": "llm:time_to_first_token_seconds:p50{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}",
               "legendFormat": "llm:...:p50 (rule)",
               "range": true,
-              "refId": "A",
+              "refId": "E",
               "interval": "15s",
               "intervalFactor": 1
             },
@@ -1533,7 +1533,7 @@
               "expr": "llm:time_to_first_token_seconds:p90{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}",
               "legendFormat": "llm:...:p90 (rule)",
               "range": true,
-              "refId": "A",
+              "refId": "F",
               "interval": "15s",
               "intervalFactor": 1
             },
@@ -1546,7 +1546,7 @@
               "expr": "llm:time_to_first_token_seconds:p99{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}",
               "legendFormat": "llm:...:p99 (rule)",
               "range": true,
-              "refId": "A",
+              "refId": "G",
               "interval": "15s",
               "intervalFactor": 1
             }
@@ -1611,7 +1611,7 @@
           "id": 31,
           "type": "timeseries",
           "title": "Time per output token \u2014 p50 / p90 / p99",
-          "description": "Decode latency per generated token: how fast text streams once it has started. Roughly the reciprocal of tokens/s for one request, but the distribution is the point \u2014 a p99 here is a stall in the middle of a completion, which any throughput average hides.\n\nFamilies differ by build (`time_per_output_token_seconds` vs `time_per_token_seconds`), which is what the name union is for.\n\nPromQL sent by this panel:\n\n```promql\nA: histogram_quantile(0.5, sum by (le) (rate({__name__=~\"llama:time_per_output_token_seconds_bucket|llamacpp:time_per_output_token_seconds_bucket|llamacpp:time_per_token_seconds_bucket|vllm:time_per_output_token_seconds_bucket\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])))\nA: histogram_quantile(0.9, sum by (le) (rate({__name__=~\"llama:time_per_output_token_seconds_bucket|llamacpp:time_per_output_token_seconds_bucket|llamacpp:time_per_token_seconds_bucket|vllm:time_per_output_token_seconds_bucket\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])))\nA: histogram_quantile(0.99, sum by (le) (rate({__name__=~\"llama:time_per_output_token_seconds_bucket|llamacpp:time_per_output_token_seconds_bucket|llamacpp:time_per_token_seconds_bucket|vllm:time_per_output_token_seconds_bucket\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])))\nA: sum(rate({__name__=~\"llama:time_per_output_token_seconds_sum|llamacpp:time_per_output_token_seconds_sum|llamacpp:time_per_token_seconds_sum|vllm:time_per_output_token_seconds_sum\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])) / clamp_min(sum(rate({__name__=~\"llama:time_per_output_token_seconds_count|llamacpp:time_per_output_token_seconds_count|llamacpp:time_per_token_seconds_count|vllm:time_per_output_token_seconds_count\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])), 1)\nA: llm:time_per_output_token_seconds:p99{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
+          "description": "Decode latency per generated token: how fast text streams once it has started. Roughly the reciprocal of tokens/s for one request, but the distribution is the point \u2014 a p99 here is a stall in the middle of a completion, which any throughput average hides.\n\nFamilies differ by build (`time_per_output_token_seconds` vs `time_per_token_seconds`), which is what the name union is for.\n\nPromQL sent by this panel:\n\n```promql\nA: histogram_quantile(0.5, sum by (le) (rate({__name__=~\"llama:time_per_output_token_seconds_bucket|llamacpp:time_per_output_token_seconds_bucket|llamacpp:time_per_token_seconds_bucket|vllm:time_per_output_token_seconds_bucket\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])))\nB: histogram_quantile(0.9, sum by (le) (rate({__name__=~\"llama:time_per_output_token_seconds_bucket|llamacpp:time_per_output_token_seconds_bucket|llamacpp:time_per_token_seconds_bucket|vllm:time_per_output_token_seconds_bucket\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])))\nC: histogram_quantile(0.99, sum by (le) (rate({__name__=~\"llama:time_per_output_token_seconds_bucket|llamacpp:time_per_output_token_seconds_bucket|llamacpp:time_per_token_seconds_bucket|vllm:time_per_output_token_seconds_bucket\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])))\nD: sum(rate({__name__=~\"llama:time_per_output_token_seconds_sum|llamacpp:time_per_output_token_seconds_sum|llamacpp:time_per_token_seconds_sum|vllm:time_per_output_token_seconds_sum\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])) / clamp_min(sum(rate({__name__=~\"llama:time_per_output_token_seconds_count|llamacpp:time_per_output_token_seconds_count|llamacpp:time_per_token_seconds_count|vllm:time_per_output_token_seconds_count\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])), 1)\nE: llm:time_per_output_token_seconds:p99{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -1645,7 +1645,7 @@
               "expr": "histogram_quantile(0.9, sum by (le) (rate({__name__=~\"llama:time_per_output_token_seconds_bucket|llamacpp:time_per_output_token_seconds_bucket|llamacpp:time_per_token_seconds_bucket|vllm:time_per_output_token_seconds_bucket\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])))",
               "legendFormat": "p90",
               "range": true,
-              "refId": "A",
+              "refId": "B",
               "interval": "15s",
               "intervalFactor": 1
             },
@@ -1658,7 +1658,7 @@
               "expr": "histogram_quantile(0.99, sum by (le) (rate({__name__=~\"llama:time_per_output_token_seconds_bucket|llamacpp:time_per_output_token_seconds_bucket|llamacpp:time_per_token_seconds_bucket|vllm:time_per_output_token_seconds_bucket\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])))",
               "legendFormat": "p99",
               "range": true,
-              "refId": "A",
+              "refId": "C",
               "interval": "15s",
               "intervalFactor": 1
             },
@@ -1671,7 +1671,7 @@
               "expr": "sum(rate({__name__=~\"llama:time_per_output_token_seconds_sum|llamacpp:time_per_output_token_seconds_sum|llamacpp:time_per_token_seconds_sum|vllm:time_per_output_token_seconds_sum\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])) / clamp_min(sum(rate({__name__=~\"llama:time_per_output_token_seconds_count|llamacpp:time_per_output_token_seconds_count|llamacpp:time_per_token_seconds_count|vllm:time_per_output_token_seconds_count\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])), 1)",
               "legendFormat": "mean (works without buckets)",
               "range": true,
-              "refId": "A",
+              "refId": "D",
               "interval": "15s",
               "intervalFactor": 1
             },
@@ -1684,7 +1684,7 @@
               "expr": "llm:time_per_output_token_seconds:p99{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}",
               "legendFormat": "llm:...:p99 (rule)",
               "range": true,
-              "refId": "A",
+              "refId": "E",
               "interval": "15s",
               "intervalFactor": 1
             }
@@ -1749,7 +1749,7 @@
           "id": 32,
           "type": "timeseries",
           "title": "End-to-end request time \u2014 p50 / p90 / p99",
-          "description": "Queue + prefill + decode for a whole request. It moves *before* the throughput panels when the box is oversubscribed, which is why it sits next to TTFT rather than in a row of its own.\n\nEnd-to-end growing while TTFT is flat means generation is being starved (KV pressure, speculation failing); both growing together means prefill or queueing.\n\n'No data' here means one of: this server publishes no /metrics at all (the monitor page still works \u2014 it reads /health, /v1/models and /cache, which are not Prometheus metrics), the scrape target is down, or this build does not expose this family. The Scrape health row says which.\n\nPromQL sent by this panel:\n\n```promql\nA: histogram_quantile(0.5, sum by (le) (rate({__name__=~\"llama:end_to_end_response_seconds_bucket|llamacpp:end_to_end_response_seconds_bucket|llamacpp:requests_seconds_bucket|llamacpp:request_seconds_bucket|vllm:e2e_request_latency_seconds_bucket\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])))\nA: histogram_quantile(0.9, sum by (le) (rate({__name__=~\"llama:end_to_end_response_seconds_bucket|llamacpp:end_to_end_response_seconds_bucket|llamacpp:requests_seconds_bucket|llamacpp:request_seconds_bucket|vllm:e2e_request_latency_seconds_bucket\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])))\nA: histogram_quantile(0.99, sum by (le) (rate({__name__=~\"llama:end_to_end_response_seconds_bucket|llamacpp:end_to_end_response_seconds_bucket|llamacpp:requests_seconds_bucket|llamacpp:request_seconds_bucket|vllm:e2e_request_latency_seconds_bucket\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])))\nA: sum(rate({__name__=~\"llama:end_to_end_response_seconds_sum|llamacpp:end_to_end_response_seconds_sum|llamacpp:requests_seconds_sum|llamacpp:request_seconds_sum|vllm:e2e_request_latency_seconds_sum\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])) / clamp_min(sum(rate({__name__=~\"llama:end_to_end_response_seconds_count|llamacpp:end_to_end_response_seconds_count|llamacpp:requests_seconds_count|llamacpp:request_seconds_count|vllm:e2e_request_latency_seconds_count\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])), 1)\nA: llm:end_to_end_response_seconds:p99{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
+          "description": "Queue + prefill + decode for a whole request. It moves *before* the throughput panels when the box is oversubscribed, which is why it sits next to TTFT rather than in a row of its own.\n\nEnd-to-end growing while TTFT is flat means generation is being starved (KV pressure, speculation failing); both growing together means prefill or queueing.\n\n'No data' here means one of: this server publishes no /metrics at all (the monitor page still works \u2014 it reads /health, /v1/models and /cache, which are not Prometheus metrics), the scrape target is down, or this build does not expose this family. The Scrape health row says which.\n\nPromQL sent by this panel:\n\n```promql\nA: histogram_quantile(0.5, sum by (le) (rate({__name__=~\"llama:end_to_end_response_seconds_bucket|llamacpp:end_to_end_response_seconds_bucket|llamacpp:requests_seconds_bucket|llamacpp:request_seconds_bucket|vllm:e2e_request_latency_seconds_bucket\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])))\nB: histogram_quantile(0.9, sum by (le) (rate({__name__=~\"llama:end_to_end_response_seconds_bucket|llamacpp:end_to_end_response_seconds_bucket|llamacpp:requests_seconds_bucket|llamacpp:request_seconds_bucket|vllm:e2e_request_latency_seconds_bucket\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])))\nC: histogram_quantile(0.99, sum by (le) (rate({__name__=~\"llama:end_to_end_response_seconds_bucket|llamacpp:end_to_end_response_seconds_bucket|llamacpp:requests_seconds_bucket|llamacpp:request_seconds_bucket|vllm:e2e_request_latency_seconds_bucket\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])))\nD: sum(rate({__name__=~\"llama:end_to_end_response_seconds_sum|llamacpp:end_to_end_response_seconds_sum|llamacpp:requests_seconds_sum|llamacpp:request_seconds_sum|vllm:e2e_request_latency_seconds_sum\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])) / clamp_min(sum(rate({__name__=~\"llama:end_to_end_response_seconds_count|llamacpp:end_to_end_response_seconds_count|llamacpp:requests_seconds_count|llamacpp:request_seconds_count|vllm:e2e_request_latency_seconds_count\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])), 1)\nE: llm:end_to_end_response_seconds:p99{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -1783,7 +1783,7 @@
               "expr": "histogram_quantile(0.9, sum by (le) (rate({__name__=~\"llama:end_to_end_response_seconds_bucket|llamacpp:end_to_end_response_seconds_bucket|llamacpp:requests_seconds_bucket|llamacpp:request_seconds_bucket|vllm:e2e_request_latency_seconds_bucket\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])))",
               "legendFormat": "p90",
               "range": true,
-              "refId": "A",
+              "refId": "B",
               "interval": "15s",
               "intervalFactor": 1
             },
@@ -1796,7 +1796,7 @@
               "expr": "histogram_quantile(0.99, sum by (le) (rate({__name__=~\"llama:end_to_end_response_seconds_bucket|llamacpp:end_to_end_response_seconds_bucket|llamacpp:requests_seconds_bucket|llamacpp:request_seconds_bucket|vllm:e2e_request_latency_seconds_bucket\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])))",
               "legendFormat": "p99",
               "range": true,
-              "refId": "A",
+              "refId": "C",
               "interval": "15s",
               "intervalFactor": 1
             },
@@ -1809,7 +1809,7 @@
               "expr": "sum(rate({__name__=~\"llama:end_to_end_response_seconds_sum|llamacpp:end_to_end_response_seconds_sum|llamacpp:requests_seconds_sum|llamacpp:request_seconds_sum|vllm:e2e_request_latency_seconds_sum\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])) / clamp_min(sum(rate({__name__=~\"llama:end_to_end_response_seconds_count|llamacpp:end_to_end_response_seconds_count|llamacpp:requests_seconds_count|llamacpp:request_seconds_count|vllm:e2e_request_latency_seconds_count\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])), 1)",
               "legendFormat": "mean (works without buckets)",
               "range": true,
-              "refId": "A",
+              "refId": "D",
               "interval": "15s",
               "intervalFactor": 1
             },
@@ -1822,7 +1822,7 @@
               "expr": "llm:end_to_end_response_seconds:p99{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}",
               "legendFormat": "llm:...:p99 (rule)",
               "range": true,
-              "refId": "A",
+              "refId": "E",
               "interval": "15s",
               "intervalFactor": 1
             }
@@ -1887,7 +1887,7 @@
           "id": 33,
           "type": "timeseries",
           "title": "Latency families this server publishes",
-          "description": "Not a metric about the model \u2014 a census of what the exposition actually contains, counted per instance: how many `_bucket` series (quantiles are possible), how many `_count` series (a mean is possible) and how many TTFT buckets there are (a one-bucket histogram quantiles to that bucket, so a suspiciously round p99 is usually this panel's fault, not the model's).\n\nRead it when a latency panel above is empty: counts here but no quantile means the server uses a family name this dashboard does not know yet \u2014 add the stem to the `_TTFT` / `_TPOT` / `_E2E` constants in make_dashboard.py. Nothing here at all means the server publishes no latency families.\n\nPromQL sent by this panel:\n\n```promql\nA: count by (instance, job) ({__name__=~\"llama:time_to_first_token_seconds_bucket|llamacpp:time_to_first_token_seconds_bucket|llamacpp:ttft_seconds_bucket|vllm:time_to_first_token_seconds_bucket|llama:time_per_output_token_seconds_bucket|llamacpp:time_per_output_token_seconds_bucket|llamacpp:time_per_token_seconds_bucket|vllm:time_per_output_token_seconds_bucket|llama:end_to_end_response_seconds_bucket|llamacpp:end_to_end_response_seconds_bucket|llamacpp:requests_seconds_bucket|llamacpp:request_seconds_bucket|vllm:e2e_request_latency_seconds_bucket\",job=~\"$job\",instance=~\"$instance\"})\nA: count by (instance, job) ({__name__=~\"llama:time_to_first_token_seconds_count|llamacpp:time_to_first_token_seconds_count|llamacpp:ttft_seconds_count|vllm:time_to_first_token_seconds_count|llama:time_per_output_token_seconds_count|llamacpp:time_per_output_token_seconds_count|llamacpp:time_per_token_seconds_count|vllm:time_per_output_token_seconds_count|llama:end_to_end_response_seconds_count|llamacpp:end_to_end_response_seconds_count|llamacpp:requests_seconds_count|llamacpp:request_seconds_count|vllm:e2e_request_latency_seconds_count\",job=~\"$job\",instance=~\"$instance\"})\nA: count by (instance, job) ({__name__=~\"llama:time_to_first_token_seconds_bucket|llamacpp:time_to_first_token_seconds_bucket|llamacpp:ttft_seconds_bucket|vllm:time_to_first_token_seconds_bucket\",job=~\"$job\",instance=~\"$instance\"})\n```",
+          "description": "Not a metric about the model \u2014 a census of what the exposition actually contains, counted per instance: how many `_bucket` series (quantiles are possible), how many `_count` series (a mean is possible) and how many TTFT buckets there are (a one-bucket histogram quantiles to that bucket, so a suspiciously round p99 is usually this panel's fault, not the model's).\n\nRead it when a latency panel above is empty: counts here but no quantile means the server uses a family name this dashboard does not know yet \u2014 add the stem to the `_TTFT` / `_TPOT` / `_E2E` constants in make_dashboard.py. Nothing here at all means the server publishes no latency families.\n\nPromQL sent by this panel:\n\n```promql\nA: count by (instance, job) ({__name__=~\"llama:time_to_first_token_seconds_bucket|llamacpp:time_to_first_token_seconds_bucket|llamacpp:ttft_seconds_bucket|vllm:time_to_first_token_seconds_bucket|llama:time_per_output_token_seconds_bucket|llamacpp:time_per_output_token_seconds_bucket|llamacpp:time_per_token_seconds_bucket|vllm:time_per_output_token_seconds_bucket|llama:end_to_end_response_seconds_bucket|llamacpp:end_to_end_response_seconds_bucket|llamacpp:requests_seconds_bucket|llamacpp:request_seconds_bucket|vllm:e2e_request_latency_seconds_bucket\",job=~\"$job\",instance=~\"$instance\"})\nB: count by (instance, job) ({__name__=~\"llama:time_to_first_token_seconds_count|llamacpp:time_to_first_token_seconds_count|llamacpp:ttft_seconds_count|vllm:time_to_first_token_seconds_count|llama:time_per_output_token_seconds_count|llamacpp:time_per_output_token_seconds_count|llamacpp:time_per_token_seconds_count|vllm:time_per_output_token_seconds_count|llama:end_to_end_response_seconds_count|llamacpp:end_to_end_response_seconds_count|llamacpp:requests_seconds_count|llamacpp:request_seconds_count|vllm:e2e_request_latency_seconds_count\",job=~\"$job\",instance=~\"$instance\"})\nC: count by (instance, job) ({__name__=~\"llama:time_to_first_token_seconds_bucket|llamacpp:time_to_first_token_seconds_bucket|llamacpp:ttft_seconds_bucket|vllm:time_to_first_token_seconds_bucket\",job=~\"$job\",instance=~\"$instance\"})\n```",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -1921,7 +1921,7 @@
               "expr": "count by (instance, job) ({__name__=~\"llama:time_to_first_token_seconds_count|llamacpp:time_to_first_token_seconds_count|llamacpp:ttft_seconds_count|vllm:time_to_first_token_seconds_count|llama:time_per_output_token_seconds_count|llamacpp:time_per_output_token_seconds_count|llamacpp:time_per_token_seconds_count|vllm:time_per_output_token_seconds_count|llama:end_to_end_response_seconds_count|llamacpp:end_to_end_response_seconds_count|llamacpp:requests_seconds_count|llamacpp:request_seconds_count|vllm:e2e_request_latency_seconds_count\",job=~\"$job\",instance=~\"$instance\"})",
               "legendFormat": "_count series (a mean is possible)",
               "range": true,
-              "refId": "A",
+              "refId": "B",
               "interval": "15s",
               "intervalFactor": 1
             },
@@ -1934,7 +1934,7 @@
               "expr": "count by (instance, job) ({__name__=~\"llama:time_to_first_token_seconds_bucket|llamacpp:time_to_first_token_seconds_bucket|llamacpp:ttft_seconds_bucket|vllm:time_to_first_token_seconds_bucket\",job=~\"$job\",instance=~\"$instance\"})",
               "legendFormat": "buckets on the TTFT family",
               "range": true,
-              "refId": "A",
+              "refId": "C",
               "interval": "15s",
               "intervalFactor": 1
             }
@@ -2016,7 +2016,7 @@
           "id": 4,
           "type": "timeseries",
           "title": "KV-cache pressure over time",
-          "description": "The 'was the KV cache full overnight?' panel: widen the range to 12h or 24h and the answer is on the chart. Same series the LLMKVCachePressure alerts read, so this panel and a page cannot disagree.\n\nBands are drawn at 80 % and 90 % as visual guides; the alert numbers that actually ship live in `prometheus/alert_thresholds.env` (warn 0.90, critical 0.97) \u2014 the bands deliberately sit *below* the alerts so the chart warns before the pager does. `1h average` separates a spike from a sustained squeeze, and the per-instance lines keep two servers apart.\n\nA subquery (`[1h:5m]`) is used for the average because `avg_over_time` cannot range over the result of `max(...)` any other way \u2014 writing `avg_over_time(max(x)[1h])` is a syntax error, not a shortcut.\n\nPromQL sent by this panel:\n\n```promql\nA: max({__name__=~\"llamacpp:kv_cache_usage_ratio|llamacpp:kv_cache_usage\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\nA: avg_over_time(max({__name__=~\"llamacpp:kv_cache_usage_ratio|llamacpp:kv_cache_usage\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})[1h:5m])\nA: sum by (instance, job) ({__name__=~\"llamacpp:kv_cache_usage_ratio|llamacpp:kv_cache_usage\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\nA: llm:kv_cache_usage_ratio{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
+          "description": "The 'was the KV cache full overnight?' panel: widen the range to 12h or 24h and the answer is on the chart. Same series the LLMKVCachePressure alerts read, so this panel and a page cannot disagree.\n\nBands are drawn at 80 % and 90 % as visual guides; the alert numbers that actually ship live in `prometheus/alert_thresholds.env` (warn 0.90, critical 0.97) \u2014 the bands deliberately sit *below* the alerts so the chart warns before the pager does. `1h average` separates a spike from a sustained squeeze, and the per-instance lines keep two servers apart.\n\nA subquery (`[1h:5m]`) is used for the average because `avg_over_time` cannot range over the result of `max(...)` any other way \u2014 writing `avg_over_time(max(x)[1h])` is a syntax error, not a shortcut.\n\nPromQL sent by this panel:\n\n```promql\nA: max({__name__=~\"llamacpp:kv_cache_usage_ratio|llamacpp:kv_cache_usage\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\nB: avg_over_time(max({__name__=~\"llamacpp:kv_cache_usage_ratio|llamacpp:kv_cache_usage\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})[1h:5m])\nC: sum by (instance, job) ({__name__=~\"llamacpp:kv_cache_usage_ratio|llamacpp:kv_cache_usage\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\nD: llm:kv_cache_usage_ratio{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -2050,7 +2050,7 @@
               "expr": "avg_over_time(max({__name__=~\"llamacpp:kv_cache_usage_ratio|llamacpp:kv_cache_usage\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})[1h:5m])",
               "legendFormat": "1h average of the worst instance",
               "range": true,
-              "refId": "A",
+              "refId": "B",
               "interval": "15s",
               "intervalFactor": 1
             },
@@ -2063,7 +2063,7 @@
               "expr": "sum by (instance, job) ({__name__=~\"llamacpp:kv_cache_usage_ratio|llamacpp:kv_cache_usage\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})",
               "legendFormat": "{{instance}} {{job}}",
               "range": true,
-              "refId": "A",
+              "refId": "C",
               "interval": "15s",
               "intervalFactor": 1
             },
@@ -2076,7 +2076,7 @@
               "expr": "llm:kv_cache_usage_ratio{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}",
               "legendFormat": "llm:kv_cache_usage_ratio (rule)",
               "range": true,
-              "refId": "A",
+              "refId": "D",
               "interval": "15s",
               "intervalFactor": 1
             }
@@ -2151,7 +2151,7 @@
           "id": 34,
           "type": "timeseries",
           "title": "KV tokens in use vs pool capacity",
-          "description": "The absolute numbers behind the ratio: tokens resident in the cache, the size the pool was configured with (`halogen:kv_pool_positions`, or `llamacpp:context_size` on plain llama.cpp), and the positions the front-end slots reserved but are not using yet.\n\nThe ratio is what to alert on; this is what to read alongside it. A ratio at 95 % with a lot of reserved-but-idle tokens is a slot-sizing problem, not a context-length problem, and the fix is different.\n\nPromQL sent by this panel:\n\n```promql\nA: sum({__name__=~\"llamacpp:kv_cache_tokens|llamacpp:kvcache_used_tokens\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\nA: sum({__name__=~\"halogen:kv_pool_positions|halogen:kv_pool_tokens|halogen:kv_pool_total_tokens|llamacpp:context_size\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\nA: sum({__name__=~\"halogen:kv_pool_reserved_tokens\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\nA: sum by (instance, job) ({__name__=~\"llamacpp:kv_cache_tokens|llamacpp:kvcache_used_tokens\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\n```",
+          "description": "The absolute numbers behind the ratio: tokens resident in the cache, the size the pool was configured with (`halogen:kv_pool_positions`, or `llamacpp:context_size` on plain llama.cpp), and the positions the front-end slots reserved but are not using yet.\n\nThe ratio is what to alert on; this is what to read alongside it. A ratio at 95 % with a lot of reserved-but-idle tokens is a slot-sizing problem, not a context-length problem, and the fix is different.\n\nPromQL sent by this panel:\n\n```promql\nA: sum({__name__=~\"llamacpp:kv_cache_tokens|llamacpp:kvcache_used_tokens\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\nB: sum({__name__=~\"halogen:kv_pool_positions|halogen:kv_pool_tokens|halogen:kv_pool_total_tokens|llamacpp:context_size\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\nC: sum({__name__=~\"halogen:kv_pool_reserved_tokens\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\nD: sum by (instance, job) ({__name__=~\"llamacpp:kv_cache_tokens|llamacpp:kvcache_used_tokens\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\n```",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -2185,7 +2185,7 @@
               "expr": "sum({__name__=~\"halogen:kv_pool_positions|halogen:kv_pool_tokens|halogen:kv_pool_total_tokens|llamacpp:context_size\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})",
               "legendFormat": "pool capacity",
               "range": true,
-              "refId": "A",
+              "refId": "B",
               "interval": "15s",
               "intervalFactor": 1
             },
@@ -2198,7 +2198,7 @@
               "expr": "sum({__name__=~\"halogen:kv_pool_reserved_tokens\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})",
               "legendFormat": "reserved by slots (halogen)",
               "range": true,
-              "refId": "A",
+              "refId": "C",
               "interval": "15s",
               "intervalFactor": 1
             },
@@ -2211,7 +2211,7 @@
               "expr": "sum by (instance, job) ({__name__=~\"llamacpp:kv_cache_tokens|llamacpp:kvcache_used_tokens\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})",
               "legendFormat": "in use {{instance}}",
               "range": true,
-              "refId": "A",
+              "refId": "D",
               "interval": "15s",
               "intervalFactor": 1
             }
@@ -2275,7 +2275,7 @@
           "id": 6,
           "type": "timeseries",
           "title": "Prompt-cache hit ratio + draft-accept ratio",
-          "description": "The two ratios the bespoke page divided by hand in JavaScript, now as windowed rates:\n\n* cache hit ratio = `rate(prompt_tokens_cached_total) / (rate(prompt_tokens_total) + rate(prompt_tokens_cached_total))` \u2014 the `+ cached` in the denominator is the llama.cpp convention (prompt_tokens_total counts misses only);\n* draft acceptance = `rate(draft_tokens_accepted_total) / rate(draft_tokens_total)`.\n\nPlotted together because they explain each other: a cold prompt cache and a collapsing draft-accept ratio together mean something restarted, or slots are evicting each other's prefixes \u2014 which is what LLMPromptCacheCold pages on.\n\nclamp_min(<denominator>, 1) is deliberate. With no traffic the raw division is 0/0, PromQL turns that into NaN and Grafana drops the sample \u2014 a hole in the line that reads like a missing metric. A clamped 0 reads as 'no ratio to report', which is the truth. The bespoke page hid the same case behind divide() (monitor/static/app.js), which is one reason this panel exists.\n\nSeries tagged `(rule)` are the neutral llm:* aliases from monitoring/prometheus/recording_rules.yml \u2014 the vendor-drift seam ADR 0001 C3 names, and what alert rules should read. They are plotted *alongside* the raw expression, not instead of it, on purpose: a panel must still render against a server whose rules have never run, and 'No data' has to mean no data rather than no rule. Where the two disagree the rule is stale \u2014 or the windows differ: rules use a fixed 5m, panels use $__rate_interval.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(rate({__name__=~\"halogen:prompt_tokens_cached_total|llamacpp:prompt_cache_tokens_cached_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])) / clamp_min(sum(rate({__name__=~\"llamacpp:prompt_tokens_total|vllm:prompt_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])) + sum(rate({__name__=~\"halogen:prompt_tokens_cached_total|llamacpp:prompt_cache_tokens_cached_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])), 1)\nA: sum(rate({__name__=~\"halogen:draft_tokens_accepted_total|llamacpp:draft_tokens_accepted_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])) / clamp_min(sum(rate({__name__=~\"halogen:draft_tokens_total|llamacpp:draft_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])), 1)\nA: llm:prompt_cache_hit_ratio{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\nA: llm:draft_acceptance_ratio{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
+          "description": "The two ratios the bespoke page divided by hand in JavaScript, now as windowed rates:\n\n* cache hit ratio = `rate(prompt_tokens_cached_total) / (rate(prompt_tokens_total) + rate(prompt_tokens_cached_total))` \u2014 the `+ cached` in the denominator is the llama.cpp convention (prompt_tokens_total counts misses only);\n* draft acceptance = `rate(draft_tokens_accepted_total) / rate(draft_tokens_total)`.\n\nPlotted together because they explain each other: a cold prompt cache and a collapsing draft-accept ratio together mean something restarted, or slots are evicting each other's prefixes \u2014 which is what LLMPromptCacheCold pages on.\n\nclamp_min(<denominator>, 1) is deliberate. With no traffic the raw division is 0/0, PromQL turns that into NaN and Grafana drops the sample \u2014 a hole in the line that reads like a missing metric. A clamped 0 reads as 'no ratio to report', which is the truth. The bespoke page hid the same case behind divide() (monitor/static/app.js), which is one reason this panel exists.\n\nSeries tagged `(rule)` are the neutral llm:* aliases from monitoring/prometheus/recording_rules.yml \u2014 the vendor-drift seam ADR 0001 C3 names, and what alert rules should read. They are plotted *alongside* the raw expression, not instead of it, on purpose: a panel must still render against a server whose rules have never run, and 'No data' has to mean no data rather than no rule. Where the two disagree the rule is stale \u2014 or the windows differ: rules use a fixed 5m, panels use $__rate_interval.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(rate({__name__=~\"halogen:prompt_tokens_cached_total|llamacpp:prompt_cache_tokens_cached_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])) / clamp_min(sum(rate({__name__=~\"llamacpp:prompt_tokens_total|vllm:prompt_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])) + sum(rate({__name__=~\"halogen:prompt_tokens_cached_total|llamacpp:prompt_cache_tokens_cached_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])), 1)\nB: sum(rate({__name__=~\"halogen:draft_tokens_accepted_total|llamacpp:draft_tokens_accepted_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])) / clamp_min(sum(rate({__name__=~\"halogen:draft_tokens_total|llamacpp:draft_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])), 1)\nC: llm:prompt_cache_hit_ratio{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\nD: llm:draft_acceptance_ratio{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -2309,7 +2309,7 @@
               "expr": "sum(rate({__name__=~\"halogen:draft_tokens_accepted_total|llamacpp:draft_tokens_accepted_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])) / clamp_min(sum(rate({__name__=~\"halogen:draft_tokens_total|llamacpp:draft_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])), 1)",
               "legendFormat": "draft-accept ratio",
               "range": true,
-              "refId": "A",
+              "refId": "B",
               "interval": "15s",
               "intervalFactor": 1
             },
@@ -2322,7 +2322,7 @@
               "expr": "llm:prompt_cache_hit_ratio{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}",
               "legendFormat": "llm:prompt_cache_hit_ratio (rule)",
               "range": true,
-              "refId": "A",
+              "refId": "C",
               "interval": "15s",
               "intervalFactor": 1
             },
@@ -2335,7 +2335,7 @@
               "expr": "llm:draft_acceptance_ratio{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}",
               "legendFormat": "llm:draft_acceptance_ratio (rule)",
               "range": true,
-              "refId": "A",
+              "refId": "D",
               "interval": "15s",
               "intervalFactor": 1
             }
@@ -2402,7 +2402,7 @@
           "id": 35,
           "type": "timeseries",
           "title": "Prompt cache: served from cache vs reprocessed",
-          "description": "The two halves of the ratio above in tokens/s, because a ratio alone cannot tell a good day from an idle one: 100 % hit on two requests is not 100 % hit on two thousand.\n\n`served from cache` climbing while `reprocessed` stays flat is the cache doing its job. Both falling together means the prefix changed \u2014 a rebuilt system prompt, a model swap, a restart \u2014 and every TTFT after it pays for that work.\n\nrate() needs two points, so the line starts at least one scrape interval in. A counter reset (server restart) shows as a gap, not a spike to zero.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(rate({__name__=~\"halogen:prompt_tokens_cached_total|llamacpp:prompt_cache_tokens_cached_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\nA: sum(rate({__name__=~\"llamacpp:prompt_tokens_total|vllm:prompt_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\nA: sum by (instance, job) (rate({__name__=~\"halogen:prompt_tokens_cached_total|llamacpp:prompt_cache_tokens_cached_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\n```",
+          "description": "The two halves of the ratio above in tokens/s, because a ratio alone cannot tell a good day from an idle one: 100 % hit on two requests is not 100 % hit on two thousand.\n\n`served from cache` climbing while `reprocessed` stays flat is the cache doing its job. Both falling together means the prefix changed \u2014 a rebuilt system prompt, a model swap, a restart \u2014 and every TTFT after it pays for that work.\n\nrate() needs two points, so the line starts at least one scrape interval in. A counter reset (server restart) shows as a gap, not a spike to zero.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(rate({__name__=~\"halogen:prompt_tokens_cached_total|llamacpp:prompt_cache_tokens_cached_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\nB: sum(rate({__name__=~\"llamacpp:prompt_tokens_total|vllm:prompt_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\nC: sum by (instance, job) (rate({__name__=~\"halogen:prompt_tokens_cached_total|llamacpp:prompt_cache_tokens_cached_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\n```",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -2436,7 +2436,7 @@
               "expr": "sum(rate({__name__=~\"llamacpp:prompt_tokens_total|vllm:prompt_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))",
               "legendFormat": "reprocessed (cache misses)",
               "range": true,
-              "refId": "A",
+              "refId": "B",
               "interval": "15s",
               "intervalFactor": 1
             },
@@ -2449,7 +2449,7 @@
               "expr": "sum by (instance, job) (rate({__name__=~\"halogen:prompt_tokens_cached_total|llamacpp:prompt_cache_tokens_cached_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))",
               "legendFormat": "cached {{instance}}",
               "range": true,
-              "refId": "A",
+              "refId": "C",
               "interval": "15s",
               "intervalFactor": 1
             }
@@ -2763,7 +2763,7 @@
           "id": 39,
           "type": "stat",
           "title": "draft tokens / s",
-          "description": "The draft head's own throughput, next to the accepted subset. Proposed is always the larger number; a draft rate that jumps while decode flatlines is speculation spinning against a stalled target model.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(rate({__name__=~\"halogen:draft_tokens_total|llamacpp:draft_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\nA: sum(rate({__name__=~\"halogen:draft_tokens_accepted_total|llamacpp:draft_tokens_accepted_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\n```",
+          "description": "The draft head's own throughput, next to the accepted subset. Proposed is always the larger number; a draft rate that jumps while decode flatlines is speculation spinning against a stalled target model.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(rate({__name__=~\"halogen:draft_tokens_total|llamacpp:draft_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\nB: sum(rate({__name__=~\"halogen:draft_tokens_accepted_total|llamacpp:draft_tokens_accepted_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\n```",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -2798,7 +2798,7 @@
               "expr": "sum(rate({__name__=~\"halogen:draft_tokens_accepted_total|llamacpp:draft_tokens_accepted_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))",
               "legendFormat": "accepted tok/s",
               "range": false,
-              "refId": "A",
+              "refId": "B",
               "interval": "15s",
               "intervalFactor": 1,
               "instant": true
@@ -2846,7 +2846,7 @@
           "id": 40,
           "type": "timeseries",
           "title": "Draft acceptance over time",
-          "description": "The acceptance ratio with the recording-rule alias beside it, plus the reciprocal in tokens. A collapsing acceptance ratio and a rising 'drafts per accept' are the same event described twice; having both on the chart is cheaper than doing the arithmetic at 3am.\n\nclamp_min(<denominator>, 1) is deliberate. With no traffic the raw division is 0/0, PromQL turns that into NaN and Grafana drops the sample \u2014 a hole in the line that reads like a missing metric. A clamped 0 reads as 'no ratio to report', which is the truth. The bespoke page hid the same case behind divide() (monitor/static/app.js), which is one reason this panel exists.\n\nSeries tagged `(rule)` are the neutral llm:* aliases from monitoring/prometheus/recording_rules.yml \u2014 the vendor-drift seam ADR 0001 C3 names, and what alert rules should read. They are plotted *alongside* the raw expression, not instead of it, on purpose: a panel must still render against a server whose rules have never run, and 'No data' has to mean no data rather than no rule. Where the two disagree the rule is stale \u2014 or the windows differ: rules use a fixed 5m, panels use $__rate_interval.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(rate({__name__=~\"halogen:draft_tokens_accepted_total|llamacpp:draft_tokens_accepted_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])) / clamp_min(sum(rate({__name__=~\"halogen:draft_tokens_total|llamacpp:draft_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])), 1)\nA: llm:draft_acceptance_ratio{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\nA: sum(rate({__name__=~\"halogen:draft_tokens_total|llamacpp:draft_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])) / clamp_min(sum(rate({__name__=~\"halogen:draft_tokens_accepted_total|llamacpp:draft_tokens_accepted_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])), 1)\n```",
+          "description": "The acceptance ratio with the recording-rule alias beside it, plus the reciprocal in tokens. A collapsing acceptance ratio and a rising 'drafts per accept' are the same event described twice; having both on the chart is cheaper than doing the arithmetic at 3am.\n\nclamp_min(<denominator>, 1) is deliberate. With no traffic the raw division is 0/0, PromQL turns that into NaN and Grafana drops the sample \u2014 a hole in the line that reads like a missing metric. A clamped 0 reads as 'no ratio to report', which is the truth. The bespoke page hid the same case behind divide() (monitor/static/app.js), which is one reason this panel exists.\n\nSeries tagged `(rule)` are the neutral llm:* aliases from monitoring/prometheus/recording_rules.yml \u2014 the vendor-drift seam ADR 0001 C3 names, and what alert rules should read. They are plotted *alongside* the raw expression, not instead of it, on purpose: a panel must still render against a server whose rules have never run, and 'No data' has to mean no data rather than no rule. Where the two disagree the rule is stale \u2014 or the windows differ: rules use a fixed 5m, panels use $__rate_interval.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(rate({__name__=~\"halogen:draft_tokens_accepted_total|llamacpp:draft_tokens_accepted_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])) / clamp_min(sum(rate({__name__=~\"halogen:draft_tokens_total|llamacpp:draft_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])), 1)\nB: llm:draft_acceptance_ratio{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\nC: sum(rate({__name__=~\"halogen:draft_tokens_total|llamacpp:draft_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])) / clamp_min(sum(rate({__name__=~\"halogen:draft_tokens_accepted_total|llamacpp:draft_tokens_accepted_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])), 1)\n```",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -2880,7 +2880,7 @@
               "expr": "llm:draft_acceptance_ratio{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}",
               "legendFormat": "llm:draft_acceptance_ratio (rule)",
               "range": true,
-              "refId": "A",
+              "refId": "B",
               "interval": "15s",
               "intervalFactor": 1
             },
@@ -2893,7 +2893,7 @@
               "expr": "sum(rate({__name__=~\"halogen:draft_tokens_total|llamacpp:draft_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])) / clamp_min(sum(rate({__name__=~\"halogen:draft_tokens_accepted_total|llamacpp:draft_tokens_accepted_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])), 1)",
               "legendFormat": "draft tokens per accepted",
               "range": true,
-              "refId": "A",
+              "refId": "C",
               "interval": "15s",
               "intervalFactor": 1
             }
@@ -2958,7 +2958,7 @@
           "id": 41,
           "type": "timeseries",
           "title": "Draft tokens: proposed / accepted / rejected",
-          "description": "The three counters in tokens/s. `proposed = accepted + rejected` unless this build has no rejected counter \u2014 then that line is simply absent, which is a missing metric, not a zero.\n\nRead the shape: accepted stepping down while proposed holds is the drafter getting worse (new prompt distribution); both dropping is speculation having been switched off or the drafter unloading.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(rate({__name__=~\"halogen:draft_tokens_total|llamacpp:draft_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\nA: sum(rate({__name__=~\"halogen:draft_tokens_accepted_total|llamacpp:draft_tokens_accepted_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\nA: sum(rate({__name__=~\"halogen:draft_tokens_rejected_total|llamacpp:draft_tokens_rejected_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\n```",
+          "description": "The three counters in tokens/s. `proposed = accepted + rejected` unless this build has no rejected counter \u2014 then that line is simply absent, which is a missing metric, not a zero.\n\nRead the shape: accepted stepping down while proposed holds is the drafter getting worse (new prompt distribution); both dropping is speculation having been switched off or the drafter unloading.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(rate({__name__=~\"halogen:draft_tokens_total|llamacpp:draft_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\nB: sum(rate({__name__=~\"halogen:draft_tokens_accepted_total|llamacpp:draft_tokens_accepted_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\nC: sum(rate({__name__=~\"halogen:draft_tokens_rejected_total|llamacpp:draft_tokens_rejected_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\n```",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -2992,7 +2992,7 @@
               "expr": "sum(rate({__name__=~\"halogen:draft_tokens_accepted_total|llamacpp:draft_tokens_accepted_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))",
               "legendFormat": "accepted",
               "range": true,
-              "refId": "A",
+              "refId": "B",
               "interval": "15s",
               "intervalFactor": 1
             },
@@ -3005,7 +3005,7 @@
               "expr": "sum(rate({__name__=~\"halogen:draft_tokens_rejected_total|llamacpp:draft_tokens_rejected_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))",
               "legendFormat": "rejected",
               "range": true,
-              "refId": "A",
+              "refId": "C",
               "interval": "15s",
               "intervalFactor": 1
             }
@@ -3070,7 +3070,7 @@
           "id": 42,
           "type": "timeseries",
           "title": "Speculative decode time budget",
-          "description": "`rate()` over the four speculative timers: verify, decide, estimated-draft and actual-draft.\n\nIf draft time grows faster than verify time, speculation itself is the bottleneck. If verify dominates, speculation has stopped paying and the drafter (or `--specdraft`) deserves a second look. Pairs with the time-ratio tile above: that is the verdict, this is the evidence.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(rate({__name__=~\"llamacpp:speculative_time_seconds_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\nA: sum(rate({__name__=~\"llamacpp:speculative_decide_time_seconds_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\nA: sum(rate({__name__=~\"llamacpp:speculative_estimate_draft_time_seconds_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\nA: sum(rate({__name__=~\"llamacpp:speculative_draft_time_seconds_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\n```",
+          "description": "`rate()` over the four speculative timers: verify, decide, estimated-draft and actual-draft.\n\nIf draft time grows faster than verify time, speculation itself is the bottleneck. If verify dominates, speculation has stopped paying and the drafter (or `--specdraft`) deserves a second look. Pairs with the time-ratio tile above: that is the verdict, this is the evidence.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(rate({__name__=~\"llamacpp:speculative_time_seconds_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\nB: sum(rate({__name__=~\"llamacpp:speculative_decide_time_seconds_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\nC: sum(rate({__name__=~\"llamacpp:speculative_estimate_draft_time_seconds_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\nD: sum(rate({__name__=~\"llamacpp:speculative_draft_time_seconds_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\n```",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -3104,7 +3104,7 @@
               "expr": "sum(rate({__name__=~\"llamacpp:speculative_decide_time_seconds_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))",
               "legendFormat": "decide",
               "range": true,
-              "refId": "A",
+              "refId": "B",
               "interval": "15s",
               "intervalFactor": 1
             },
@@ -3117,7 +3117,7 @@
               "expr": "sum(rate({__name__=~\"llamacpp:speculative_estimate_draft_time_seconds_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))",
               "legendFormat": "estimated draft",
               "range": true,
-              "refId": "A",
+              "refId": "C",
               "interval": "15s",
               "intervalFactor": 1
             },
@@ -3130,7 +3130,7 @@
               "expr": "sum(rate({__name__=~\"llamacpp:speculative_draft_time_seconds_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))",
               "legendFormat": "actual draft",
               "range": true,
-              "refId": "A",
+              "refId": "D",
               "interval": "15s",
               "intervalFactor": 1
             }
@@ -3213,7 +3213,7 @@
           "id": 43,
           "type": "stat",
           "title": "targets up",
-          "description": "`sum(up{job=~\"$job\"})` beside `count(up{...})`: how many scrape targets answered their last scrape. Any shortfall is the real explanation for every empty panel elsewhere on this dashboard.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(up{job=~\"$job\",instance=~\"$instance\"})\nA: count(up{job=~\"$job\",instance=~\"$instance\"})\n```",
+          "description": "`sum(up{job=~\"$job\"})` beside `count(up{...})`: how many scrape targets answered their last scrape. Any shortfall is the real explanation for every empty panel elsewhere on this dashboard.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(up{job=~\"$job\",instance=~\"$instance\"})\nB: count(up{job=~\"$job\",instance=~\"$instance\"})\n```",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -3248,7 +3248,7 @@
               "expr": "count(up{job=~\"$job\",instance=~\"$instance\"})",
               "legendFormat": "targets configured",
               "range": false,
-              "refId": "A",
+              "refId": "B",
               "interval": "15s",
               "intervalFactor": 1,
               "instant": true
@@ -3514,7 +3514,7 @@
           "id": 7,
           "type": "timeseries",
           "title": "Scrape health (llm_monitor_*) + staleness",
-          "description": "Three failure layers in one panel, read top-down:\n\n* `up{job=~\"$job\"}` \u2014 0 means Prometheus could not reach the target at all: nothing was scraped, and every other panel on this dashboard is showing history;\n* `min(llm_monitor_scrape_ok)` \u2014 0 means the monitor is up but *its* scrape of the model server failed (no /metrics route, timeout, 5xx). Different incident, different runbook section, and precisely the distinction the  bespoke 'is it down?' tile could not make;\n* `increase(llm_monitor_scrape_success_total[...])` \u2014 successful passthrough scrapes in the window, the canonical 'is the monitor actually scraping' signal (ADR 0001 C2);\n* `time() - timestamp(up{...})` \u2014 how stale the newest sample is, which is how a target that answers but has stopped advancing (a proxy replaying a buffered response) becomes visible.\n\nThe `llm_monitor_*` series are deliberately NOT clamped by $job/$instance: 'is the telemetry pipeline itself alive' has to stay answerable while the variables are narrowed to one server, and the `upstream` label already separates several monitors (one proxy can front several servers via `/metrics?url=`).\n\nPromQL sent by this panel:\n\n```promql\nA: up{job=~\"$job\",instance=~\"$instance\"}\nA: min(llm_monitor_scrape_ok)\nA: sum(increase(llm_monitor_scrape_success_total[$__rate_interval]))\nA: max(time() - timestamp(up{job=~\"$job\",instance=~\"$instance\"}))\n```",
+          "description": "Three failure layers in one panel, read top-down:\n\n* `up{job=~\"$job\"}` \u2014 0 means Prometheus could not reach the target at all: nothing was scraped, and every other panel on this dashboard is showing history;\n* `min(llm_monitor_scrape_ok)` \u2014 0 means the monitor is up but *its* scrape of the model server failed (no /metrics route, timeout, 5xx). Different incident, different runbook section, and precisely the distinction the  bespoke 'is it down?' tile could not make;\n* `increase(llm_monitor_scrape_success_total[...])` \u2014 successful passthrough scrapes in the window, the canonical 'is the monitor actually scraping' signal (ADR 0001 C2);\n* `time() - timestamp(up{...})` \u2014 how stale the newest sample is, which is how a target that answers but has stopped advancing (a proxy replaying a buffered response) becomes visible.\n\nThe `llm_monitor_*` series are deliberately NOT clamped by $job/$instance: 'is the telemetry pipeline itself alive' has to stay answerable while the variables are narrowed to one server, and the `upstream` label already separates several monitors (one proxy can front several servers via `/metrics?url=`).\n\nPromQL sent by this panel:\n\n```promql\nA: up{job=~\"$job\",instance=~\"$instance\"}\nB: min(llm_monitor_scrape_ok)\nC: sum(increase(llm_monitor_scrape_success_total[$__rate_interval]))\nD: max(time() - timestamp(up{job=~\"$job\",instance=~\"$instance\"}))\n```",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -3548,7 +3548,7 @@
               "expr": "min(llm_monitor_scrape_ok)",
               "legendFormat": "monitor scrape ok",
               "range": true,
-              "refId": "A",
+              "refId": "B",
               "interval": "15s",
               "intervalFactor": 1
             },
@@ -3561,7 +3561,7 @@
               "expr": "sum(increase(llm_monitor_scrape_success_total[$__rate_interval]))",
               "legendFormat": "successful monitor scrapes in window",
               "range": true,
-              "refId": "A",
+              "refId": "C",
               "interval": "15s",
               "intervalFactor": 1
             },
@@ -3574,7 +3574,7 @@
               "expr": "max(time() - timestamp(up{job=~\"$job\",instance=~\"$instance\"}))",
               "legendFormat": "worst sample age (s)",
               "range": true,
-              "refId": "A",
+              "refId": "D",
               "interval": "15s",
               "intervalFactor": 1
             }
@@ -3637,7 +3637,7 @@
           "id": 47,
           "type": "timeseries",
           "title": "Monitor scrape latency and upstream status",
-          "description": "`llm_monitor_scrape_latency_ms` and `llm_monitor_scrape_upstream_status`, one series per `upstream` label (one proxy can front several servers via `/metrics?url=`).\n\nserve.py caps an upstream call at 5 s, so a latency line pinned at 5000 ms means the cap fired and Prometheus saw a scrape failure (502), not a slow-but-successful scrape. Status 0 means no answer at all.\n\nPromQL sent by this panel:\n\n```promql\nA: llm_monitor_scrape_latency_ms\nA: llm_monitor_scrape_upstream_status\n```",
+          "description": "`llm_monitor_scrape_latency_ms` and `llm_monitor_scrape_upstream_status`, one series per `upstream` label (one proxy can front several servers via `/metrics?url=`).\n\nserve.py caps an upstream call at 5 s, so a latency line pinned at 5000 ms means the cap fired and Prometheus saw a scrape failure (502), not a slow-but-successful scrape. Status 0 means no answer at all.\n\nPromQL sent by this panel:\n\n```promql\nA: llm_monitor_scrape_latency_ms\nB: llm_monitor_scrape_upstream_status\n```",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -3671,7 +3671,7 @@
               "expr": "llm_monitor_scrape_upstream_status",
               "legendFormat": "{{upstream}} status",
               "range": true,
-              "refId": "A",
+              "refId": "B",
               "interval": "15s",
               "intervalFactor": 1
             }
@@ -3736,7 +3736,7 @@
           "id": 48,
           "type": "timeseries",
           "title": "Monitor scrape success rate",
-          "description": "`rate(llm_monitor_scrape_success_total[$__rate_interval])` per upstream. With the 15 s scrape interval the healthy value is about 0.067/s \u2014 one successful scrape per interval \u2014 and it falls to 0 exactly when the monitor goes blind, with counter resets (a monitor restart) showing as a gap.\n\nPlotted against `up` so 'Prometheus could not scrape the monitor' and 'the monitor could not scrape the model' are distinguishable on one chart.\n\nPromQL sent by this panel:\n\n```promql\nA: rate(llm_monitor_scrape_success_total[$__rate_interval])\nA: up{job=~\"$job\",instance=~\"$instance\"}\n```",
+          "description": "`rate(llm_monitor_scrape_success_total[$__rate_interval])` per upstream. With the 15 s scrape interval the healthy value is about 0.067/s \u2014 one successful scrape per interval \u2014 and it falls to 0 exactly when the monitor goes blind, with counter resets (a monitor restart) showing as a gap.\n\nPlotted against `up` so 'Prometheus could not scrape the monitor' and 'the monitor could not scrape the model' are distinguishable on one chart.\n\nPromQL sent by this panel:\n\n```promql\nA: rate(llm_monitor_scrape_success_total[$__rate_interval])\nB: up{job=~\"$job\",instance=~\"$instance\"}\n```",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -3770,7 +3770,7 @@
               "expr": "up{job=~\"$job\",instance=~\"$instance\"}",
               "legendFormat": "{{job}} {{instance}} up",
               "range": true,
-              "refId": "A",
+              "refId": "B",
               "interval": "15s",
               "intervalFactor": 1
             }
@@ -3834,7 +3834,7 @@
           "id": 49,
           "type": "timeseries",
           "title": "Parse errors, truncation, series count",
-          "description": "`increase(llm_monitor_parse_errors_total[$__rate_interval])`, `max(llm_monitor_parse_truncated)` and `llm_monitor_series_count`.\n\nThe passthrough hands the exposition text to Prometheus verbatim no matter what these say \u2014 they describe the monitor's *parsed* view (2000-series cap, one deliberately simple parser). Non-zero parse errors means a server changed its format and it is the derived panels, not the raw text, that should be distrusted.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(increase(llm_monitor_parse_errors_total[$__rate_interval]))\nA: max(llm_monitor_parse_truncated)\nA: llm_monitor_series_count\n```",
+          "description": "`increase(llm_monitor_parse_errors_total[$__rate_interval])`, `max(llm_monitor_parse_truncated)` and `llm_monitor_series_count`.\n\nThe passthrough hands the exposition text to Prometheus verbatim no matter what these say \u2014 they describe the monitor's *parsed* view (2000-series cap, one deliberately simple parser). Non-zero parse errors means a server changed its format and it is the derived panels, not the raw text, that should be distrusted.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(increase(llm_monitor_parse_errors_total[$__rate_interval]))\nB: max(llm_monitor_parse_truncated)\nC: llm_monitor_series_count\n```",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -3868,7 +3868,7 @@
               "expr": "max(llm_monitor_parse_truncated)",
               "legendFormat": "series cap hit",
               "range": true,
-              "refId": "A",
+              "refId": "B",
               "interval": "15s",
               "intervalFactor": 1
             },
@@ -3881,7 +3881,7 @@
               "expr": "llm_monitor_series_count",
               "legendFormat": "{{upstream}} series kept",
               "range": true,
-              "refId": "A",
+              "refId": "C",
               "interval": "15s",
               "intervalFactor": 1
             }
