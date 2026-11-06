@@ -46,7 +46,15 @@ services:
       - --storage.tsdb.path=/prometheus
       # BOTH caps are mandatory: time alone does not bound the disk, and a
       # RAM-starved box must not be wedged by its own telemetry.
-      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION_TIME:-15d}
+      #
+      # 30 d is the horizon the dashboard is written against: the time picker offers
+      # a 30 d range and the History row averages up to 7 d, and a window past the
+      # retention edge silently answers from whatever is left instead of failing. The
+      # measured cost of the extra fortnight is roughly 0.5 GB at the ~37 MB/day in
+      # monitoring/README.md#retention-sizing, inside the size cap below; the rollup
+      # rules that make the long windows cheap add ~13 kB/day (recording_rules.yml,
+      # group `llm-rollups`). check_monitoring.py fails if a window ever outgrows this.
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION_TIME:-30d}
       - --storage.tsdb.retention.size=${PROMETHEUS_RETENTION_SIZE:-2GB}
       # Deliberate: the config is mounted read-only from git, so the way to pick
       # up a config change is `docker compose restart prometheus`, not an HTTP

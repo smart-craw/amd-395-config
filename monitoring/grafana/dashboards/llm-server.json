@@ -113,6 +113,58 @@
         "skipUrlSync": false,
         "sort": 1,
         "description": "Only servers that are labelled show up: llama.cpp does not label its own metrics at all (the `model` here normally comes from monitoring/prometheus/targets/llm-servers.json file_sd labels), and vLLM's own label is model_name, which the llm:* recording rules normalize onto `model` \u2014 hence the alias in the selector. An empty list means no model label anywhere: All (.*) then keeps every panel working, and the per-model panel draws one line called 'unknown'."
+      },
+      {
+        "name": "window",
+        "label": "Rollup window",
+        "type": "custom",
+        "query": "5m,15m,1h,6h,24h,7d",
+        "current": {
+          "text": "1h",
+          "value": "1h",
+          "selected": true
+        },
+        "options": [
+          {
+            "text": "5m",
+            "value": "5m",
+            "selected": false
+          },
+          {
+            "text": "15m",
+            "value": "15m",
+            "selected": false
+          },
+          {
+            "text": "1h",
+            "value": "1h",
+            "selected": true
+          },
+          {
+            "text": "6h",
+            "value": "6h",
+            "selected": false
+          },
+          {
+            "text": "24h",
+            "value": "24h",
+            "selected": false
+          },
+          {
+            "text": "7d",
+            "value": "7d",
+            "selected": false
+          }
+        ],
+        "hide": 0,
+        "includeAll": false,
+        "multi": false,
+        "definition": "5m,15m,1h,6h,24h,7d",
+        "refresh": 0,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 0,
+        "description": "How wide the History row's windows are. Every value here is a PromQL duration spliced straight into rate() / increase(), and the widest one is the ceiling on how far back a panel can average - so it, and every literal window in a panel or a recording rule, has to stay inside PROMETHEUS_RETENTION_TIME, which is what check_monitoring.py enforces. A window longer than retention does not error: it silently averages only the part still on disk, which is the most misleading failure this dashboard could have."
       }
     ]
   },
@@ -1406,13 +1458,1280 @@
     {
       "id": 101,
       "type": "row",
+      "title": "History & rollups",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 28
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "panels": []
+    },
+    {
+      "id": 70,
+      "type": "text",
+      "title": "What 'history' means on this box",
+      "description": "Everything above this line answers *right now*. This row answers **how fast was it yesterday, how much work happened last week, was the cache warm overnight** \u2014 the same measurements folded over a window.\n\n* **Where the numbers come from.** Each panel plots the raw expression (computed at query time from the counters) and the pre-computed `llm:*:mean_1h|mean_24h|sum_24h` rollups from `monitoring/prometheus/recording_rules.yml` beside them, for the same reason the other rows plot `(rule)` aliases: a panel must still render where the rules have never run.\n\n* **A mean over a window is a mean over the samples that exist.** Six hours of a 24 h window with the server down contributes nothing to the mean, so these read *mean throughput while it was up*. That is the useful meaning; a mean that charged downtime to the average would say the box got slower. `llm:scrape_success_ratio:mean_24h`, in the next chart down, is how you tell the two apart.\n\n* **Totals use `increase()`, not a mean times a window.** A restart shortens the measured span instead of double-counting it, which is the failure mode the 'Lifetime tok/s' tile above has.\n\n* **Nothing here looks further back than retention allows.** Every window in this row, and the widest value `$window` offers, is smaller than `PROMETHEUS_RETENTION_TIME` (default 30 d), and `check_monitoring.py` fails the build when that stops being true \u2014 because a window longer than retention does not error, it silently averages whatever is left on disk. The three tiles at the bottom of this row are that budget itself.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 29
+      },
+      "options": {
+        "code": {
+          "language": "plaintext",
+          "showLineNumbers": false
+        },
+        "content": "Everything above this line answers *right now*. This row answers **how fast was it yesterday, how much work happened last week, was the cache warm overnight** \u2014 the same measurements folded over a window.\n\n* **Where the numbers come from.** Each panel plots the raw expression (computed at query time from the counters) and the pre-computed `llm:*:mean_1h|mean_24h|sum_24h` rollups from `monitoring/prometheus/recording_rules.yml` beside them, for the same reason the other rows plot `(rule)` aliases: a panel must still render where the rules have never run.\n\n* **A mean over a window is a mean over the samples that exist.** Six hours of a 24 h window with the server down contributes nothing to the mean, so these read *mean throughput while it was up*. That is the useful meaning; a mean that charged downtime to the average would say the box got slower. `llm:scrape_success_ratio:mean_24h`, in the next chart down, is how you tell the two apart.\n\n* **Totals use `increase()`, not a mean times a window.** A restart shortens the measured span instead of double-counting it, which is the failure mode the 'Lifetime tok/s' tile above has.\n\n* **Nothing here looks further back than retention allows.** Every window in this row, and the widest value `$window` offers, is smaller than `PROMETHEUS_RETENTION_TIME` (default 30 d), and `check_monitoring.py` fails the build when that stops being true \u2014 because a window longer than retention does not error, it silently averages whatever is left on disk. The three tiles at the bottom of this row are that budget itself.",
+        "mode": "markdown"
+      }
+    },
+    {
+      "id": 71,
+      "type": "stat",
+      "title": "decode tok/s \u00b7 mean last hour",
+      "description": "Mean generation throughput over the last hour: rate() over a fixed 1 h window, which divides by its own window and so is a per-second number, beside the `llm:decode_tokens_per_second:mean_1h` rollup that computes the same thing inside Prometheus every 5m.\n\nWhere the two differ, the rollup is the lagging one: it folds the 5 m aliases and is rewritten every 5 m, while the raw line is evaluated exactly now.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[1h]))\nA: llm:decode_tokens_per_second:mean_1h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 0,
+        "y": 35
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[1h]))",
+          "legendFormat": "raw: 1 h mean",
+          "range": false,
+          "refId": "A",
+          "interval": "15s",
+          "intervalFactor": 1,
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "llm:decode_tokens_per_second:mean_1h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}",
+          "legendFormat": "llm:decode_tokens_per_second:mean_1h (rule)",
+          "range": false,
+          "refId": "A",
+          "interval": "15s",
+          "intervalFactor": 1,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {},
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short",
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name",
+        "wideLayout": true
+      }
+    },
+    {
+      "id": 72,
+      "type": "stat",
+      "title": "decode tok/s \u00b7 mean last day",
+      "description": "The same fold over 24 h: a full day of decode averaged into one number, the night included. Compare with the 1 h tile to its left \u2014 a day mean well below the hour mean means the box has been getting busier (or slower) since midnight, not that anything is wrong now.\n\nIdle hours *are* in this mean (an idle server still reports a 0 rate); hours with no samples at all are not, which is what the note at the top of the row is about.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[24h]))\nA: llm:decode_tokens_per_second:mean_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 4,
+        "y": 35
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[24h]))",
+          "legendFormat": "raw: 24 h mean",
+          "range": false,
+          "refId": "A",
+          "interval": "15s",
+          "intervalFactor": 1,
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "llm:decode_tokens_per_second:mean_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}",
+          "legendFormat": "llm:decode_tokens_per_second:mean_24h (rule)",
+          "range": false,
+          "refId": "A",
+          "interval": "15s",
+          "intervalFactor": 1,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {},
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short",
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name",
+        "wideLayout": true
+      }
+    },
+    {
+      "id": 73,
+      "type": "stat",
+      "title": "decode tok/s \u00b7 mean last week",
+      "description": "Seven days: the box's steady state rather than today's mood. This is the number to quote when deciding whether a change (a quantisation, a different slot count, another model) actually helped.\n\nThe rule side reads a 10 m-step subquery rather than every 30 s sample (`[7d:10m]`), so it is a sampled mean \u2014 accurate to far less than the variation worth noticing on a week's scale, and bounded in cost the same way `host:gtt_usage_ratio:max_2d` is. On a Prometheus that just lost its TSDB the rule side stays empty until the 10 m grid has a point (~10 min), and is only a week-representative once it has a week.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[7d]))\nA: llm:decode_tokens_per_second:mean_7d{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 8,
+        "y": 35
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[7d]))",
+          "legendFormat": "raw: 7 d mean",
+          "range": false,
+          "refId": "A",
+          "interval": "15s",
+          "intervalFactor": 1,
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "llm:decode_tokens_per_second:mean_7d{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}",
+          "legendFormat": "llm:decode_tokens_per_second:mean_7d (rule)",
+          "range": false,
+          "refId": "A",
+          "interval": "15s",
+          "intervalFactor": 1,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {},
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short",
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name",
+        "wideLayout": true
+      }
+    },
+    {
+      "id": 74,
+      "type": "stat",
+      "title": "decode tok/s \u00b7 peak last day",
+      "description": "The best five minutes of the last day: `max_over_time(sum(rate(<decode tokens>[5m]))[24h:5m])` and the `llm:decode_tokens_per_second:max_24h` rollup. A mean cannot answer 'what is this box capable of', and a capacity decision taken from a mean is a decision taken against the idle half of the day.\n\nPromQL sent by this panel:\n\n```promql\nA: max_over_time(sum(rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[5m]))[24h:5m])\nA: llm:decode_tokens_per_second:max_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 12,
+        "y": 35
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "max_over_time(sum(rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[5m]))[24h:5m])",
+          "legendFormat": "raw: 24 h peak of the 5 m rate",
+          "range": false,
+          "refId": "A",
+          "interval": "15s",
+          "intervalFactor": 1,
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "llm:decode_tokens_per_second:max_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}",
+          "legendFormat": "llm:decode_tokens_per_second:max_24h (rule)",
+          "range": false,
+          "refId": "A",
+          "interval": "15s",
+          "intervalFactor": 1,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {},
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short",
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name",
+        "wideLayout": true
+      }
+    },
+    {
+      "id": 75,
+      "type": "stat",
+      "title": "tokens decoded \u00b7 last day",
+      "description": "Not a rate: how much generation actually happened \u2014 `sum(increase(<decode tokens>[24h]))` plus the `llm:decoded_tokens:sum_24h` rollup. The throughput tiles say how fast, this says how much, and the pair is what a cost or energy estimate needs.\n\n`increase()` absorbs counter resets, so a restart overnight costs the hours it was down and nothing else (unlike dividing two lifetime counters).\n\nPromQL sent by this panel:\n\n```promql\nA: sum(increase({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[24h]))\nA: llm:decoded_tokens:sum_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 16,
+        "y": 35
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(increase({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[24h]))",
+          "legendFormat": "raw: tokens in 24 h",
+          "range": false,
+          "refId": "A",
+          "interval": "15s",
+          "intervalFactor": 1,
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "llm:decoded_tokens:sum_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}",
+          "legendFormat": "llm:decoded_tokens:sum_24h (rule)",
+          "range": false,
+          "refId": "A",
+          "interval": "15s",
+          "intervalFactor": 1,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {},
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name",
+        "wideLayout": true
+      }
+    },
+    {
+      "id": 76,
+      "type": "stat",
+      "title": "requests \u00b7 last day",
+      "description": "Completed requests in the last 24 h, from the same counter the requests/s panels rate, plus the `llm:requests_completed:sum_24h` rollup. Divide the tokens tile above by this for tokens per request, which is the shape of the traffic: the same tok/s means something different at 40-token answers and at 2 000-token ones.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(increase({__name__=~\"halogen:requests_total|llamacpp:requests_total|vllm:request_success_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[24h]))\nA: llm:requests_completed:sum_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 20,
+        "y": 35
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(increase({__name__=~\"halogen:requests_total|llamacpp:requests_total|vllm:request_success_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[24h]))",
+          "legendFormat": "raw: requests in 24 h",
+          "range": false,
+          "refId": "A",
+          "interval": "15s",
+          "intervalFactor": 1,
+          "instant": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "llm:requests_completed:sum_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}",
+          "legendFormat": "llm:requests_completed:sum_24h (rule)",
+          "range": false,
+          "refId": "A",
+          "interval": "15s",
+          "intervalFactor": 1,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {},
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name",
+        "wideLayout": true
+      }
+    },
+    {
+      "id": 77,
+      "type": "timeseries",
+      "title": "Decode tok/s \u2014 averaged over $window",
+      "description": "The history of the average, not just the average: `rate()` over a fixed $window evaluated at every step, so the line is a moving mean of throughput $window wide. The $window picker is the whole point \u2014 5 m is a zoomed-in chart, 24 h is a daily shape, 7 d is the trend under the noise.\n\nTwo fixed rollups are drawn for reference, so a wide window still reads against a narrow one: `llm:decode_tokens_per_second:mean_1h` and `:mean_24h`. With $window = 1 h the raw line and the 1 h rollup are the same answer computed twice (once at query time, once by Prometheus every 5 m); where they disagree the rollup is up to one rule interval behind.\n\nThe minimum step here is 5 m, not the 15 s scrape: a $window-wide average cannot show 15 s of detail no matter how many points are plotted, and every extra point pays for a window of samples to compute it.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$window]))\nA: sum by (instance, job) (rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$window]))\nA: llm:decode_tokens_per_second:mean_1h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\nA: llm:decode_tokens_per_second:mean_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 40
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$window]))",
+          "legendFormat": "mean over $window (raw)",
+          "range": true,
+          "refId": "A",
+          "interval": "5m",
+          "intervalFactor": 1
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (instance, job) (rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$window]))",
+          "legendFormat": "{{instance}} {{job}} over $window",
+          "range": true,
+          "refId": "A",
+          "interval": "5m",
+          "intervalFactor": 1
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "llm:decode_tokens_per_second:mean_1h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}",
+          "legendFormat": "1 h mean (rule)",
+          "range": true,
+          "refId": "A",
+          "interval": "15s",
+          "intervalFactor": 1
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "llm:decode_tokens_per_second:mean_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}",
+          "legendFormat": "24 h mean (rule)",
+          "range": true,
+          "refId": "A",
+          "interval": "15s",
+          "intervalFactor": 1
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisLabel": "",
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 4,
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short",
+          "decimals": 2
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLast": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 78,
+      "type": "timeseries",
+      "title": "Work done per $window",
+      "description": "Totals, not rates: `increase()` over $window for decode tokens (left axis), prompt tokens (left axis) and completed requests (right axis, because a request count is three orders of magnitude below a token count and on a shared axis it would be a flat line).\n\nThis answers 'what did this box produce yesterday' without a spreadsheet, and the shape it draws is the workload's own rhythm: the night that looks merely low on a throughput chart is unmistakable here, because an idle night is a 0 total rather than a low average.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(increase({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$window]))\nB: sum(increase({__name__=~\"llamacpp:prompt_tokens_total|vllm:prompt_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$window]))\nC: sum(increase({__name__=~\"halogen:requests_total|llamacpp:requests_total|vllm:request_success_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$window]))\nD: llm:decoded_tokens:sum_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 40
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(increase({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$window]))",
+          "legendFormat": "decode tokens / $window",
+          "range": true,
+          "refId": "A",
+          "interval": "5m",
+          "intervalFactor": 1
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(increase({__name__=~\"llamacpp:prompt_tokens_total|vllm:prompt_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$window]))",
+          "legendFormat": "prompt tokens / $window",
+          "range": true,
+          "refId": "B",
+          "interval": "5m",
+          "intervalFactor": 1
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(increase({__name__=~\"halogen:requests_total|llamacpp:requests_total|vllm:request_success_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$window]))",
+          "legendFormat": "requests / $window",
+          "range": true,
+          "refId": "C",
+          "interval": "5m",
+          "intervalFactor": 1
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "llm:decoded_tokens:sum_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}",
+          "legendFormat": "decode tokens / 24 h (rule)",
+          "range": true,
+          "refId": "D",
+          "interval": "15s",
+          "intervalFactor": 1
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisLabel": "",
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 4,
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": [
+          {
+            "id": "byFrameRefID",
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "C"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "requests"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLast": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 79,
+      "type": "timeseries",
+      "title": "Cache, speculation and KV pressure over $window",
+      "description": "Three ratios that share a 0-1 axis, each pooled over $window (increases divided by increases, which is the token-weighted answer rather than a mean of five-minute ratios):\n\n* prompt-cache hit ratio, `cached / (processed + cached)` \u2014 llama.cpp's prompt counter counts cache MISSES, so the denominator is both halves;\n* speculative-decode acceptance, `accepted / proposed`;\n* the KV pool's **peak** usage inside the window, `max_over_time(max(...)[...])` \u2014 a 30 s saturation that a 24 h mean smooths into nothing still shows up here, which is the whole answer to 'was the KV pool the limit overnight'.\n\n`llm:prompt_cache_hit_ratio:mean_24h` and `llm:kv_cache_usage_ratio:max_24h` are drawn as the fixed-window references.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(increase({__name__=~\"halogen:prompt_tokens_cached_total|llamacpp:prompt_cache_tokens_cached_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$window])) / clamp_min(sum(increase({__name__=~\"llamacpp:prompt_tokens_total|vllm:prompt_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$window])) + sum(increase({__name__=~\"halogen:prompt_tokens_cached_total|llamacpp:prompt_cache_tokens_cached_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$window])), 1)\nA: sum(increase({__name__=~\"halogen:draft_tokens_accepted_total|llamacpp:draft_tokens_accepted_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$window])) / clamp_min(sum(increase({__name__=~\"halogen:draft_tokens_total|llamacpp:draft_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$window])), 1)\nA: max_over_time(max({__name__=~\"llamacpp:kv_cache_usage_ratio|llamacpp:kv_cache_usage\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})[$window:5m])\nA: llm:prompt_cache_hit_ratio:mean_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\nA: llm:kv_cache_usage_ratio:max_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 48
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(increase({__name__=~\"halogen:prompt_tokens_cached_total|llamacpp:prompt_cache_tokens_cached_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$window])) / clamp_min(sum(increase({__name__=~\"llamacpp:prompt_tokens_total|vllm:prompt_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$window])) + sum(increase({__name__=~\"halogen:prompt_tokens_cached_total|llamacpp:prompt_cache_tokens_cached_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$window])), 1)",
+          "legendFormat": "prompt-cache hit ratio over $window",
+          "range": true,
+          "refId": "A",
+          "interval": "5m",
+          "intervalFactor": 1
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(increase({__name__=~\"halogen:draft_tokens_accepted_total|llamacpp:draft_tokens_accepted_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$window])) / clamp_min(sum(increase({__name__=~\"halogen:draft_tokens_total|llamacpp:draft_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$window])), 1)",
+          "legendFormat": "draft acceptance over $window",
+          "range": true,
+          "refId": "A",
+          "interval": "5m",
+          "intervalFactor": 1
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "max_over_time(max({__name__=~\"llamacpp:kv_cache_usage_ratio|llamacpp:kv_cache_usage\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})[$window:5m])",
+          "legendFormat": "KV peak over $window",
+          "range": true,
+          "refId": "A",
+          "interval": "5m",
+          "intervalFactor": 1
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "llm:prompt_cache_hit_ratio:mean_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}",
+          "legendFormat": "prompt-cache hit ratio, 24 h (rule)",
+          "range": true,
+          "refId": "A",
+          "interval": "15s",
+          "intervalFactor": 1
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "llm:kv_cache_usage_ratio:max_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}",
+          "legendFormat": "KV peak, 24 h (rule)",
+          "range": true,
+          "refId": "A",
+          "interval": "15s",
+          "intervalFactor": 1
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisLabel": "",
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 4,
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "percentunit",
+          "decimals": 2,
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLast": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 80,
+      "type": "timeseries",
+      "title": "Was the history itself complete? scrape success over $window",
+      "description": "A flat line is either an idle server or a blind monitor, and on a history row that difference matters more than anywhere else: a 24 h mean computed from six hours of samples is not a 24 h mean. `avg_over_time` of the monitor's own `llm_monitor_scrape_ok` gauge over $window, beside `llm:scrape_success_ratio:mean_24h` (which folds the 10 m alias the Scrape health row plots).\n\n1 = the monitor's most recent scrape had succeeded for the whole window. Below that, part of the window has no data in it, and every mean on this row describes the hours that reported rather than the hours that were quiet.\n\nPromQL sent by this panel:\n\n```promql\nA: avg(avg_over_time(llm_monitor_scrape_ok{job=~\"$job\",instance=~\"$instance\"}[$window]))\nA: llm:scrape_success_ratio:mean_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 48
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "avg(avg_over_time(llm_monitor_scrape_ok{job=~\"$job\",instance=~\"$instance\"}[$window]))",
+          "legendFormat": "mean over $window (raw)",
+          "range": true,
+          "refId": "A",
+          "interval": "5m",
+          "intervalFactor": 1
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "llm:scrape_success_ratio:mean_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}",
+          "legendFormat": "llm:scrape_success_ratio:mean_24h (rule)",
+          "range": true,
+          "refId": "A",
+          "interval": "15s",
+          "intervalFactor": 1
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisLabel": "",
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 4,
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "percentunit",
+          "decimals": 3,
+          "min": 0,
+          "max": 1,
+          "noValue": "no llm_monitor_* series: the passthrough job is not being scraped"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLast": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 81,
+      "type": "stat",
+      "title": "history configured",
+      "description": "`prometheus_tsdb_retention_limit_seconds` \u2014 how far back Prometheus keeps anything, as Prometheus itself reports it: the `--storage.tsdb.retention.time` flag behind `PROMETHEUS_RETENTION_TIME` in `monitoring/.env`. Grafana renders the seconds as a duration, so this tile is the row's own speed limit: no window on this row may exceed it.\n\nPinned to `job=\"prometheus\"` on purpose \u2014 the monitoring stack's own health must not empty out when `$job` is pinned to a model server.\n\nPromQL sent by this panel:\n\n```promql\nA: avg({__name__=~\"prometheus_tsdb_retention_limit_seconds\",job=\"prometheus\"})\n```",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 0,
+        "y": 56
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "avg({__name__=~\"prometheus_tsdb_retention_limit_seconds\",job=\"prometheus\"})",
+          "legendFormat": "retention time",
+          "range": false,
+          "refId": "A",
+          "interval": "15s",
+          "intervalFactor": 1,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {},
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "s",
+          "decimals": 0,
+          "noValue": "the prometheus self-scrape job is not being scraped"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name",
+        "wideLayout": true
+      }
+    },
+    {
+      "id": 82,
+      "type": "stat",
+      "title": "history on disk",
+      "description": "`sum(prometheus_tsdb_storage_blocks_bytes)` \u2014 the compacted history sitting on disk right now, against the 2 GB `retention.size` cap the stack ships (sizing arithmetic: monitoring/README.md, 'Retention sizing').\n\nPinned to `job=\"prometheus\"` for the same reason as the tile beside it.\n\nPromQL sent by this panel:\n\n```promql\nA: sum({__name__=~\"prometheus_tsdb_storage_blocks_bytes\",job=\"prometheus\"})\n```",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 8,
+        "y": 56
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum({__name__=~\"prometheus_tsdb_storage_blocks_bytes\",job=\"prometheus\"})",
+          "legendFormat": "TSDB blocks",
+          "range": false,
+          "refId": "A",
+          "interval": "15s",
+          "intervalFactor": 1,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {},
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "bytes",
+          "decimals": 0,
+          "noValue": "the prometheus self-scrape job is not being scraped"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name",
+        "wideLayout": true
+      }
+    },
+    {
+      "id": 83,
+      "type": "stat",
+      "title": "size budget used",
+      "description": "On-disk TSDB over the `retention.size` budget: `(sum(storage_blocks_bytes) and (sum(retention_limit_bytes) > 0)) / clamp_min(sum(retention_limit_bytes), 1)`. The `and (sum(...) > 0)` guard is why a box running with no size cap reads **No data** here instead of a divide-by-nothing 100 %: with no cap there is no budget to have used.\n\nThis is the early-warning tile. Hitting the size cap is not an outage \u2014 Prometheus deletes whole blocks of the oldest data \u2014 but it does mean the history is shorter than `history configured` claims, and that the windows on this row are averaging what is left.\n\nPromQL sent by this panel:\n\n```promql\nA: (sum({__name__=~\"prometheus_tsdb_storage_blocks_bytes\",job=\"prometheus\"}) and (sum({__name__=~\"prometheus_tsdb_retention_limit_bytes\",job=\"prometheus\"}) > 0)) / clamp_min(sum({__name__=~\"prometheus_tsdb_retention_limit_bytes\",job=\"prometheus\"}), 1)\n```",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 56
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "(sum({__name__=~\"prometheus_tsdb_storage_blocks_bytes\",job=\"prometheus\"}) and (sum({__name__=~\"prometheus_tsdb_retention_limit_bytes\",job=\"prometheus\"}) > 0)) / clamp_min(sum({__name__=~\"prometheus_tsdb_retention_limit_bytes\",job=\"prometheus\"}), 1)",
+          "legendFormat": "used / cap",
+          "range": false,
+          "refId": "A",
+          "interval": "15s",
+          "intervalFactor": 1,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {},
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.75
+              },
+              {
+                "color": "red",
+                "value": 0.9
+              }
+            ]
+          },
+          "unit": "percentunit",
+          "decimals": 1,
+          "min": 0,
+          "noValue": "no retention.size cap configured (or no self-scrape)"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name",
+        "wideLayout": true
+      }
+    },
+    {
+      "id": 102,
+      "type": "row",
       "title": "Latency",
       "collapsed": true,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 28
+        "y": 60
       },
       "datasource": {
         "type": "prometheus",
@@ -1432,7 +2751,7 @@
             "h": 3,
             "w": 24,
             "x": 0,
-            "y": 29
+            "y": 61
           },
           "options": {
             "code": {
@@ -1456,7 +2775,7 @@
             "h": 10,
             "w": 24,
             "x": 0,
-            "y": 32
+            "y": 64
           },
           "targets": [
             {
@@ -1620,7 +2939,7 @@
             "h": 9,
             "w": 12,
             "x": 0,
-            "y": 42
+            "y": 74
           },
           "targets": [
             {
@@ -1758,7 +3077,7 @@
             "h": 9,
             "w": 12,
             "x": 12,
-            "y": 42
+            "y": 74
           },
           "targets": [
             {
@@ -1896,7 +3215,7 @@
             "h": 5,
             "w": 24,
             "x": 0,
-            "y": 51
+            "y": 83
           },
           "targets": [
             {
@@ -1997,7 +3316,7 @@
       ]
     },
     {
-      "id": 102,
+      "id": 103,
       "type": "row",
       "title": "Cache & KV",
       "collapsed": true,
@@ -2005,7 +3324,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 29
+        "y": 61
       },
       "datasource": {
         "type": "prometheus",
@@ -2025,7 +3344,7 @@
             "h": 9,
             "w": 12,
             "x": 0,
-            "y": 30
+            "y": 62
           },
           "targets": [
             {
@@ -2160,7 +3479,7 @@
             "h": 9,
             "w": 12,
             "x": 12,
-            "y": 30
+            "y": 62
           },
           "targets": [
             {
@@ -2284,7 +3603,7 @@
             "h": 9,
             "w": 12,
             "x": 0,
-            "y": 39
+            "y": 71
           },
           "targets": [
             {
@@ -2411,7 +3730,7 @@
             "h": 9,
             "w": 12,
             "x": 12,
-            "y": 39
+            "y": 71
           },
           "targets": [
             {
@@ -2513,7 +3832,7 @@
       ]
     },
     {
-      "id": 103,
+      "id": 104,
       "type": "row",
       "title": "Speculative decode",
       "collapsed": true,
@@ -2521,7 +3840,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 30
+        "y": 62
       },
       "datasource": {
         "type": "prometheus",
@@ -2541,7 +3860,7 @@
             "h": 5,
             "w": 6,
             "x": 0,
-            "y": 31
+            "y": 63
           },
           "targets": [
             {
@@ -2620,7 +3939,7 @@
             "h": 5,
             "w": 6,
             "x": 6,
-            "y": 31
+            "y": 63
           },
           "targets": [
             {
@@ -2698,7 +4017,7 @@
             "h": 5,
             "w": 6,
             "x": 12,
-            "y": 31
+            "y": 63
           },
           "targets": [
             {
@@ -2772,7 +4091,7 @@
             "h": 5,
             "w": 6,
             "x": 18,
-            "y": 31
+            "y": 63
           },
           "targets": [
             {
@@ -2855,7 +4174,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 36
+            "y": 68
           },
           "targets": [
             {
@@ -2967,7 +4286,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 36
+            "y": 68
           },
           "targets": [
             {
@@ -3079,7 +4398,7 @@
             "h": 8,
             "w": 24,
             "x": 0,
-            "y": 44
+            "y": 76
           },
           "targets": [
             {
@@ -3194,7 +4513,7 @@
       ]
     },
     {
-      "id": 104,
+      "id": 105,
       "type": "row",
       "title": "Scrape health",
       "collapsed": true,
@@ -3202,7 +4521,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 31
+        "y": 63
       },
       "datasource": {
         "type": "prometheus",
@@ -3222,7 +4541,7 @@
             "h": 5,
             "w": 6,
             "x": 0,
-            "y": 32
+            "y": 64
           },
           "targets": [
             {
@@ -3309,7 +4628,7 @@
             "h": 5,
             "w": 6,
             "x": 6,
-            "y": 32
+            "y": 64
           },
           "targets": [
             {
@@ -3383,7 +4702,7 @@
             "h": 5,
             "w": 6,
             "x": 12,
-            "y": 32
+            "y": 64
           },
           "targets": [
             {
@@ -3451,7 +4770,7 @@
             "h": 5,
             "w": 6,
             "x": 18,
-            "y": 32
+            "y": 64
           },
           "targets": [
             {
@@ -3523,7 +4842,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 37
+            "y": 69
           },
           "targets": [
             {
@@ -3646,7 +4965,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 37
+            "y": 69
           },
           "targets": [
             {
@@ -3745,7 +5064,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 45
+            "y": 77
           },
           "targets": [
             {
@@ -3843,7 +5162,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 45
+            "y": 77
           },
           "targets": [
             {
@@ -3954,7 +5273,7 @@
             "h": 2,
             "w": 24,
             "x": 0,
-            "y": 53
+            "y": 85
           },
           "options": {
             "code": {
@@ -3968,7 +5287,7 @@
       ]
     },
     {
-      "id": 105,
+      "id": 106,
       "type": "row",
       "title": "GPU & host",
       "collapsed": true,
@@ -3976,7 +5295,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 32
+        "y": 64
       },
       "datasource": {
         "type": "prometheus",
@@ -3996,7 +5315,7 @@
             "h": 5,
             "w": 24,
             "x": 0,
-            "y": 33
+            "y": 65
           },
           "options": {
             "code": {
@@ -4020,7 +5339,7 @@
             "h": 5,
             "w": 4,
             "x": 0,
-            "y": 38
+            "y": 70
           },
           "targets": [
             {
@@ -4099,7 +5418,7 @@
             "h": 5,
             "w": 4,
             "x": 4,
-            "y": 38
+            "y": 70
           },
           "targets": [
             {
@@ -4176,7 +5495,7 @@
             "h": 5,
             "w": 4,
             "x": 8,
-            "y": 38
+            "y": 70
           },
           "targets": [
             {
@@ -4247,7 +5566,7 @@
             "h": 5,
             "w": 4,
             "x": 12,
-            "y": 38
+            "y": 70
           },
           "targets": [
             {
@@ -4324,7 +5643,7 @@
             "h": 5,
             "w": 4,
             "x": 16,
-            "y": 38
+            "y": 70
           },
           "targets": [
             {
@@ -4402,7 +5721,7 @@
             "h": 5,
             "w": 4,
             "x": 20,
-            "y": 38
+            "y": 70
           },
           "targets": [
             {
@@ -4476,7 +5795,7 @@
             "h": 10,
             "w": 24,
             "x": 0,
-            "y": 43
+            "y": 75
           },
           "targets": [
             {
@@ -4729,7 +6048,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 53
+            "y": 85
           },
           "targets": [
             {
@@ -4963,7 +6282,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 53
+            "y": 85
           },
           "targets": [
             {
@@ -5255,7 +6574,7 @@
             "h": 8,
             "w": 12,
             "x": 0,
-            "y": 61
+            "y": 93
           },
           "targets": [
             {
@@ -5493,7 +6812,7 @@
             "h": 8,
             "w": 12,
             "x": 12,
-            "y": 61
+            "y": 93
           },
           "targets": [
             {

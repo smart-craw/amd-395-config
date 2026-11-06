@@ -94,9 +94,10 @@ stdlib-only page is the wrong place to spend effort.
 * A `monitoring/` directory holds a `docker compose` stack: `prometheus/prometheus`
   and `grafana/grafana`, image tags **pinned** (digest or exact tag, never
   `latest`), `mem_limit` and `cpus` set, `restart: unless-stopped`.
-* Prometheus: `retention.time=15d` **and** `retention.size=2GB` (the size cap is
-  mandatory on this box), `scrape_interval: 15s`, `scrape_timeout: 5s` (matching
-  `serve.py`'s own 5 s cap — see `UPSTREAM_TIMEOUT_SECONDS`,
+* Prometheus: `retention.time=30d` **and** `retention.size=2GB` (the size cap is
+  mandatory on this box; the time cap was 15d at acceptance and was raised by
+  `amd-frx` — see C5's amendment), `scrape_interval: 15s`, `scrape_timeout: 5s`
+  (matching `serve.py`'s own 5 s cap — see `UPSTREAM_TIMEOUT_SECONDS`,
   `monitor/serve.py:103`), bound to `127.0.0.1:9090`.
 * Grafana: provisioned datasource + provisioned dashboard, sign-up off, plugins
   disabled, update/analytics checks off, bound to `127.0.0.1:3000`.
@@ -234,6 +235,29 @@ committed directly. Ratios should be `clamp_min`-guarded so a restart produces a
 flat line rather than a NaN hole. Adding a serving stack means adding a rule here,
 not a new regex in `app.js`.
 
+> **Amended by `amd-frx` (windowed rollups).** The same seam now carries a second
+> shape: `llm:<measure>:<aggregation>_<window>`, e.g.
+> `llm:decode_tokens_per_second:mean_1h|mean_24h|mean_7d|max_24h`,
+> `llm:decoded_tokens:sum_1h|sum_24h|sum_7d`,
+> `llm:prompt_cache_hit_ratio:mean_24h`, `llm:kv_cache_usage_ratio:max_24h`,
+> `llm:scrape_success_ratio:mean_24h`. Additive — none of the C3 names above changed —
+> and they exist so a windowed question ("average tokens/s over the last hour, day,
+> week") is answered by one stored series per window instead of by a browser
+> re-deriving a week of samples on every redraw. Three rules the amendment pins down:
+>
+> * they fold the **5 m aliases**, not the raw counters, so the vendor-name union and
+>   the normalized `model` label are inherited rather than repeated (the totals are
+>   `increase()` over the counters, because a mean cannot express "how many");
+> * a mean averages **the samples that exist**: an hour with no scrape is not charged
+>   to the average, so `llm:scrape_success_ratio:mean_24h` beside a mean is what tells
+>   a slow box from an absent one;
+> * **no window may outgrow `retention.time`.** A window past the retention edge does
+>   not error, it answers from what survived, which is the one failure mode that makes
+>   a history dashboard lie; `check_monitoring.py`'s `check_history_horizon` compares
+>   every literal window in a panel or rule, the widest value the dashboard's `$window`
+>   picker offers and the furthest range its time picker offers against the retention
+>   the compose file defaults to.
+
 > Reconciliation at acceptance: the first cut of this ADR said `llm:kv_cache_utilization`
 > and `llm:draft_accept_ratio`. The recording-rules file that landed uses
 > `llm:kv_cache_usage_ratio` (mirrors the source gauge) and
@@ -280,13 +304,24 @@ that mapping is what lets a link from the page land on the right series.
 
 | | limit |
 | --- | --- |
-| prometheus | `mem_limit: 512m`, `cpus: 0.50`, `retention.size: 2GB`, `retention.time: 15d` |
+| prometheus | `mem_limit: 512m`, `cpus: 0.50`, `retention.size: 2GB`, `retention.time: 30d` |
 | grafana | `mem_limit: 256m`, `cpus: 0.25` |
 | total added RSS | ≤ 768 MiB, measured, and **the model server's shared-memory headroom must be unchanged** |
 | network | nothing in the stack may egress; both UIs bound to `127.0.0.1` |
 
 If the measured footprint does not fit, the retention size comes down before the
 memory limit goes up.
+
+> **Amended by `amd-frx` (history horizon).** `retention.time` is **30 d** (it was
+> 15 d); `retention.size` is unchanged at 2 GB, and that is the point of the
+> amendment: the size cap is what bounds the disk, so doubling the horizon cannot make
+> the worst case worse. At the measured ~37 MB/day (`monitoring/README.md#retention-sizing`)
+> 30 d costs ~1.1 GB, and the windowed rollups that make the long windows cheap add
+> ~13 kB/day. Why 30 d rather than keeping 15 d: the dashboard now offers 30 d ranges
+> and averages up to 7 d, and a range wider than retention is a chart that quietly
+> stops at the edge. The order of operations above is untouched — if the numbers stop
+> fitting, `retention.size` comes down before the memory limit goes up, and the
+> cheap-first rule is to shorten raw retention before touching the rollups.
 
 > **Amended by `workspace-szw.12` (opt-in LAN exposure).** The loopback rule above
 > is the *default*, not a prohibition, and the amendment is about who may change it
@@ -547,3 +582,25 @@ measured footprint against the C5 budget (`workspace-szw.9`).
 > — asserted by `monitor/tests/test_app.test.mjs` against `--mode nometrics`, and
 > spelled out in `monitor/README.md` ("A server with no `/metrics` at all is a
 > supported configuration").
+
+> Update (`amd-frx`): **the stack now holds history, not just the moment.** The
+> complaint this closes ("the dashboard is point-in-time only") was already half
+> answered by the range charts, so what landed is the other half: the windowed
+> questions asked out loud — *average tokens per second over the last hour, the last
+> day, the last week* — as first-class series and panels.
+>
+> * **C3 (amended above)** — the `llm-rollups` group: 15 rules writing
+>   `llm:*:mean_1h|mean_24h|mean_7d|max_24h|sum_*` every 5 m, folding the 5 m aliases
+>   rather than re-deriving them, ~13 kB/day.
+> * **C4 (unchanged)** — the dashboard gained a **History & rollups** row (panel ids
+>   70-89, pinned so inserting a row cannot renumber what is below it) and a `$window`
+>   picker. Reserved ids 1-7 and every existing panel id are untouched, verified by
+>   diffing the generated JSON's id map against the pre-change one.
+> * **C5 (amended above)** — `retention.time` 15 d → 30 d, size cap untouched.
+> * **The invariant that makes it honest**: no window anywhere — dashboard expression,
+>   `$window` choice, recording rule, time-picker range — may exceed retention.
+>   `check_monitoring.py`'s `check_history_horizon` enforces it, and
+>   `promtool test rules` (`monitoring/prometheus/unit-tests.yml`) pins the numbers:
+>   3 600 tokens in an hour, 86 400 in a day, a 1.5 day-mean over 24 h of 1 tok/s and
+>   6 h of 3, a `0.95` KV spike found by `:max_24h` that the day mean smooths away, and
+>   a six-hour gap in the scrape that does **not** pull `:mean_24h` down to 0.75.

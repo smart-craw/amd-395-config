@@ -25,7 +25,12 @@ What is actually being defended:
   retention caps;
 * compose.lan.yaml — the only supported way to publish Grafana — keeps its opt-in
   honest: anonymous Viewer and nothing more, sign-up off, Prometheus on loopback,
-  and the disclosure stated in the same file as the port (workspace-szw.12).
+  and the disclosure stated in the same file as the port (workspace-szw.12);
+* the history stays honest too (amd-frx): every window in a panel or a recording rule,
+  every `$window` value and every time-picker range fits inside the retention the
+  compose file defaults to, every windowed `llm:*` alias a panel plots is actually
+  recorded, and the rollup semantics the dashboard's prose promises are pinned by
+  `promtool test rules` scenarios in unit-tests.yml.
 """
 
 from __future__ import annotations
@@ -582,8 +587,10 @@ def check_dashboard() -> None:
 
 #: The rows the dashboard ticket specifies. The dashboard is organised around these
 #: questions and nothing else (a raw per-series dump stays on the proxy page).
-DASHBOARD_ROWS = ("Overview", "Latency", "Cache & KV", "Speculative decode", "Scrape health",
-                  "GPU & host")
+#: "History & rollups" was added by amd-frx: a dashboard that can only say "right now"
+#: is a status page, not a history, and that is the failure this row guards against.
+DASHBOARD_ROWS = ("Overview", "History & rollups", "Latency", "Cache & KV",
+                  "Speculative decode", "Scrape health", "GPU & host")
 
 #: Panel types that ship with Grafana. Anything else is a plugin, and plugins are
 #: disabled in compose.yaml (GF_PLUGINS_ALLOW_LOADING: "false"): a panel of another
@@ -634,6 +641,185 @@ def recorded_aliases() -> set[str]:
     return names
 
 
+#: A range window or subquery window in a PromQL string: `[24h]`, `[7d:10m]`,
+#: `[1m:5s]`. Grafana's own `$__rate_interval` and `$window` are not parseable here
+#: and are skipped — the $window picker is checked against retention directly.
+WINDOW_RE = re.compile(r"\[(\d+)([smhdwy])(?::[^\]]*)?\]")
+
+#: Multipliers for the unit suffix Prometheus accepts in a duration.
+DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800, "y": 31536000}
+
+#: `<metric>` or `<metric>{a="b"}` — the inner argument of an *_over_time() that
+#: needs no subquery step because its samples are already stored.
+BARE_SERIES_RE = re.compile(r'[A-Za-z_:][\w:]*(\{[^{}]*\})?')
+
+
+def parse_duration(text: str) -> float | None:
+    """`15s` -> 15, `24h` -> 86400, `1h30m` -> 5400; None if it is not a duration."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    found = re.findall(r"(\d+)([smhdwy])", text)
+    if "".join(a + b for a, b in found) != text:
+        return None
+    return sum(int(n) * DURATION_UNITS[u] for n, u in found)
+
+
+def over_time_calls(text: str):
+    """Yield `(inner_argument, window, function)` for every `<fn>_over_time(...)[w]`.
+
+    Depth-aware rather than a regex: the inner argument of these functions is
+    routinely full of parentheses and its own range windows
+    (`max_over_time(sum(rate(x[5m]))[24h:5m])`), and a regex that cannot count
+    brackets reports the *inner* `[5m]` as if it were the function's own window —
+    which then flags correct queries as missing a step. Strings are skipped for the
+    same reason: `label_replace(..., "model", "$1", "model_name", "(.+)")` has
+    brackets that mean nothing.
+    """
+    for match in re.finditer(r"([A-Za-z_]+_over_time)\(", text):
+        func = match.group(1)
+        i = match.end()
+        depth = 1
+        start = i
+        quote = None
+        while i < len(text):
+            char = text[i]
+            if quote:
+                if char == quote and text[i - 1] != "\\":
+                    quote = None
+            elif char in "'\"":
+                quote = char
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        inner = text[start:i]
+        # The function's own window is INSIDE its parentheses — `avg_over_time(x[1h])`
+        # — so it is the trailing `[...]` of what was just scanned, not something after
+        # the closing paren. Anything else (a bare `[5m]` inside a nested rate()) belongs
+        # to the inner expression and is not this call's window.
+        trailing = re.search(r"\[([^\]]*)\]$", inner)
+        if trailing:
+            yield inner[: trailing.start()].strip(), trailing.group(1), func
+
+
+def dashboard_windows(dash: dict) -> list[float]:
+    """Every literal window the dashboard can ask for, in seconds.
+
+    Includes the $window picker's options: those are not in any expression (they are
+    spliced in at query time), and the widest one is exactly the value that has to
+    stay inside retention.
+    """
+    out = []
+    for panel in flatten_panels(dash):
+        for target in panel.get("targets") or []:
+            for amount, unit in WINDOW_RE.findall(str(target.get("expr") or "")):
+                out.append(int(amount) * DURATION_UNITS[unit])
+    for variable in (dash.get("templating") or {}).get("list") or []:
+        if variable.get("name") == "window":
+            for choice in str(variable.get("query", "")).split(","):
+                seconds = parse_duration(choice.strip())
+                if seconds:
+                    out.append(seconds)
+    return out
+
+
+def rule_windows() -> list[float]:
+    """Every literal window in recording_rules.yml, in seconds."""
+    path = PROM_DIR / "recording_rules.yml"
+    if not path.is_file():
+        return []
+    return [
+        int(amount) * DURATION_UNITS[unit]
+        for amount, unit in WINDOW_RE.findall(path.read_text(encoding="utf-8"))
+    ]
+
+
+def rollup_aliases_in(expressions: str) -> set[str]:
+    """The `llm:*:mean_24h`-style rollup aliases a panel references."""
+    return set(re.findall(
+        r"(?<![A-Za-z0-9_])(?:llm|host):[A-Za-z0-9_]+(?::(?:mean|max|min|sum|count)_\w+)+",
+        expressions,
+    ))
+
+
+def check_history_horizon() -> None:
+    """Nothing may average further back than retention can answer (amd-frx).
+
+    This is the one invariant that makes "it holds history" true rather than
+    decorative. A window longer than `PROMETHEUS_RETENTION_TIME` does not fail and
+    does not warn: it silently folds whatever survived on disk, so a 30 d average on
+    a box with 15 d of retention is a *15 d* average wearing a 30 d label — the
+    most misleading failure a history panel can have, and invisible on the chart.
+
+    Checked together, because they are one contract: the retention the compose file
+    defaults to, the retention `.env.example` documents, every literal window in a
+    dashboard expression or recording rule, the widest value the $window picker
+    offers, and the furthest range the time picker offers.
+    """
+    compose = (HERE / "compose.yaml").read_text(encoding="utf-8")
+    match = re.search(r"--storage\.tsdb\.retention\.time=\$\{PROMETHEUS_RETENTION_TIME:-([^}]*)\}", compose)
+    check(
+        match is not None,
+        "compose.yaml must default --storage.tsdb.retention.time from "
+        "PROMETHEUS_RETENTION_TIME (the horizon every windowed panel is measured against)",
+    )
+    retention = parse_duration(match.group(1)) if match else None
+    if retention is None:
+        return
+
+    env = HERE / ".env.example"
+    if env.is_file():
+        documented = re.search(r"^PROMETHEUS_RETENTION_TIME=([^\s#]+)", env.read_text(encoding="utf-8"), re.M)
+        check(
+            documented is not None and parse_duration(documented.group(1)) == retention,
+            f"monitoring/.env.example documents PROMETHEUS_RETENTION_TIME="
+            f"{documented.group(1) if documented else 'nothing'} while compose.yaml defaults "
+            f"to {match.group(1)}: the two must move together, because the compose default "
+            "is what a box without an explicit .env value actually runs",
+        )
+
+    dash = json.loads((DASH_DIR / "llm-server.json").read_text(encoding="utf-8"))
+    asked = {
+        "dashboard windows": dashboard_windows(dash),
+        "recording-rule windows": rule_windows(),
+        "time picker ranges": [
+            parse_duration(str(o)) or 0
+            for o in ((dash.get("timepicker") or {}).get("time_options") or [])
+        ],
+    }
+    for what, values in asked.items():
+        for seconds in values:
+            check(
+                seconds <= retention,
+                f"a {what} asks for {int(seconds)}s of history but "
+                f"PROMETHEUS_RETENTION_TIME defaults to {int(retention)}s: past the "
+                "retention edge there is no data, so the panel answers from the part "
+                "that is left. Raise retention or shorten the window (monitoring/README.md, "
+                "'History and rollups')",
+            )
+
+    # A rollup that no panel plots is a rule paying rent for nothing; a rollup a
+    # panel plots that does not exist is a silent gap in the history row.
+    path = DASH_DIR / "llm-server.json"
+    expressions = " ".join(
+        str(target.get("expr") or "")
+        for panel in flatten_panels(json.loads(path.read_text(encoding="utf-8")))
+        for target in panel.get("targets") or []
+    )
+    plotted = rollup_aliases_in(expressions)
+    check(
+        bool(plotted),
+        "no dashboard panel plots a windowed rollup alias (llm:*:mean_1h and friends): "
+        "the history row is the point of those rules",
+    )
+    for alias in sorted(plotted):
+        check(alias in recorded_aliases(), f"dashboard plots {alias} but no recording rule writes it")
+
+
 def check_dashboard_contract() -> None:
     """The dashboard ticket's acceptance criteria, as checks with no Grafana and no promtool.
 
@@ -680,9 +866,16 @@ def check_dashboard_contract() -> None:
     check(dash.get("interval") == "15s", "dashboard min step should be 15s (the scrape interval)")
     for p in charts:
         for t in p.get("targets") or []:
+            step = t.get("interval")
+            if step in (None, ""):
+                continue
+            seconds = parse_duration(str(step))
             check(
-                t.get("interval") in (None, "15s"),
-                f"panel {p.get('title')!r} step {t.get('interval')!r} is finer than the 15s scrape",
+                seconds is not None and seconds >= 15,
+                f"panel {p.get('title')!r} step {step!r} is not a duration at least as "
+                "long as the 15s scrape (a finer step cannot invent resolution the TSDB "
+                "does not have; a coarser one is a deliberate choice a panel has to argue "
+                "for, e.g. the 5m a 24h moving average cannot resolve more finely than)",
             )
 
     # --- every panel states its own PromQL, and the statement is true ------ #
@@ -811,6 +1004,13 @@ def check_dashboard_contract() -> None:
             "node_memory_SwapFree_bytes" in joined and "node_load1" in joined
         ),
         "exporter self-health is on the dashboard": "node_scrape_collector_success" in joined,
+        # History (amd-frx): the dashboard must answer windowed questions, not only
+        # point-in-time ones, and it must show the budget that makes them answerable.
+        "hour-scale averages": any(w == 3600 for w in dashboard_windows(dash)),
+        "day-scale averages": any(w >= 86400 for w in dashboard_windows(dash)),
+        "totals per window, not just means": "increase(" in expressions,
+        "windowed rollup aliases are plotted": len(rollup_aliases_in(expressions)) >= 4,
+        "the retention budget itself is on the dashboard": "prometheus_tsdb_retention_limit" in joined,
     }
     for what, holds in coverage.items():
         check(holds, f"dashboard does not cover: {what}")
@@ -826,11 +1026,18 @@ def check_dashboard_contract() -> None:
         check(style != "off", "panel 4's threshold bands are switched off")
 
     # --- a subquery needs a step, and it is easy to forget ----------------- #
-    for match in re.finditer(r"avg_over_time\([^)]*\[([^\]]*)\]", expressions):
+    for inner, window, func in over_time_calls(expressions):
+        if ":" in window:
+            continue
+        # A plain stored series has samples already; averaging them needs no step. A
+        # *computed* expression (rate(), an aggregation) has none, so it only works as
+        # a subquery — and writing `[1h]` there is a query that silently returns
+        # nothing instead of a parse error, which is the trap this guards.
         check(
-            ":" in match.group(1),
-            f"avg_over_time over an aggregated expression needs a subquery step "
-            f"([1h:5m], not [1h]): {match.group(0)}",
+            bool(BARE_SERIES_RE.fullmatch(inner.strip())),
+            f"{func}(...[{window}]): over a computed expression this needs a subquery "
+            f"step ([{window}:5m], not [{window}]) — over a plain series a step is "
+            f"unnecessary, so drop it instead of paying for one: {func}({inner[:60]})",
         )
 
     # --- every llm:* / host:* alias a panel plots must actually be recorded --- #
@@ -1270,14 +1477,28 @@ def dashboard_expressions() -> list[tuple[str, str]]:
     return out
 
 
+def dashboard_window_choices() -> list[str]:
+    """The $window picker's values (every one is spliced into a duration)."""
+    path = DASH_DIR / "llm-server.json"
+    if not path.exists():
+        return []
+    dash = json.loads(path.read_text(encoding="utf-8"))
+    for variable in (dash.get("templating") or {}).get("list") or []:
+        if variable.get("name") == "window":
+            return [c.strip() for c in str(variable.get("query", "")).split(",") if c.strip()]
+    return []
+
+
 def check_dashboard_promql(promtool: str) -> None:
     """Type-check every dashboard expression by borrowing promtool's parser.
 
     promtool has no "check this one query" mode, but `check rules` parses any
     expression handed to it as a recording-rule `expr`. So the panel queries are
-    written to a throwaway rules file — Grafana's `$__rate_interval` replaced by a
-    real duration, because promtool does not know Grafana's template variables — and
-    parsed by the same Prometheus parser that will run the query.
+    written to a throwaway rules file — Grafana's `$__rate_interval` and `$window`
+    replaced by real durations, because promtool does not know Grafana's template
+    variables and a duration spliced in at query time is exactly the token a typo
+    would corrupt (`[7dx]`, `[h]`) — and parsed by the same Prometheus parser that
+    will run the query.
 
     This catches the class of dashboard bug no JSON schema can: a `rate(x)[5m]` typo,
     an unbalanced paren, a `sum by (le)` that dropped `le`, an `avg_over_time(max(...))`
@@ -1286,13 +1507,19 @@ def check_dashboard_promql(promtool: str) -> None:
     """
     exprs = dashboard_expressions()
     check(bool(exprs), "dashboard has no panel expressions to validate")
+    widths = dashboard_window_choices()
+    check(bool(widths), "the dashboard offers no $window values to validate against")
     lines = ["groups:", "  - name: grafana_panel_expressions", "    rules:"]
     for tag, expr in exprs:
-        name = "check:" + re.sub(r"[^a-zA-Z0-9_]", "_", tag).lower()
-        lines.append(f"      - record: {name}")
-        # JSON-quoted on one line: YAML block scalars would fold a long expression and
-        # PromQL would then read a mangled query (a folded `clamp_min` is `clamp mp_min`).
-        lines.append(f"        expr: {json.dumps(expr.replace("$__rate_interval", "5m"))}")
+        # Each $window value gets its own parse: a width that only type-checks at one
+        # setting is still a panel that is broken for the reader who picks it.
+        for width in widths:
+            name = "check:" + re.sub(r"[^a-zA-Z0-9_]", "_", f"{tag}_{width}").lower()
+            lines.append(f"      - record: {name}")
+            # JSON-quoted on one line: YAML block scalars would fold a long expression and
+            # PromQL would then read a mangled query (a folded `clamp_min` is `clamp mp_min`).
+            rendered = expr.replace("$__rate_interval", "5m").replace("$window", width)
+            lines.append(f"        expr: {json.dumps(rendered)}")
     tmp = Path(tempfile.mkdtemp(prefix="grafana-promql-")) / "panel-expressions.yml"
     tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
     result = subprocess.run([promtool, "check", "rules", str(tmp)],
@@ -1322,6 +1549,7 @@ def main(argv: list[str] | None = None) -> int:
     check_lan_exposure()
     check_upstream_declaration()
     check_footprint_documented()
+    check_history_horizon()
     maybe_validate_compose_flags()
     maybe_promtool(args.promtool)
 
