@@ -1500,7 +1500,7 @@
       "id": 71,
       "type": "stat",
       "title": "decode tok/s \u00b7 mean last hour",
-      "description": "Mean generation throughput over the last hour: rate() over a fixed 1 h window, which divides by its own window and so is a per-second number, beside the `llm:decode_tokens_per_second:mean_1h` rollup that computes the same thing inside Prometheus every 5m.\n\nWhere the two differ, the rollup is the lagging one: it folds the 5 m aliases and is rewritten every 5 m, while the raw line is evaluated exactly now.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[1h]))\nA: llm:decode_tokens_per_second:mean_1h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
+      "description": "Mean generation throughput over the last hour: rate() over a fixed 1 h window, which divides by its own window and so is a per-second number, beside the `llm:decode_tokens_per_second:mean_1h` rollup that computes the same thing inside Prometheus every 5m.\n\nWhere the two differ, the rollup is the lagging one: it folds the 5 m aliases and is rewritten every 5 m, while the raw line is evaluated exactly now.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[1h]))\nB: llm:decode_tokens_per_second:mean_1h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1535,7 +1535,7 @@
           "expr": "llm:decode_tokens_per_second:mean_1h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}",
           "legendFormat": "llm:decode_tokens_per_second:mean_1h (rule)",
           "range": false,
-          "refId": "A",
+          "refId": "B",
           "interval": "15s",
           "intervalFactor": 1,
           "instant": true
@@ -1582,7 +1582,7 @@
       "id": 72,
       "type": "stat",
       "title": "decode tok/s \u00b7 mean last day",
-      "description": "The same fold over 24 h: a full day of decode averaged into one number, the night included. Compare with the 1 h tile to its left \u2014 a day mean well below the hour mean means the box has been getting busier (or slower) since midnight, not that anything is wrong now.\n\nIdle hours *are* in this mean (an idle server still reports a 0 rate); hours with no samples at all are not, which is what the note at the top of the row is about.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[24h]))\nA: llm:decode_tokens_per_second:mean_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
+      "description": "The same fold over 24 h: a full day of decode averaged into one number, the night included. Compare with the 1 h tile to its left \u2014 a day mean well below the hour mean means the box has been getting busier (or slower) since midnight, not that anything is wrong now.\n\nIdle hours *are* in this mean (an idle server still reports a 0 rate); hours with no samples at all are not, which is what the note at the top of the row is about.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[24h]))\nB: llm:decode_tokens_per_second:mean_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1617,7 +1617,7 @@
           "expr": "llm:decode_tokens_per_second:mean_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}",
           "legendFormat": "llm:decode_tokens_per_second:mean_24h (rule)",
           "range": false,
-          "refId": "A",
+          "refId": "B",
           "interval": "15s",
           "intervalFactor": 1,
           "instant": true
@@ -1664,7 +1664,7 @@
       "id": 73,
       "type": "stat",
       "title": "decode tok/s \u00b7 mean last week",
-      "description": "Seven days: the box's steady state rather than today's mood. This is the number to quote when deciding whether a change (a quantisation, a different slot count, another model) actually helped.\n\nThe rule side reads a 10 m-step subquery rather than every 30 s sample (`[7d:10m]`), so it is a sampled mean \u2014 accurate to far less than the variation worth noticing on a week's scale, and bounded in cost the same way `host:gtt_usage_ratio:max_2d` is. On a Prometheus that just lost its TSDB the rule side stays empty until the 10 m grid has a point (~10 min), and is only a week-representative once it has a week.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[7d]))\nA: llm:decode_tokens_per_second:mean_7d{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
+      "description": "Seven days: the box's steady state rather than today's mood. This is the number to quote when deciding whether a change (a quantisation, a different slot count, another model) actually helped.\n\nThe rule side reads a 10 m-step subquery rather than every 30 s sample (`[7d:10m]`), so it is a sampled mean \u2014 accurate to far less than the variation worth noticing on a week's scale, and bounded in cost the same way `host:gtt_usage_ratio:max_2d` is. On a Prometheus that just lost its TSDB the rule side stays empty until the 10 m grid has a point (~10 min), and is only a week-representative once it has a week.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[7d]))\nB: llm:decode_tokens_per_second:mean_7d{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1699,7 +1699,7 @@
           "expr": "llm:decode_tokens_per_second:mean_7d{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}",
           "legendFormat": "llm:decode_tokens_per_second:mean_7d (rule)",
           "range": false,
-          "refId": "A",
+          "refId": "B",
           "interval": "15s",
           "intervalFactor": 1,
           "instant": true
@@ -1746,7 +1746,7 @@
       "id": 74,
       "type": "stat",
       "title": "decode tok/s \u00b7 peak last day",
-      "description": "The best five minutes of the last day: `max_over_time(sum(rate(<decode tokens>[5m]))[24h:5m])` and the `llm:decode_tokens_per_second:max_24h` rollup. A mean cannot answer 'what is this box capable of', and a capacity decision taken from a mean is a decision taken against the idle half of the day.\n\nPromQL sent by this panel:\n\n```promql\nA: max_over_time(sum(rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[5m]))[24h:5m])\nA: llm:decode_tokens_per_second:max_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
+      "description": "The best five minutes of the last day: `max_over_time(sum(rate(<decode tokens>[5m]))[24h:5m])` and the `llm:decode_tokens_per_second:max_24h` rollup. A mean cannot answer 'what is this box capable of', and a capacity decision taken from a mean is a decision taken against the idle half of the day.\n\nPromQL sent by this panel:\n\n```promql\nA: max_over_time(sum(rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[5m]))[24h:5m])\nB: llm:decode_tokens_per_second:max_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1781,7 +1781,7 @@
           "expr": "llm:decode_tokens_per_second:max_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}",
           "legendFormat": "llm:decode_tokens_per_second:max_24h (rule)",
           "range": false,
-          "refId": "A",
+          "refId": "B",
           "interval": "15s",
           "intervalFactor": 1,
           "instant": true
@@ -1828,7 +1828,7 @@
       "id": 75,
       "type": "stat",
       "title": "tokens decoded \u00b7 last day",
-      "description": "Not a rate: how much generation actually happened \u2014 `sum(increase(<decode tokens>[24h]))` plus the `llm:decoded_tokens:sum_24h` rollup. The throughput tiles say how fast, this says how much, and the pair is what a cost or energy estimate needs.\n\n`increase()` absorbs counter resets, so a restart overnight costs the hours it was down and nothing else (unlike dividing two lifetime counters).\n\nPromQL sent by this panel:\n\n```promql\nA: sum(increase({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[24h]))\nA: llm:decoded_tokens:sum_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
+      "description": "Not a rate: how much generation actually happened \u2014 `sum(increase(<decode tokens>[24h]))` plus the `llm:decoded_tokens:sum_24h` rollup. The throughput tiles say how fast, this says how much, and the pair is what a cost or energy estimate needs.\n\n`increase()` absorbs counter resets, so a restart overnight costs the hours it was down and nothing else (unlike dividing two lifetime counters).\n\nPromQL sent by this panel:\n\n```promql\nA: sum(increase({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[24h]))\nB: llm:decoded_tokens:sum_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1863,7 +1863,7 @@
           "expr": "llm:decoded_tokens:sum_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}",
           "legendFormat": "llm:decoded_tokens:sum_24h (rule)",
           "range": false,
-          "refId": "A",
+          "refId": "B",
           "interval": "15s",
           "intervalFactor": 1,
           "instant": true
@@ -1910,7 +1910,7 @@
       "id": 76,
       "type": "stat",
       "title": "requests \u00b7 last day",
-      "description": "Completed requests in the last 24 h, from the same counter the requests/s panels rate, plus the `llm:requests_completed:sum_24h` rollup. Divide the tokens tile above by this for tokens per request, which is the shape of the traffic: the same tok/s means something different at 40-token answers and at 2 000-token ones.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(increase({__name__=~\"halogen:requests_total|llamacpp:requests_total|vllm:request_success_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[24h]))\nA: llm:requests_completed:sum_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
+      "description": "Completed requests in the last 24 h, from the same counter the requests/s panels rate, plus the `llm:requests_completed:sum_24h` rollup. Divide the tokens tile above by this for tokens per request, which is the shape of the traffic: the same tok/s means something different at 40-token answers and at 2 000-token ones.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(increase({__name__=~\"halogen:requests_total|llamacpp:requests_total|vllm:request_success_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[24h]))\nB: llm:requests_completed:sum_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1945,7 +1945,7 @@
           "expr": "llm:requests_completed:sum_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}",
           "legendFormat": "llm:requests_completed:sum_24h (rule)",
           "range": false,
-          "refId": "A",
+          "refId": "B",
           "interval": "15s",
           "intervalFactor": 1,
           "instant": true
@@ -1992,7 +1992,7 @@
       "id": 77,
       "type": "timeseries",
       "title": "Decode tok/s \u2014 averaged over $window",
-      "description": "The history of the average, not just the average: `rate()` over a fixed $window evaluated at every step, so the line is a moving mean of throughput $window wide. The $window picker is the whole point \u2014 5 m is a zoomed-in chart, 24 h is a daily shape, 7 d is the trend under the noise.\n\nTwo fixed rollups are drawn for reference, so a wide window still reads against a narrow one: `llm:decode_tokens_per_second:mean_1h` and `:mean_24h`. With $window = 1 h the raw line and the 1 h rollup are the same answer computed twice (once at query time, once by Prometheus every 5 m); where they disagree the rollup is up to one rule interval behind.\n\nThe minimum step here is 5 m, not the 15 s scrape: a $window-wide average cannot show 15 s of detail no matter how many points are plotted, and every extra point pays for a window of samples to compute it.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$window]))\nA: sum by (instance, job) (rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$window]))\nA: llm:decode_tokens_per_second:mean_1h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\nA: llm:decode_tokens_per_second:mean_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
+      "description": "The history of the average, not just the average: `rate()` over a fixed $window evaluated at every step, so the line is a moving mean of throughput $window wide. The $window picker is the whole point \u2014 5 m is a zoomed-in chart, 24 h is a daily shape, 7 d is the trend under the noise.\n\nTwo fixed rollups are drawn for reference, so a wide window still reads against a narrow one: `llm:decode_tokens_per_second:mean_1h` and `:mean_24h`. With $window = 1 h the raw line and the 1 h rollup are the same answer computed twice (once at query time, once by Prometheus every 5 m); where they disagree the rollup is up to one rule interval behind.\n\nThe minimum step here is 5 m, not the 15 s scrape: a $window-wide average cannot show 15 s of detail no matter how many points are plotted, and every extra point pays for a window of samples to compute it.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$window]))\nB: sum by (instance, job) (rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$window]))\nC: llm:decode_tokens_per_second:mean_1h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\nD: llm:decode_tokens_per_second:mean_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -2026,7 +2026,7 @@
           "expr": "sum by (instance, job) (rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$window]))",
           "legendFormat": "{{instance}} {{job}} over $window",
           "range": true,
-          "refId": "A",
+          "refId": "B",
           "interval": "5m",
           "intervalFactor": 1
         },
@@ -2039,7 +2039,7 @@
           "expr": "llm:decode_tokens_per_second:mean_1h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}",
           "legendFormat": "1 h mean (rule)",
           "range": true,
-          "refId": "A",
+          "refId": "C",
           "interval": "15s",
           "intervalFactor": 1
         },
@@ -2052,7 +2052,7 @@
           "expr": "llm:decode_tokens_per_second:mean_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}",
           "legendFormat": "24 h mean (rule)",
           "range": true,
-          "refId": "A",
+          "refId": "D",
           "interval": "15s",
           "intervalFactor": 1
         }
@@ -2268,7 +2268,7 @@
       "id": 79,
       "type": "timeseries",
       "title": "Cache, speculation and KV pressure over $window",
-      "description": "Three ratios that share a 0-1 axis, each pooled over $window (increases divided by increases, which is the token-weighted answer rather than a mean of five-minute ratios):\n\n* prompt-cache hit ratio, `cached / (processed + cached)` \u2014 llama.cpp's prompt counter counts cache MISSES, so the denominator is both halves;\n* speculative-decode acceptance, `accepted / proposed`;\n* the KV pool's **peak** usage inside the window, `max_over_time(max(...)[...])` \u2014 a 30 s saturation that a 24 h mean smooths into nothing still shows up here, which is the whole answer to 'was the KV pool the limit overnight'.\n\n`llm:prompt_cache_hit_ratio:mean_24h` and `llm:kv_cache_usage_ratio:max_24h` are drawn as the fixed-window references.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(increase({__name__=~\"halogen:prompt_tokens_cached_total|llamacpp:prompt_cache_tokens_cached_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$window])) / clamp_min(sum(increase({__name__=~\"llamacpp:prompt_tokens_total|vllm:prompt_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$window])) + sum(increase({__name__=~\"halogen:prompt_tokens_cached_total|llamacpp:prompt_cache_tokens_cached_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$window])), 1)\nA: sum(increase({__name__=~\"halogen:draft_tokens_accepted_total|llamacpp:draft_tokens_accepted_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$window])) / clamp_min(sum(increase({__name__=~\"halogen:draft_tokens_total|llamacpp:draft_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$window])), 1)\nA: max_over_time(max({__name__=~\"llamacpp:kv_cache_usage_ratio|llamacpp:kv_cache_usage\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})[$window:5m])\nA: llm:prompt_cache_hit_ratio:mean_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\nA: llm:kv_cache_usage_ratio:max_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
+      "description": "Three ratios that share a 0-1 axis, each pooled over $window (increases divided by increases, which is the token-weighted answer rather than a mean of five-minute ratios):\n\n* prompt-cache hit ratio, `cached / (processed + cached)` \u2014 llama.cpp's prompt counter counts cache MISSES, so the denominator is both halves;\n* speculative-decode acceptance, `accepted / proposed`;\n* the KV pool's **peak** usage inside the window, `max_over_time(max(...)[...])` \u2014 a 30 s saturation that a 24 h mean smooths into nothing still shows up here, which is the whole answer to 'was the KV pool the limit overnight'.\n\n`llm:prompt_cache_hit_ratio:mean_24h` and `llm:kv_cache_usage_ratio:max_24h` are drawn as the fixed-window references.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(increase({__name__=~\"halogen:prompt_tokens_cached_total|llamacpp:prompt_cache_tokens_cached_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$window])) / clamp_min(sum(increase({__name__=~\"llamacpp:prompt_tokens_total|vllm:prompt_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$window])) + sum(increase({__name__=~\"halogen:prompt_tokens_cached_total|llamacpp:prompt_cache_tokens_cached_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$window])), 1)\nB: sum(increase({__name__=~\"halogen:draft_tokens_accepted_total|llamacpp:draft_tokens_accepted_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$window])) / clamp_min(sum(increase({__name__=~\"halogen:draft_tokens_total|llamacpp:draft_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$window])), 1)\nC: max_over_time(max({__name__=~\"llamacpp:kv_cache_usage_ratio|llamacpp:kv_cache_usage\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})[$window:5m])\nD: llm:prompt_cache_hit_ratio:mean_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\nE: llm:kv_cache_usage_ratio:max_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -2302,7 +2302,7 @@
           "expr": "sum(increase({__name__=~\"halogen:draft_tokens_accepted_total|llamacpp:draft_tokens_accepted_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$window])) / clamp_min(sum(increase({__name__=~\"halogen:draft_tokens_total|llamacpp:draft_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$window])), 1)",
           "legendFormat": "draft acceptance over $window",
           "range": true,
-          "refId": "A",
+          "refId": "B",
           "interval": "5m",
           "intervalFactor": 1
         },
@@ -2315,7 +2315,7 @@
           "expr": "max_over_time(max({__name__=~\"llamacpp:kv_cache_usage_ratio|llamacpp:kv_cache_usage\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})[$window:5m])",
           "legendFormat": "KV peak over $window",
           "range": true,
-          "refId": "A",
+          "refId": "C",
           "interval": "5m",
           "intervalFactor": 1
         },
@@ -2328,7 +2328,7 @@
           "expr": "llm:prompt_cache_hit_ratio:mean_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}",
           "legendFormat": "prompt-cache hit ratio, 24 h (rule)",
           "range": true,
-          "refId": "A",
+          "refId": "D",
           "interval": "15s",
           "intervalFactor": 1
         },
@@ -2341,7 +2341,7 @@
           "expr": "llm:kv_cache_usage_ratio:max_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}",
           "legendFormat": "KV peak, 24 h (rule)",
           "range": true,
-          "refId": "A",
+          "refId": "E",
           "interval": "15s",
           "intervalFactor": 1
         }
@@ -2408,7 +2408,7 @@
       "id": 80,
       "type": "timeseries",
       "title": "Was the history itself complete? scrape success over $window",
-      "description": "A flat line is either an idle server or a blind monitor, and on a history row that difference matters more than anywhere else: a 24 h mean computed from six hours of samples is not a 24 h mean. `avg_over_time` of the monitor's own `llm_monitor_scrape_ok` gauge over $window, beside `llm:scrape_success_ratio:mean_24h` (which folds the 10 m alias the Scrape health row plots).\n\n1 = the monitor's most recent scrape had succeeded for the whole window. Below that, part of the window has no data in it, and every mean on this row describes the hours that reported rather than the hours that were quiet.\n\nPromQL sent by this panel:\n\n```promql\nA: avg(avg_over_time(llm_monitor_scrape_ok{job=~\"$job\",instance=~\"$instance\"}[$window]))\nA: llm:scrape_success_ratio:mean_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
+      "description": "A flat line is either an idle server or a blind monitor, and on a history row that difference matters more than anywhere else: a 24 h mean computed from six hours of samples is not a 24 h mean. `avg_over_time` of the monitor's own `llm_monitor_scrape_ok` gauge over $window, beside `llm:scrape_success_ratio:mean_24h` (which folds the 10 m alias the Scrape health row plots).\n\n1 = the monitor's most recent scrape had succeeded for the whole window. Below that, part of the window has no data in it, and every mean on this row describes the hours that reported rather than the hours that were quiet.\n\nPromQL sent by this panel:\n\n```promql\nA: avg(avg_over_time(llm_monitor_scrape_ok{job=~\"$job\",instance=~\"$instance\"}[$window]))\nB: llm:scrape_success_ratio:mean_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -2442,7 +2442,7 @@
           "expr": "llm:scrape_success_ratio:mean_24h{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}",
           "legendFormat": "llm:scrape_success_ratio:mean_24h (rule)",
           "range": true,
-          "refId": "A",
+          "refId": "B",
           "interval": "15s",
           "intervalFactor": 1
         }

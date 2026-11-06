@@ -724,7 +724,7 @@ def describe(notes: str, targets: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def target(expr: str, legend: str, ref: str = "A", step: str | None = None) -> dict:
+def target(expr: str, legend: str, ref: str | None = None, step: str | None = None) -> dict:
     """One panel query.
 
     `step` is the panel's minimum step. It defaults to the scrape interval because a
