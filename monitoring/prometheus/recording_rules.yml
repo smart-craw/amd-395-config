@@ -64,11 +64,11 @@ groups:
       # workspace-szw.5's queueing alerts should read.
       - record: llm:requests_running
         expr: >-
-          sum by (job, instance, model) (label_replace({__name__=~"llamacpp:requests_processing|halogen:requests_running|vllm:num_requests_running"}, "model", "$1", "model_name", "(.+)"))
+          sum by (job, instance, model) (label_replace({__name__=~"llamacpp:requests_processing|vllm:num_requests_running"}, "model", "$1", "model_name", "(.+)"))
 
       - record: llm:requests_queued
         expr: >-
-          sum by (job, instance, model) (label_replace({__name__=~"llamacpp:requests_deferred|halogen:requests_queued|vllm:num_requests_waiting"}, "model", "$1", "model_name", "(.+)"))
+          sum by (job, instance, model) (label_replace({__name__=~"llamacpp:requests_deferred|vllm:num_requests_waiting"}, "model", "$1", "model_name", "(.+)"))
 
       # Prompt-cache hit ratio over 5m. The `+ cached` in the denominator is the
       # llama.cpp convention: prompt_tokens_total counts only the tokens that

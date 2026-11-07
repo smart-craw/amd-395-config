@@ -679,7 +679,7 @@ file's docstring for why. Rows, and the question each answers:
 
 | row | the question |
 | --- | --- |
-| Overview | decode / prompt tok/s, requests running / queued / per second, structured share, per-model tok/s, KV % and the tile-sized now-values |
+| Overview | decode / prompt tok/s, requests running / queued / per second, structured share, KV % and the tile-sized now-values |
 | History & rollups | the windowed questions: mean decode tok/s over the last hour / day / week, the peak of the last day, tokens and requests per day, cache / speculation / KV pooled over a window, and how much history the box is actually configured to keep |
 | Latency | TTFT, time-per-output-token and end-to-end at p50/p90/p99 — the panel set the bespoke page could not render at all |
 | Cache & KV | "was the KV cache full overnight?", tokens vs pool, prompt-cache hit ratio vs reprocessed tokens |
@@ -715,21 +715,15 @@ that cost something to learn and are easy to undo by accident:
   hands `a` to Prometheus as `match[]`, so `a` must be a plain **series selector** —
   `sum(...)` or `label_replace(...)` in there does not error, it silently leaves the
   variable with no values (`check_monitoring.py` fails the build if one grows a
-  comma). The model-label normalization therefore happens *in the panels*, not in the
-  variable: `label_replace(..., "model", "$1", "model_name", "(.+)")`, with `(.+)`
-  because `(.*)` matches an **absent** `model_name` on the empty string and blanks a
-  `model` label that file_sd set correctly.
+  comma). The model-label normalization therefore happens in the **recording rules**,
+  not in the variable: `label_replace(..., "model", "$1", "model_name", "(.+)")`, with
+  `(.+)` because `(.*)` matches an **absent** `model_name` on the empty string and
+  blanks a `model` label that file_sd set correctly.
 * `$model` lists `model` values from the token counters and the `llm:*` aliases, so a
   vLLM server shows up once its `model_name` has been rule-normalized. A llama.cpp
-  server that nobody labelled shows nothing, and the per-model panel draws one line
-  called `unknown` — which is the answer, not a failure. Put the name in
+  server that nobody labelled shows nothing and All (.*) keeps every panel working —
+  that is the answer, not a failure. Put the name in
   `prometheus/targets/llm-servers.json` labels to get a name.
-* The `$model` filter is applied to both spellings in the per-model panel
-  (`{model=~"$model"} or {model_name=~"$model"}`) because PromQL cannot match "either
-  of two labels" in one selector, and `label_match()` — which could — is an optional
-  Prometheus 3.x extension this box does not assume.
-* One panel ("Decode tok/s — one panel per $instance") uses **repeat-by-variable**,
-  so N servers get N charts instead of N lines fighting over one axis.
 
 ### Refresh, range, step
 
@@ -1230,8 +1224,8 @@ which is the alert that distinguishes *blind* from *idle*.
 **“Add a second model server.”** One edit:
 [prometheus/targets/llm-servers.json](./prometheus/targets/llm-servers.json) —
 file_sd re-reads it every 60 s, no restart. Give it a `model` label if the server
-does not label its own metrics, or the per-model panels group it under `unknown`.
-Then check `:9090/targets` shows both, and that the `$job` / `$instance` variables
+does not label its own metrics, so `$model` and the recording rules can tell the two
+apart. Then check `:9090/targets` shows both, and that the `$job` / `$instance` variables
 in Grafana list it.
 
 **“Prometheus hit the retention size cap.”** Nothing to fix: it deletes whole blocks

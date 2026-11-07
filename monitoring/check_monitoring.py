@@ -376,6 +376,14 @@ def check_prometheus_config() -> None:
                     "://" not in str(target),
                     f"file_sd target must be host:port, not a URL: {target}",
                 )
+                # A bare host is not scraped on the port the server listens on: it is
+                # scraped on :80, the scrape fails, and every panel that reads that job
+                # renders 'No data' while Prometheus itself looks perfectly healthy.
+                check(
+                    ":" in str(target) and not str(target).startswith(":"),
+                    f"file_sd target {target!r} has no port — Prometheus would scrape "
+                    f"http://{target}:80/metrics and ingest nothing at all",
+                )
 
 
 def check_host_telemetry() -> None:
@@ -985,7 +993,11 @@ def check_dashboard_contract() -> None:
         "up per job": 'up{job=~"$job"' in expressions,
         "monitor scrape success": "llm_monitor_scrape_success_total" in joined,
         "monitor scrape latency": "llm_monitor_scrape_latency_ms" in joined,
-        "repeat-by-variable for multi-instance": '"repeat"' in joined,
+        # No repeat-by-variable panel any more. The one that had it drew the same
+        # per-instance series the decode panel already plots, and `repeat` on a
+        # single-target box expands to zero clones — the empty tile looked like missing
+        # data. Multi-server boxes get one line per server on the decode panel, and
+        # $instance pins any subset of them.
         "histogram_quantile": "histogram_quantile" in joined,
         "$__rate_interval windows": "$__rate_interval" in joined,
         # GPU & host row (workspace-szw.13). The payoff overlay has to have all three
@@ -1350,37 +1362,65 @@ def check_upstream_declaration() -> None:
                 return value.strip().strip('"').strip("'")
         return ""
 
+    def hostport(value: str) -> tuple[str, str]:
+        """(host:port, scheme) from a URL or a bare `host:port` target.
+
+        The default port is filled in so `https://h` and `h:443` compare equal — and so
+        that a portless file_sd target (which Prometheus scrapes on :80, not on the
+        port the server is on) cannot pass by matching the hostname alone. That is
+        exactly how a working scrape became a dashboard of 'No data'.
+        """
+        value = str(value).strip().strip('"').strip("'")
+        front, sep, rest = value.partition("://")
+        scheme = (front if sep else "http").strip().lower()
+        host = (rest if sep else value).split("/")[0].strip().lower()
+        if ":" not in host:
+            host = "%s:%d" % (host, 443 if scheme == "https" else 80)
+        return host, scheme
+
     declared = env_value(HERE / ".env", "LLM_UPSTREAM_URL") or env_value(
         HERE / ".env.example", "LLM_UPSTREAM_URL"
     )
     check(bool(declared), ".env.example must declare LLM_UPSTREAM_URL")
     if not declared:
         return
-    want = declared.split("://")[-1].split("/")[0].strip().lower()
+    want, want_scheme = hostport(declared)
 
     entries = json.loads(
         (PROM_DIR / "targets" / "llm-servers.json").read_text(encoding="utf-8")
     )
     scraped = {
-        target.split("://")[-1].split("/")[0].strip().lower()
+        hostport(target)[0]
         for entry in entries
         for target in entry.get("targets", [])
     }
     check(
         want in scraped,
         f"LLM_UPSTREAM_URL ({want}) is not in prometheus/targets/llm-servers.json "
-        f"({', '.join(sorted(scraped)) or 'empty'})",
+        f"({', '.join(sorted(scraped)) or 'empty'}) — host *and* port have to agree, "
+        "since Prometheus appends no port of its own",
     )
 
     prom = (PROM_DIR / "prometheus.yml").read_text(encoding="utf-8")
     label = re.search(r"llm_upstream:\s*\"?([^\"\n]+)\"?", prom)
     check(bool(label), "llm-server-via-proxy needs an llm_upstream label (becomes ?url=)")
     if label:
-        got = label.group(1).strip().split("://")[-1].split("/")[0].strip().lower()
+        got, _ = hostport(label.group(1))
         check(
             got == want,
             f"prometheus.yml llm_upstream ({got}) disagrees with LLM_UPSTREAM_URL ({want})",
         )
+
+    # ...and the *direct* job must speak the same scheme as the declared upstream:
+    # https on the declared URL against an http scrape is a failed handshake, and a
+    # failed scrape is indistinguishable from an idle server from the dashboard.
+    jobs = {job.get("job_name"): job for job in parse_yaml(prom).get("scrape_configs") or []}
+    got_scheme = str((jobs.get("llm-server") or {}).get("scheme") or "http").strip().lower()
+    check(
+        got_scheme == want_scheme,
+        f"the llm-server job scrapes with scheme {got_scheme!r} but LLM_UPSTREAM_URL is "
+        f"{want_scheme!r} (set 'scheme: https' on the job for a TLS upstream)",
+    )
 
 
 def check_footprint_documented() -> None:

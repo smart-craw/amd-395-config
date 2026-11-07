@@ -112,7 +112,7 @@
         "regex": "",
         "skipUrlSync": false,
         "sort": 1,
-        "description": "Only servers that are labelled show up: llama.cpp does not label its own metrics at all (the `model` here normally comes from monitoring/prometheus/targets/llm-servers.json file_sd labels), and vLLM's own label is model_name, which the llm:* recording rules normalize onto `model` \u2014 hence the alias in the selector. An empty list means no model label anywhere: All (.*) then keeps every panel working, and the per-model panel draws one line called 'unknown'."
+        "description": "Only servers that are labelled show up: llama.cpp does not label its own metrics at all (the `model` here normally comes from monitoring/prometheus/targets/llm-servers.json file_sd labels), and vLLM's own label is model_name, which the llm:* recording rules normalize onto `model` \u2014 hence the alias in the selector. An empty list means no model label anywhere: All (.*) then keeps every panel working."
       },
       {
         "name": "window",
@@ -216,7 +216,7 @@
       "id": 20,
       "type": "stat",
       "title": "requests in flight",
-      "description": "Instant gauges, no rate(): `sum(llamacpp:requests_processing)` and `sum(llamacpp:requests_deferred)` (halogen's `requests_running` / `requests_queued` spellings match too).\n\ndeferred > 0 means arrivals are waiting for a slot \u2014 the earliest sign the KV budget is the limit.\n\n'No data' here means one of: this server publishes no /metrics at all (the monitor page still works \u2014 it reads /health, /v1/models and /cache, which are not Prometheus metrics), the scrape target is down, or this build does not expose this family. The Scrape health row says which.\n\nPromQL sent by this panel:\n\n```promql\nA: sum({__name__=~\"llamacpp:requests_processing|halogen:requests_running|vllm:num_requests_running\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\nB: sum({__name__=~\"llamacpp:requests_deferred|halogen:requests_queued|vllm:num_requests_waiting\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\n```",
+      "description": "Instant gauges, no rate(): `sum(llamacpp:requests_processing)` and `sum(llamacpp:requests_deferred)` (halogen publishes these two under the llama.cpp names \u2014 it has no `halogen:` spelling of either).\n\ndeferred > 0 means arrivals are waiting for a slot \u2014 the earliest sign the KV budget is the limit.\n\n'No data' here means one of: this server publishes no /metrics at all (the monitor page still works \u2014 it reads /health, /v1/models and /cache, which are not Prometheus metrics), the scrape target is down, or this build does not expose this family. The Scrape health row says which.\n\nPromQL sent by this panel:\n\n```promql\nA: sum({__name__=~\"llamacpp:requests_processing|vllm:num_requests_running\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\nB: sum({__name__=~\"llamacpp:requests_deferred|vllm:num_requests_waiting\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\n```",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -234,7 +234,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum({__name__=~\"llamacpp:requests_processing|halogen:requests_running|vllm:num_requests_running\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})",
+          "expr": "sum({__name__=~\"llamacpp:requests_processing|vllm:num_requests_running\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})",
           "legendFormat": "processing",
           "range": false,
           "refId": "A",
@@ -248,7 +248,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum({__name__=~\"llamacpp:requests_deferred|halogen:requests_queued|vllm:num_requests_waiting\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})",
+          "expr": "sum({__name__=~\"llamacpp:requests_deferred|vllm:num_requests_waiting\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})",
           "legendFormat": "deferred",
           "range": false,
           "refId": "B",
@@ -911,7 +911,7 @@
       "id": 5,
       "type": "timeseries",
       "title": "Requests running / queued",
-      "description": "Gauges, not rates: running vs deferred vs configured slot capacity. `deferred > 0` for minutes is queueing, and LLMQueueing in rules.yml fires on this same expression, so the panel and the alert cannot disagree.\n\nDeferred > 0 while running < slot capacity is a scheduling stall; deferred > 0 at full slots is plain saturation. Different incidents, and this is the panel that tells them apart.\n\nPromQL sent by this panel:\n\n```promql\nA: sum({__name__=~\"llamacpp:requests_processing|halogen:requests_running|vllm:num_requests_running\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\nB: sum({__name__=~\"llamacpp:requests_deferred|halogen:requests_queued|vllm:num_requests_waiting\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\nC: sum({__name__=~\"halogen:slot_capacity\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\nD: llm:requests_running{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\nE: llm:requests_queued{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
+      "description": "Gauges, not rates: running vs deferred vs the stall itself. `deferred > 0` for minutes is queueing, and LLMQueueing in rules.yml fires on this same expression, so the panel and the alert cannot disagree.\n\nThe third line is halogen's `kv_pool_waiting_for_room`: 1 while a request waits for room in the KV pool. deferred > 0 with that line at 1 is the KV budget being the limit; deferred > 0 with it at 0 is something else stalling the scheduler. There is no slot-capacity series to plot \u2014 halogen keeps slot counts in /props, not in /metrics \u2014 so the stall is drawn instead of the ceiling it is measured against.\n\nPromQL sent by this panel:\n\n```promql\nA: sum({__name__=~\"llamacpp:requests_processing|vllm:num_requests_running\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\nB: sum({__name__=~\"llamacpp:requests_deferred|vllm:num_requests_waiting\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\nC: max({__name__=~\"halogen:kv_pool_waiting_for_room\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\nD: llm:requests_running{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\nE: llm:requests_queued{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}\n```",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -929,7 +929,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum({__name__=~\"llamacpp:requests_processing|halogen:requests_running|vllm:num_requests_running\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})",
+          "expr": "sum({__name__=~\"llamacpp:requests_processing|vllm:num_requests_running\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})",
           "legendFormat": "running",
           "range": true,
           "refId": "A",
@@ -942,7 +942,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum({__name__=~\"llamacpp:requests_deferred|halogen:requests_queued|vllm:num_requests_waiting\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})",
+          "expr": "sum({__name__=~\"llamacpp:requests_deferred|vllm:num_requests_waiting\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})",
           "legendFormat": "queued",
           "range": true,
           "refId": "B",
@@ -955,8 +955,8 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum({__name__=~\"halogen:slot_capacity\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})",
-          "legendFormat": "slot capacity (halogen)",
+          "expr": "max({__name__=~\"halogen:kv_pool_waiting_for_room\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})",
+          "legendFormat": "waiting for KV room (halogen)",
           "range": true,
           "refId": "C",
           "interval": "15s",
@@ -1169,194 +1169,6 @@
       }
     },
     {
-      "id": 27,
-      "type": "timeseries",
-      "title": "Decode tok/s per model",
-      "description": "The per-model comparison the bespoke page could not do. `label_replace` folds llama.cpp's file_sd `model` label and vLLM's `model_name` onto one `model` label and turns 'no model label at all' into the literal `unknown`, so the legend is never blank. The $model filter is applied to both spellings (`{model=~'$model'} or {model_name=~'$model'}`) because PromQL cannot match 'either of two labels' in one selector and `label_match()` is an optional 3.x extension this box does not assume. The `(rule)` line is the same answer computed by Prometheus, where the rules normalize the label once.\n\nOn one llama.cpp server with no model label you get exactly one line called 'unknown' \u2014 correct, not broken. Name the model in the labels of monitoring/prometheus/targets/llm-servers.json to get a name here.\n\nPromQL sent by this panel:\n\n```promql\nA: sum by (model) (label_replace(label_replace(sum by (job, instance, model, model_name) (rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])) or sum by (job, instance, model, model_name) (rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model_name=~\"$model\"}[$__rate_interval])), \"model\", \"$1\", \"model_name\", \"(.+)\"), \"model\", \"unknown\", \"model\", \"^$\"))\nB: sum by (model) (label_replace(label_replace(llm:decode_tokens_per_second{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}, \"model\", \"$1\", \"model_name\", \"(.+)\"), \"model\", \"unknown\", \"model\", \"^$\"))\n```",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 16,
-        "y": 14
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "sum by (model) (label_replace(label_replace(sum by (job, instance, model, model_name) (rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])) or sum by (job, instance, model, model_name) (rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model_name=~\"$model\"}[$__rate_interval])), \"model\", \"$1\", \"model_name\", \"(.+)\"), \"model\", \"unknown\", \"model\", \"^$\"))",
-          "legendFormat": "{{model}}",
-          "range": true,
-          "refId": "A",
-          "interval": "15s",
-          "intervalFactor": 1
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "sum by (model) (label_replace(label_replace(llm:decode_tokens_per_second{job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}, \"model\", \"$1\", \"model_name\", \"(.+)\"), \"model\", \"unknown\", \"model\", \"^$\"))",
-          "legendFormat": "{{model}} (rule)",
-          "range": true,
-          "refId": "B",
-          "interval": "15s",
-          "intervalFactor": 1
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisLabel": "",
-            "drawStyle": "line",
-            "fillOpacity": 8,
-            "gradientMode": "none",
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 4,
-            "showPoints": "auto",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "unit": "short",
-          "decimals": 2
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "calcs": [
-            "lastNotNull",
-            "max"
-          ],
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLast": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      }
-    },
-    {
-      "id": 28,
-      "type": "timeseries",
-      "title": "Decode tok/s \u2014 one panel per $instance",
-      "description": "Repeat-by-variable: Grafana clones this panel for each selected $instance value, so N servers get N charts instead of N lines competing for one axis. The expression is the per-target rate, so a clone carries its own instance only.\n\nPin $instance to specific targets for a guaranteed one-panel-per-server; with All selected the clone set is whatever Grafana expands All to.\n\nPromQL sent by this panel:\n\n```promql\nA: sum by (instance, job) (rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\n```",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 0,
-        "y": 22
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "sum by (instance, job) (rate({__name__=~\"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))",
-          "legendFormat": "{{instance}} {{job}}",
-          "range": true,
-          "refId": "A",
-          "interval": "15s",
-          "intervalFactor": 1
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisLabel": "",
-            "drawStyle": "line",
-            "fillOpacity": 8,
-            "gradientMode": "none",
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 4,
-            "showPoints": "auto",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "unit": "short",
-          "decimals": 2
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "calcs": [
-            "lastNotNull",
-            "max"
-          ],
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLast": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "repeat": "instance",
-      "repeatDirection": "h",
-      "maxPerRow": 2
-    },
-    {
       "id": 29,
       "type": "timeseries",
       "title": "Lifetime tok/s \u2014 the arithmetic the old tile did",
@@ -1368,7 +1180,7 @@
       "gridPos": {
         "h": 7,
         "w": 12,
-        "x": 12,
+        "x": 0,
         "y": 22
       },
       "targets": [
@@ -3470,7 +3282,7 @@
           "id": 34,
           "type": "timeseries",
           "title": "KV tokens in use vs pool capacity",
-          "description": "The absolute numbers behind the ratio: tokens resident in the cache, the size the pool was configured with (`halogen:kv_pool_positions`, or `llamacpp:context_size` on plain llama.cpp), and the positions the front-end slots reserved but are not using yet.\n\nThe ratio is what to alert on; this is what to read alongside it. A ratio at 95 % with a lot of reserved-but-idle tokens is a slot-sizing problem, not a context-length problem, and the fix is different.\n\nPromQL sent by this panel:\n\n```promql\nA: sum({__name__=~\"llamacpp:kv_cache_tokens|llamacpp:kvcache_used_tokens\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\nB: sum({__name__=~\"halogen:kv_pool_positions|halogen:kv_pool_tokens|halogen:kv_pool_total_tokens|llamacpp:context_size\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\nC: sum({__name__=~\"halogen:kv_pool_reserved_tokens\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\nD: sum by (instance, job) ({__name__=~\"llamacpp:kv_cache_tokens|llamacpp:kvcache_used_tokens\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\n```",
+          "description": "The absolute numbers behind the ratio: tokens resident in the cache, the size the pool was configured with (`halogen:kv_pool_positions`, or `llamacpp:context_size` on plain llama.cpp), and the positions the front-end slots reserved but are not using yet.\n\nThe ratio is what to alert on; this is what to read alongside it. A ratio at 95 % with a lot of reserved-but-idle tokens is a slot-sizing problem, not a context-length problem, and the fix is different.\n\nPromQL sent by this panel:\n\n```promql\nA: sum({__name__=~\"llamacpp:kv_cache_tokens|llamacpp:kvcache_used_tokens\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\nB: sum({__name__=~\"halogen:kv_pool_positions|llamacpp:context_size\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\nC: sum({__name__=~\"halogen:kv_pool_reserved_tokens\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\nD: sum by (instance, job) ({__name__=~\"llamacpp:kv_cache_tokens|llamacpp:kvcache_used_tokens\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})\n```",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -3501,7 +3313,7 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum({__name__=~\"halogen:kv_pool_positions|halogen:kv_pool_tokens|halogen:kv_pool_total_tokens|llamacpp:context_size\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})",
+              "expr": "sum({__name__=~\"halogen:kv_pool_positions|llamacpp:context_size\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"})",
               "legendFormat": "pool capacity",
               "range": true,
               "refId": "B",
@@ -4277,7 +4089,7 @@
           "id": 41,
           "type": "timeseries",
           "title": "Draft tokens: proposed / accepted / rejected",
-          "description": "The three counters in tokens/s. `proposed = accepted + rejected` unless this build has no rejected counter \u2014 then that line is simply absent, which is a missing metric, not a zero.\n\nRead the shape: accepted stepping down while proposed holds is the drafter getting worse (new prompt distribution); both dropping is speculation having been switched off or the drafter unloading.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(rate({__name__=~\"halogen:draft_tokens_total|llamacpp:draft_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\nB: sum(rate({__name__=~\"halogen:draft_tokens_accepted_total|llamacpp:draft_tokens_accepted_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\nC: sum(rate({__name__=~\"halogen:draft_tokens_rejected_total|llamacpp:draft_tokens_rejected_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\n```",
+          "description": "Proposed and accepted are counters; rejected is derived, because no server publishes a rejected counter and `proposed = accepted + rejected` by definition. Both sides come from the same scrape, and the difference is clamped at 0 so a counter reset on one of them cannot draw a negative rate.\n\nRead the shape: accepted stepping down while proposed holds is the drafter getting worse (new prompt distribution); both dropping is speculation having been switched off or the drafter unloading.\n\nPromQL sent by this panel:\n\n```promql\nA: sum(rate({__name__=~\"halogen:draft_tokens_total|llamacpp:draft_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\nB: sum(rate({__name__=~\"halogen:draft_tokens_accepted_total|llamacpp:draft_tokens_accepted_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))\nC: clamp_min(sum(rate({__name__=~\"halogen:draft_tokens_total|llamacpp:draft_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])) - sum(rate({__name__=~\"halogen:draft_tokens_accepted_total|llamacpp:draft_tokens_accepted_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])), 0)\n```",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -4321,8 +4133,8 @@
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum(rate({__name__=~\"halogen:draft_tokens_rejected_total|llamacpp:draft_tokens_rejected_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval]))",
-              "legendFormat": "rejected",
+              "expr": "clamp_min(sum(rate({__name__=~\"halogen:draft_tokens_total|llamacpp:draft_tokens_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])) - sum(rate({__name__=~\"halogen:draft_tokens_accepted_total|llamacpp:draft_tokens_accepted_total\",job=~\"$job\",instance=~\"$instance\",model=~\"$model\"}[$__rate_interval])), 0)",
+              "legendFormat": "rejected (proposed - accepted)",
               "range": true,
               "refId": "C",
               "interval": "15s",

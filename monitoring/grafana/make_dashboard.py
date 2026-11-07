@@ -3,8 +3,8 @@
 
 This file decides what the monitoring stack *means*: every number the bespoke page
 computed in JavaScript becomes PromQL here, and the questions that page could not
-answer (p99 TTFT over a week, "was the KV cache full overnight?", per-model
-comparison) get a panel. Everything it emits is a committed file — nothing is
+answer (p99 TTFT over a week, "was the KV cache full overnight?") get a panel.
+Everything it emits is a committed file — nothing is
 clicked into existence (ADR 0001 sub-decision 3).
 
 Why a generator instead of a committed blob
@@ -31,21 +31,27 @@ Usage::
 Contracts this file must not break
 ----------------------------------
 * Panel **ids are a contract**, not a detail: `monitor/serve.py --grafana-url`
-  builds deep links as ``<grafana>/d/llm-server/llm-server?...&viewPanel=<id>`` and
-  ADR 0001 C4 reserves ids 1-7 for specific panels. Adding panels is fine (free ids
-  start at 20, row ids at 100, so a row can never shadow a panel id — with ids
-  colliding a `viewPanel=` link is ambiguous, which is what this generator fixed).
-  Renumbering 1-7 breaks links that are already bookmarked.
+  builds deep links as ``<grafana>/d/llm-server/llm-server?...&viewPanel=<id>``, and
+  `monitoring/parity/parity_check.py` reads specific panels' PromQL out of this file
+  by id. ADR 0001 C4 reserves ids 1-7 for specific panels; row ids start at 100, so a
+  row can never shadow a panel id. Renumbering 1-7 breaks links that are already
+  bookmarked.
+* Because ids are a contract, they are **pinned, not counted**: `PANEL_ID_BY_TITLE`
+  (and `ROW_ID_BY_TITLE`) fix each panel's id by title, and `RETIRED_PANEL_IDS` keeps
+  a deleted panel's id out of circulation so a later panel cannot inherit a bookmark
+  that used to mean something else. Counting ids out in definition order instead means
+  deleting one panel renumbers every panel after it — a diff of forty panels that did
+  not change, and links that moved silently. History row panels (70-89) pin `pid=`
+  explicitly for the same reason.
 * Query **refIds are unique inside a panel** and are referenced from two other places
   in the output: the `byFrameRefID` field overrides (`axis()` below) and the
   `PromQL sent by this panel:` block in each description. Grafana rejects a panel
   where two queries share a refId — "multiple queries using the same RefId" — so
   refIds are numbered by position (`assign_refs`), and the description and the
   overrides are written from the refIds after that numbering, never before.
-* **70-89 are the History & rollups row's**, and its panels pass `pid=` explicitly
-  for that reason: `FREE_IDS` allocates in definition order, so a row inserted in
-  the middle of the dashboard would otherwise renumber every later panel (a diff of
-  forty panels that did not change, and `viewPanel=` links that moved silently).
+* **70-89 are the History & rollups row's**, and its panels pass `pid=` explicitly:
+  ids outside that block come from `PANEL_ID_BY_TITLE`, so nothing is allocated in
+  definition order any more.
 * Likewise the dashboard uid (`llm-server`), the ADR C4 panel titles, and the
   template variable names (`job`, `instance`, `model`, `window`).
 * No plugins, no CDN assets, no off-box URL, and the datasource is referenced only
@@ -77,7 +83,15 @@ RESERVED = {
     6: "Prompt-cache hit ratio + draft-accept ratio",
     7: "Scrape health (llm_monitor_*) + staleness",
 }
-FREE_IDS = iter(range(20, 1000))
+
+#: Panel ids that are gone for good. An id is never handed to a second panel: a link,
+#: a screenshot or a parity note that once pointed at "the per-model chart" must not
+#: quietly come to mean something else.
+RETIRED_PANEL_IDS = {
+    27: "Decode tok/s per model",
+    28: "Decode tok/s — one panel per $instance",
+}
+FREE_IDS = iter(i for i in range(20, 1000) if i not in RETIRED_PANEL_IDS)
 
 #: Row ids, pinned by title. `ROW_IDS` alone would number rows by position, so
 #: inserting one row renumbers every row below it — and a row's id is what a
@@ -93,6 +107,69 @@ ROW_ID_BY_TITLE = {
     "Scrape health": 105,
     "GPU & host": 106,
 }
+
+#: The rest of the panels, pinned by title for the same reason rows are: counting ids
+#: out in construction order means deleting one panel renumbers every panel after it,
+#: and a `viewPanel=` link, a parity reference or a bookmark then points at a different
+#: chart with nothing anywhere failing. Panels that pass `pid=` explicitly (ADR 0001
+#: C4's 1-7 and the History row's 70-89) are not listed, and neither is a title used
+#: twice — the two `draft acceptance` stats are pinned at their call sites. A new
+#: panel takes a free id and gets a line here once its id is committed.
+PANEL_ID_BY_TITLE = {
+    "requests in flight": 20,
+    "KV cache used": 21,
+    "decode tok/s": 22,
+    "prompt-cache hit ratio": 23,
+    "TTFT p99": 25,
+    "Requests / s and structured share": 26,
+    "Lifetime tok/s — the arithmetic the old tile did": 29,
+    "Before you read 'no histogram' on this row": 30,
+    "Time per output token — p50 / p90 / p99": 31,
+    "End-to-end request time — p50 / p90 / p99": 32,
+    "Latency families this server publishes": 33,
+    "KV tokens in use vs pool capacity": 34,
+    "Prompt cache: served from cache vs reprocessed": 35,
+    "drafts per accepted token": 37,
+    "speculation time ratio": 38,
+    "draft tokens / s": 39,
+    "Draft acceptance over time": 40,
+    "Draft tokens: proposed / accepted / rejected": 41,
+    "Speculative decode time budget": 42,
+    "targets up": 43,
+    "monitor scrape ok": 44,
+    "monitors reporting": 45,
+    "alerts firing": 46,
+    "Monitor scrape latency and upstream status": 47,
+    "Monitor scrape success rate": 48,
+    "Parse errors, truncation, series count": 49,
+    "Monitoring the monitor": 50,
+    "Read this before the charts: GPU memory on this box": 51,
+    "GTT used": 52,
+    "GTT headroom": 53,
+    "GPU busy": 54,
+    "hottest GPU sensor": 55,
+    "memory PSI": 56,
+    "drm collector": 57,
+    "GPU memory pressure vs KV cache": 58,
+    "Memory pools, bytes": 59,
+    "GPU busy %, temps and power": 60,
+    "Host companion: memory PSI, swap, load": 61,
+    "Exporter health: collectors, drm scrape time, exporter RSS": 62,
+}
+
+#: Which pins `take_pid` actually handed out during the current build; `build()` fails
+#: on any pin left over, so renaming or deleting a panel cannot leave a stale id behind.
+_PIN_HITS: set[str] = set()
+
+
+def take_pid(title, pid=None):
+    """Explicit `pid=`, else the pin table, else the next free id."""
+    if pid:
+        return pid
+    if title in PANEL_ID_BY_TITLE:
+        _PIN_HITS.add(title)
+        return PANEL_ID_BY_TITLE[title]
+    return next(FREE_IDS)
 
 #: monitoring/prometheus/prometheus.yml scrape_interval. Panels pin their minimum
 #: step to it: a finer step cannot invent resolution the TSDB does not have, it just
@@ -169,17 +246,23 @@ REQUESTS_TOTAL = (
     "halogen:requests_total|llamacpp:requests_total|vllm:request_success_total"
 )
 REQUESTS_STRUCTURED = "halogen:structured_requests_total"
-REQUESTS_PROCESSING = (
-    "llamacpp:requests_processing|halogen:requests_running|vllm:num_requests_running"
-)
-REQUESTS_DEFERRED = (
-    "llamacpp:requests_deferred|halogen:requests_queued|vllm:num_requests_waiting"
-)
-SLOT_CAPACITY = "halogen:slot_capacity"
+# halogen re-publishes the llama.cpp queue gauges under the llama.cpp names; it has no
+# `halogen:requests_running` and no `halogen:requests_queued` (both were listed here as
+# guesses, where they matched nothing and only added a blank line to the legend). vLLM
+# is the only other spelling that actually exists.
+REQUESTS_PROCESSING = "llamacpp:requests_processing|vllm:num_requests_running"
+REQUESTS_DEFERRED = "llamacpp:requests_deferred|vllm:num_requests_waiting"
+#: There is no slot-capacity series to plot: halogen keeps slot counts in /props, not
+#: in /metrics. What it does publish is the stall the ceiling was being plotted to
+#: explain — 1 while a request waits for room in the KV pool.
+QUEUE_WAITING = "halogen:kv_pool_waiting_for_room"
 
 KV_RATIO = "llamacpp:kv_cache_usage_ratio|llamacpp:kv_cache_usage"
 KV_TOKENS = "llamacpp:kv_cache_tokens|llamacpp:kvcache_used_tokens"
-KV_POOL = "halogen:kv_pool_positions|halogen:kv_pool_tokens|halogen:kv_pool_total_tokens|llamacpp:context_size"
+#: The pool size halogen actually reports is `kv_pool_positions`; `kv_pool_tokens` and
+#: `kv_pool_total_tokens` are published by nothing and sat here as dead alternates.
+#: `llamacpp:context_size` is the plain llama.cpp equivalent of the same number.
+KV_POOL = "halogen:kv_pool_positions|llamacpp:context_size"
 KV_RESERVED = "halogen:kv_pool_reserved_tokens"
 
 # halogen counts the prompt tokens the cache served in its own counter, while
@@ -194,9 +277,10 @@ DRAFT_ACCEPTED = (
     "halogen:draft_tokens_accepted_total|llamacpp:draft_tokens_accepted_total"
 )
 DRAFT_TOTAL = "halogen:draft_tokens_total|llamacpp:draft_tokens_total"
-DRAFT_REJECTED = (
-    "halogen:draft_tokens_rejected_total|llamacpp:draft_tokens_rejected_total"
-)
+#: Nothing publishes a *rejected* draft counter (neither halogen nor llama.cpp), so the
+#: panel line for it is derived: proposed = accepted + rejected by definition, so
+#: rejected is the difference of the two counters that do exist. See DRAFT_REJECTED_RATE
+#: next to the other derived expressions, where `rate()` is available.
 
 SPEC_VERIFY = "llamacpp:speculative_time_seconds_total"
 SPEC_DECIDE = "llamacpp:speculative_decide_time_seconds_total"
@@ -468,49 +552,6 @@ def gauge_by(selector: str, labels: str) -> str:
     return "sum by (%s) (%s)" % (labels, selector)
 
 
-def by_model(expr: str) -> str:
-    """Group by one canonical `model` label, however the server spells it.
-
-    `label_replace(..., "model", "$1", "model_name", "(.+)")` copies vLLM's
-    `model_name` onto `model`; the `.+` matters — with `(.*)` an *absent* model_name
-    counts as a match on the empty string and silently blanks a perfectly good
-    `model` label (verified against a live Prometheus: llama.cpp series served by
-    file_sd labels came out as "unknown"). The second `label_replace` then turns
-    "neither label anywhere" into the literal `unknown` so the legend is never blank.
-
-    `model_filter_union()` explains why the $model filter has to be applied to both
-    spellings and why that cannot be done with one selector.
-    """
-    normalized = (
-        'label_replace(label_replace(%s, "model", "$1", "model_name", "(.+)"), '
-        '"model", "unknown", "model", "^$")' % expr
-    )
-    return "sum by (model) (%s)" % normalized
-
-
-def by_model_rate(names: str) -> str:
-    """Rate over a token counter, grouped by the canonical model, filtered by $model.
-
-    The filter is `A{model=~"$model"} or A{model_name=~"$model"}`: PromQL has no
-    "this label OR that label" matcher, and `label_match()` (which could do it after
-    normalization) is a 3.x extended function that the queried Prometheus has to be
-    started with --enable-feature=promql-extended-functions to know about, which a
-    dashboard may not assume. `or` unions the two branches and keeps the left-hand
-    value where a series matches both, so:
-
-      * $model = All (.*)  -> both branches match everything, union is the whole set;
-      * a llama.cpp `model` -> left branch matches it;
-      * a vLLM `model_name` -> right branch matches it.
-
-    With one branch instead of two, picking a specific model silently drops whichever
-    spelling it does not know — the kind of empty panel that gets blamed on the server.
-    """
-    grouped = "sum by (job, instance, model, model_name) (rate(%s[$__rate_interval]))"
-    left = grouped % sel(names)
-    right = grouped % sel(names, model_label="model_name")
-    return by_model("%s or %s" % (left, right))
-
-
 def p_label(probability: float) -> str:
     """0.5 -> "0.5", 0.99 -> "0.99" (keeps noise out of the JSON diff)."""
     return ("%f" % probability).rstrip("0").rstrip(".")
@@ -597,6 +638,12 @@ PROMPT_CACHE_HIT_RATIO = ratio(
 DRAFT_ACCEPT_RATIO = ratio(rate(sel(DRAFT_ACCEPTED)), rate(sel(DRAFT_TOTAL)))
 #: Draft tokens spent per token accepted — the multiplier on wasted draft work.
 DRAFT_PER_ACCEPTED = ratio(rate(sel(DRAFT_TOTAL)), rate(sel(DRAFT_ACCEPTED)))
+#: Draft tokens rejected, derived (see DRAFT_TOTAL): proposed - accepted, clamped at 0
+#: so a counter reset on one of the two cannot draw a negative rate.
+DRAFT_REJECTED_RATE = "clamp_min(%s - %s, 0)" % (
+    rate(sel(DRAFT_TOTAL)),
+    rate(sel(DRAFT_ACCEPTED)),
+)
 #: Structured-output share of requests.
 STRUCTURED_SHARE = ratio(rate(sel(REQUESTS_STRUCTURED)), rate(sel(REQUESTS_TOTAL)))
 #: (verify + decide + estimated-draft - actual-draft) / verify. Below 1, speculation
@@ -809,7 +856,7 @@ def _panel(
     max_per_row=2,
     overrides=None,
 ):
-    pid = pid or next(FREE_IDS)
+    pid = take_pid(title, pid)
     w, h = grid
     assign_refs(targets)
     # An override that names a refId no query has renders as nothing at all: Grafana
@@ -931,7 +978,7 @@ def stat(title, notes, targets, *, w=4, h=4, **kwargs):
 
 def markdown(title, text, *, w=24, h=2, pid=None):
     return {
-        "id": pid or next(FREE_IDS),
+        "id": take_pid(title, pid),
         "type": "text",
         "title": title,
         "description": text,
@@ -958,8 +1005,8 @@ def query_variable(name, label, query, *, hint, refresh=2):
     plain series selector. No `sum(...)`, no `label_replace(...)`, no commas: anything
     fancier fails to parse and the variable silently offers no values, which is how a
     dashboard ends up filtering on an empty string and rendering nothing anywhere.
-    Normalizing label names is therefore done *in the panels* (see by_model()) and in
-    the recording rules, not in the variable query.
+    Normalizing label names is therefore done in the recording rules (which fold
+    vLLM's `model_name` onto `model`) rather than in the variable query.
     """
     return {
         "name": name,
@@ -1073,8 +1120,7 @@ VARIABLES = [
         "monitoring/prometheus/targets/llm-servers.json file_sd labels), and vLLM's "
         "own label is model_name, which the llm:* recording rules normalize onto "
         "`model` — hence the alias in the selector. An empty list means no model "
-        "label anywhere: All (.*) then keeps every panel working, and the per-model "
-        "panel draws one line called 'unknown'.",
+        "label anywhere: All (.*) then keeps every panel working.",
     ),
     custom_variable(
         "window",
@@ -1110,8 +1156,9 @@ def overview_row():
         stat(
             "requests in flight",
             "Instant gauges, no rate(): `sum(llamacpp:requests_processing)` and "
-            "`sum(llamacpp:requests_deferred)` (halogen's `requests_running` / "
-            "`requests_queued` spellings match too).\n\ndeferred > 0 means arrivals are "
+            "`sum(llamacpp:requests_deferred)` (halogen publishes these two under the "
+            "llama.cpp names — it has no `halogen:` spelling of either).\n\ndeferred > 0 "
+            "means arrivals are "
             "waiting for a slot — the earliest sign the KV budget is the limit."
             + CAVEAT_NO_DATA,
             [
@@ -1169,6 +1216,7 @@ def overview_row():
             "Speculative decode row. No data simply means this server is not speculating "
             "(no draft counters) — not that speculation is failing.",
             [target(DRAFT_ACCEPT_RATIO, "accept ratio")],
+            pid=24,
             unit="percentunit",
             decimals=1,
             min=0,
@@ -1250,16 +1298,19 @@ def overview_row():
         ),
         ts(
             "Requests running / queued",
-            "Gauges, not rates: running vs deferred vs configured slot capacity. "
+            "Gauges, not rates: running vs deferred vs the stall itself. "
             "`deferred > 0` for minutes is queueing, and LLMQueueing in rules.yml fires "
             "on this same expression, so the panel and the alert cannot disagree.\n\n"
-            "Deferred > 0 while running < slot capacity is a scheduling stall; deferred "
-            "> 0 at full slots is plain saturation. Different incidents, and this is the "
-            "panel that tells them apart.",
+            "The third line is halogen's `kv_pool_waiting_for_room`: 1 while a request "
+            "waits for room in the KV pool. deferred > 0 with that line at 1 is the KV "
+            "budget being the limit; deferred > 0 with it at 0 is something else stalling "
+            "the scheduler. There is no slot-capacity series to plot — halogen keeps slot "
+            "counts in /props, not in /metrics — so the stall is drawn instead of the "
+            "ceiling it is measured against.",
             [
                 target(gauge_sum(sel(REQUESTS_PROCESSING)), "running"),
                 target(gauge_sum(sel(REQUESTS_DEFERRED)), "queued"),
-                target(gauge_sum(sel(SLOT_CAPACITY)), "slot capacity (halogen)"),
+                target(gauge_max(sel(QUEUE_WAITING)), "waiting for KV room (halogen)"),
                 target(var(RULE_RUNNING), "llm:requests_running (rule)"),
                 target(var(RULE_QUEUED), "llm:requests_queued (rule)"),
             ],
@@ -1289,51 +1340,6 @@ def overview_row():
             unit="reqps",
             w=8,
             h=8,
-        ),
-        ts(
-            "Decode tok/s per model",
-            "The per-model comparison the bespoke page could not do. `label_replace` "
-            "folds llama.cpp's file_sd `model` label and vLLM's `model_name` onto one "
-            "`model` label and turns 'no model label at all' into the literal `unknown`, "
-            "so the legend is never blank. The $model filter is applied to both spellings "
-            "(`{model=~'$model'} or {model_name=~'$model'}`) because PromQL cannot match "
-            "'either of two labels' in one selector and `label_match()` is an optional "
-            "3.x extension this box does not assume. The `(rule)` line is the same answer "
-            "computed by Prometheus, where the rules normalize the label once.\n\n"
-            "On one llama.cpp server with no model label you get exactly one line called "
-            "'unknown' — correct, not broken. Name the model in the labels of "
-            "monitoring/prometheus/targets/llm-servers.json to get a name here.",
-            [
-                target(by_model_rate(DECODE_TOKENS), "{{model}}"),
-                # The alias is already a rate (a recorded gauge), so it is grouped,
-                # not rate()'d again — rate() of a gauge is empty, not a slower rate.
-                # by_model() reuses the same unknown-label fallback as the raw line.
-                target(by_model(var(RULE_DECODE)), "{{model}} (rule)"),
-            ],
-            unit="short",
-            decimals=2,
-            w=8,
-            h=8,
-        ),
-        ts(
-            "Decode tok/s — one panel per $instance",
-            "Repeat-by-variable: Grafana clones this panel for each selected $instance "
-            "value, so N servers get N charts instead of N lines competing for one axis. "
-            "The expression is the per-target rate, so a clone carries its own instance "
-            "only.\n\n"
-            "Pin $instance to specific targets for a guaranteed one-panel-per-server; "
-            "with All selected the clone set is whatever Grafana expands All to.",
-            [
-                target(
-                    rate_by(sel(DECODE_TOKENS), "instance, job"), "{{instance}} {{job}}"
-                )
-            ],
-            unit="short",
-            decimals=2,
-            w=12,
-            h=7,
-            repeat="instance",
-            max_per_row=2,
         ),
         ts(
             "Lifetime tok/s — the arithmetic the old tile did",
@@ -1995,6 +2001,7 @@ def spec_row():
             "proposed, how many the target model kept. Below ~0.5 the draft is mostly "
             "wasted work.",
             [target(DRAFT_ACCEPT_RATIO, "accept ratio")],
+            pid=36,
             unit="percentunit",
             decimals=1,
             min=0,
@@ -2079,16 +2086,18 @@ def spec_row():
         ),
         ts(
             "Draft tokens: proposed / accepted / rejected",
-            "The three counters in tokens/s. `proposed = accepted + rejected` unless this "
-            "build has no rejected counter — then that line is simply absent, which is a "
-            "missing metric, not a zero.\n\n"
+            "Proposed and accepted are counters; rejected is derived, because no server "
+            "publishes a rejected counter and `proposed = accepted + rejected` by "
+            "definition. Both sides come from the same scrape, and the difference is "
+            "clamped at 0 so a counter reset on one of them cannot draw a negative "
+            "rate.\n\n"
             "Read the shape: accepted stepping down while proposed holds is the drafter "
             "getting worse (new prompt distribution); both dropping is speculation having "
             "been switched off or the drafter unloading.",
             [
                 target(rate(sel(DRAFT_TOTAL)), "proposed"),
                 target(rate(sel(DRAFT_ACCEPTED)), "accepted"),
-                target(rate(sel(DRAFT_REJECTED)), "rejected"),
+                target(DRAFT_REJECTED_RATE, "rejected (proposed - accepted)"),
             ],
             unit="short",
             decimals=1,
@@ -2802,6 +2811,7 @@ def build() -> dict:
     guaranteed to render without a re-layout on first open.
     """
     out: list[dict] = []
+    _PIN_HITS.clear()
     y = 0
     for title, panels, collapsed in [
         overview_row(),
@@ -2830,6 +2840,11 @@ def build() -> dict:
             out.append(entry)
             out.extend(panels)
             y += used
+    stale = sorted(set(PANEL_ID_BY_TITLE) - _PIN_HITS)
+    if stale:
+        raise ValueError(
+            "PANEL_ID_BY_TITLE pins panels that no longer exist: %s" % ", ".join(stale)
+        )
     return {
         "annotations": {"list": []},
         "editable": True,
