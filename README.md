@@ -139,3 +139,19 @@ curl -L https://github.com/FastFlowLM/FastFlowLM/releases/download/v0.9.38/fastf
 ```sh
 sudo apt install ./fastflowlm.deb
 ```
+
+
+## Monitoring keeps history, not just the moment
+
+The Grafana dashboard is not a snapshot reader. The **History & rollups** row answers
+"average tokens per second over the last hour / day / week", "peak of yesterday",
+"tokens decoded and requests served per day", "was the KV cache the limit overnight",
+from windowed PromQL plus the pre-computed `llm:*:mean_1h|mean_24h|mean_7d|sum_24h`
+rollups that `monitoring/prometheus/recording_rules.yml` writes every 5 minutes.
+Prometheus keeps 30 days by default (`PROMETHEUS_RETENTION_TIME` in
+`monitoring/.env`, with a 2 GB size cap as the hard ceiling), the time picker offers
+that range, and no window anywhere in the dashboard or the rules is allowed to ask for
+more than retention can answer — `monitoring/check_monitoring.py` enforces it.
+Sizing, semantics ("a mean averages the hours that reported, not the hours that were
+down") and the runbook entry: [monitoring/README.md — History and
+rollups](monitoring/README.md#history-and-rollups).

@@ -3,8 +3,8 @@
 
 This file decides what the monitoring stack *means*: every number the bespoke page
 computed in JavaScript becomes PromQL here, and the questions that page could not
-answer (p99 TTFT over a week, "was the KV cache full overnight?", per-model
-comparison) get a panel. Everything it emits is a committed file — nothing is
+answer (p99 TTFT over a week, "was the KV cache full overnight?") get a panel.
+Everything it emits is a committed file — nothing is
 clicked into existence (ADR 0001 sub-decision 3).
 
 Why a generator instead of a committed blob
@@ -31,13 +31,29 @@ Usage::
 Contracts this file must not break
 ----------------------------------
 * Panel **ids are a contract**, not a detail: `monitor/serve.py --grafana-url`
-  builds deep links as ``<grafana>/d/llm-server/llm-server?...&viewPanel=<id>`` and
-  ADR 0001 C4 reserves ids 1-7 for specific panels. Adding panels is fine (free ids
-  start at 20, row ids at 100, so a row can never shadow a panel id — with ids
-  colliding a `viewPanel=` link is ambiguous, which is what this generator fixed).
-  Renumbering 1-7 breaks links that are already bookmarked.
+  builds deep links as ``<grafana>/d/llm-server/llm-server?...&viewPanel=<id>``, and
+  `monitoring/parity/parity_check.py` reads specific panels' PromQL out of this file
+  by id. ADR 0001 C4 reserves ids 1-7 for specific panels; row ids start at 100, so a
+  row can never shadow a panel id. Renumbering 1-7 breaks links that are already
+  bookmarked.
+* Because ids are a contract, they are **pinned, not counted**: `PANEL_ID_BY_TITLE`
+  (and `ROW_ID_BY_TITLE`) fix each panel's id by title, and `RETIRED_PANEL_IDS` keeps
+  a deleted panel's id out of circulation so a later panel cannot inherit a bookmark
+  that used to mean something else. Counting ids out in definition order instead means
+  deleting one panel renumbers every panel after it — a diff of forty panels that did
+  not change, and links that moved silently. History row panels (70-89) pin `pid=`
+  explicitly for the same reason.
+* Query **refIds are unique inside a panel** and are referenced from two other places
+  in the output: the `byFrameRefID` field overrides (`axis()` below) and the
+  `PromQL sent by this panel:` block in each description. Grafana rejects a panel
+  where two queries share a refId — "multiple queries using the same RefId" — so
+  refIds are numbered by position (`assign_refs`), and the description and the
+  overrides are written from the refIds after that numbering, never before.
+* **70-89 are the History & rollups row's**, and its panels pass `pid=` explicitly:
+  ids outside that block come from `PANEL_ID_BY_TITLE`, so nothing is allocated in
+  definition order any more.
 * Likewise the dashboard uid (`llm-server`), the ADR C4 panel titles, and the
-  template variable names (`job`, `instance`, `model`).
+  template variable names (`job`, `instance`, `model`, `window`).
 * No plugins, no CDN assets, no off-box URL, and the datasource is referenced only
   through the `${datasource}` variable (its uid is set in git:
   `provisioning/datasources/datasource.yml` -> `prometheus`).
@@ -67,13 +83,103 @@ RESERVED = {
     6: "Prompt-cache hit ratio + draft-accept ratio",
     7: "Scrape health (llm_monitor_*) + staleness",
 }
-FREE_IDS = iter(range(20, 1000))
-ROW_IDS = iter(range(100, 900))
+
+#: Panel ids that are gone for good. An id is never handed to a second panel: a link,
+#: a screenshot or a parity note that once pointed at "the per-model chart" must not
+#: quietly come to mean something else.
+RETIRED_PANEL_IDS = {
+    27: "Decode tok/s per model",
+    28: "Decode tok/s — one panel per $instance",
+}
+FREE_IDS = iter(i for i in range(20, 1000) if i not in RETIRED_PANEL_IDS)
+
+#: Row ids, pinned by title. `ROW_IDS` alone would number rows by position, so
+#: inserting one row renumbers every row below it — and a row's id is what a
+#: `panelId=` Grafana URL points at, so that is a silent move of every bookmark that
+#: pointed at a row. Adding a row means adding a line here (the next free block starts
+#: at 107).
+ROW_ID_BY_TITLE = {
+    "Overview": 100,
+    "History & rollups": 101,
+    "Latency": 102,
+    "Cache & KV": 103,
+    "Speculative decode": 104,
+    "Scrape health": 105,
+    "GPU & host": 106,
+}
+
+#: The rest of the panels, pinned by title for the same reason rows are: counting ids
+#: out in construction order means deleting one panel renumbers every panel after it,
+#: and a `viewPanel=` link, a parity reference or a bookmark then points at a different
+#: chart with nothing anywhere failing. Panels that pass `pid=` explicitly (ADR 0001
+#: C4's 1-7 and the History row's 70-89) are not listed, and neither is a title used
+#: twice — the two `draft acceptance` stats are pinned at their call sites. A new
+#: panel takes a free id and gets a line here once its id is committed.
+PANEL_ID_BY_TITLE = {
+    "requests in flight": 20,
+    "KV cache used": 21,
+    "decode tok/s": 22,
+    "prompt-cache hit ratio": 23,
+    "TTFT p99": 25,
+    "Requests / s and structured share": 26,
+    "Lifetime tok/s — the arithmetic the old tile did": 29,
+    "Before you read 'no histogram' on this row": 30,
+    "Time per output token — p50 / p90 / p99": 31,
+    "End-to-end request time — p50 / p90 / p99": 32,
+    "Latency families this server publishes": 33,
+    "KV tokens in use vs pool capacity": 34,
+    "Prompt cache: served from cache vs reprocessed": 35,
+    "drafts per accepted token": 37,
+    "speculation time ratio": 38,
+    "draft tokens / s": 39,
+    "Draft acceptance over time": 40,
+    "Draft tokens: proposed / accepted / rejected": 41,
+    "Speculative decode time budget": 42,
+    "targets up": 43,
+    "monitor scrape ok": 44,
+    "monitors reporting": 45,
+    "alerts firing": 46,
+    "Monitor scrape latency and upstream status": 47,
+    "Monitor scrape success rate": 48,
+    "Parse errors, truncation, series count": 49,
+    "Monitoring the monitor": 50,
+    "Read this before the charts: GPU memory on this box": 51,
+    "GTT used": 52,
+    "GTT headroom": 53,
+    "GPU busy": 54,
+    "hottest GPU sensor": 55,
+    "memory PSI": 56,
+    "drm collector": 57,
+    "GPU memory pressure vs KV cache": 58,
+    "Memory pools, bytes": 59,
+    "GPU busy %, temps and power": 60,
+    "Host companion: memory PSI, swap, load": 61,
+    "Exporter health: collectors, drm scrape time, exporter RSS": 62,
+}
+
+#: Which pins `take_pid` actually handed out during the current build; `build()` fails
+#: on any pin left over, so renaming or deleting a panel cannot leave a stale id behind.
+_PIN_HITS: set[str] = set()
+
+
+def take_pid(title, pid=None):
+    """Explicit `pid=`, else the pin table, else the next free id."""
+    if pid:
+        return pid
+    if title in PANEL_ID_BY_TITLE:
+        _PIN_HITS.add(title)
+        return PANEL_ID_BY_TITLE[title]
+    return next(FREE_IDS)
 
 #: monitoring/prometheus/prometheus.yml scrape_interval. Panels pin their minimum
 #: step to it: a finer step cannot invent resolution the TSDB does not have, it just
 #: lets a panel lie more finely.
 SCRAPE_INTERVAL = "15s"
+
+#: refIds, in the order queries are numbered by `assign_refs`. Grafana addresses
+#: queries by refId inside a panel, so they must be unique per panel; 26 is also the
+#: most Grafana's own editor offers.
+REF_IDS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 #: KV pressure bands, matching alert_thresholds.env (warn 0.90 / critical 0.97 on
 #: the alerts; the ticket asks for visible 80 % / 90 % guides on the panel, so the
@@ -124,40 +230,57 @@ CAVEAT_VARS = (
 # --------------------------------------------------------------------------- #
 
 #: Generation (decode) token counters.
-DECODE_TOKENS = (
-    "llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total"
-)
+DECODE_TOKENS = "llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total"
 #: The server's own "average since the last scrape" decode gauge. Overlaid on the
 #: rate() panel while the bespoke page is retired; deleted by workspace-szw.11.
 DECODE_GAUGE = "llamacpp:predicted_tokens_seconds|llamacpp:tokens_predicted_seconds"
 #: The counter behind that gauge (cumulative decode seconds), for the lifetime math.
-DECODE_SECONDS = "llamacpp:tokens_predicted_seconds_total|llamacpp:predicted_tokens_seconds_total"
+DECODE_SECONDS = (
+    "llamacpp:tokens_predicted_seconds_total|llamacpp:predicted_tokens_seconds_total"
+)
 
 PROMPT_TOKENS = "llamacpp:prompt_tokens_total|vllm:prompt_tokens_total"
 PROMPT_GAUGE = "llamacpp:prompt_tokens_seconds"
 
-REQUESTS_TOTAL = "halogen:requests_total|llamacpp:requests_total|vllm:request_success_total"
+REQUESTS_TOTAL = (
+    "halogen:requests_total|llamacpp:requests_total|vllm:request_success_total"
+)
 REQUESTS_STRUCTURED = "halogen:structured_requests_total"
-REQUESTS_PROCESSING = "llamacpp:requests_processing|halogen:requests_running|vllm:num_requests_running"
-REQUESTS_DEFERRED = "llamacpp:requests_deferred|halogen:requests_queued|vllm:num_requests_waiting"
-SLOT_CAPACITY = "halogen:slot_capacity"
+# halogen re-publishes the llama.cpp queue gauges under the llama.cpp names; it has no
+# `halogen:requests_running` and no `halogen:requests_queued` (both were listed here as
+# guesses, where they matched nothing and only added a blank line to the legend). vLLM
+# is the only other spelling that actually exists.
+REQUESTS_PROCESSING = "llamacpp:requests_processing|vllm:num_requests_running"
+REQUESTS_DEFERRED = "llamacpp:requests_deferred|vllm:num_requests_waiting"
+#: There is no slot-capacity series to plot: halogen keeps slot counts in /props, not
+#: in /metrics. What it does publish is the stall the ceiling was being plotted to
+#: explain — 1 while a request waits for room in the KV pool.
+QUEUE_WAITING = "halogen:kv_pool_waiting_for_room"
 
 KV_RATIO = "llamacpp:kv_cache_usage_ratio|llamacpp:kv_cache_usage"
 KV_TOKENS = "llamacpp:kv_cache_tokens|llamacpp:kvcache_used_tokens"
-KV_POOL = (
-    "halogen:kv_pool_positions|halogen:kv_pool_tokens|halogen:kv_pool_total_tokens|llamacpp:context_size"
-)
+#: The pool size halogen actually reports is `kv_pool_positions`; `kv_pool_tokens` and
+#: `kv_pool_total_tokens` are published by nothing and sat here as dead alternates.
+#: `llamacpp:context_size` is the plain llama.cpp equivalent of the same number.
+KV_POOL = "halogen:kv_pool_positions|llamacpp:context_size"
 KV_RESERVED = "halogen:kv_pool_reserved_tokens"
 
 # halogen counts the prompt tokens the cache served in its own counter, while
 # llama.cpp's prompt_tokens_total counts only the tokens that MISSED it. That split
 # is why every cache ratio here is cached / (processed + cached), never cached /
 # processed — the same convention LLMPromptCacheCold in rules.yml uses.
-CACHE_CACHED = "halogen:prompt_tokens_cached_total|llamacpp:prompt_cache_tokens_cached_total"
+CACHE_CACHED = (
+    "halogen:prompt_tokens_cached_total|llamacpp:prompt_cache_tokens_cached_total"
+)
 
-DRAFT_ACCEPTED = "halogen:draft_tokens_accepted_total|llamacpp:draft_tokens_accepted_total"
+DRAFT_ACCEPTED = (
+    "halogen:draft_tokens_accepted_total|llamacpp:draft_tokens_accepted_total"
+)
 DRAFT_TOTAL = "halogen:draft_tokens_total|llamacpp:draft_tokens_total"
-DRAFT_REJECTED = "halogen:draft_tokens_rejected_total|llamacpp:draft_tokens_rejected_total"
+#: Nothing publishes a *rejected* draft counter (neither halogen nor llama.cpp), so the
+#: panel line for it is derived: proposed = accepted + rejected by definition, so
+#: rejected is the difference of the two counters that do exist. See DRAFT_REJECTED_RATE
+#: next to the other derived expressions, where `rate()` is available.
 
 SPEC_VERIFY = "llamacpp:speculative_time_seconds_total"
 SPEC_DECIDE = "llamacpp:speculative_decide_time_seconds_total"
@@ -251,9 +374,47 @@ RULE_CACHE = "llm:prompt_cache_hit_ratio"
 RULE_DRAFT = "llm:draft_acceptance_ratio"
 RULE_RUNNING = "llm:requests_running"
 RULE_QUEUED = "llm:requests_queued"
-RULE_TTFT = {p: "llm:time_to_first_token_seconds:p%d" % int(round(p * 100)) for p in (0.5, 0.9, 0.99)}
-RULE_TPOT = {p: "llm:time_per_output_token_seconds:p%d" % int(round(p * 100)) for p in (0.5, 0.9, 0.99)}
-RULE_E2E = {p: "llm:end_to_end_response_seconds:p%d" % int(round(p * 100)) for p in (0.5, 0.9, 0.99)}
+
+#: Windowed rollups (amd-frx): the same measurements folded over an hour, a day,
+#: a week, by the `llm-rollups` group in ../prometheus/recording_rules.yml. These
+#: are what make a history panel cheap: one stored series per window instead of a
+#: browser re-deriving a week of samples on every redraw.
+RULE_DECODE_MEAN_1H = "llm:decode_tokens_per_second:mean_1h"
+RULE_DECODE_MEAN_24H = "llm:decode_tokens_per_second:mean_24h"
+RULE_DECODE_MEAN_7D = "llm:decode_tokens_per_second:mean_7d"
+RULE_DECODE_MAX_24H = "llm:decode_tokens_per_second:max_24h"
+RULE_PROMPT_MEAN_24H = "llm:prompt_tokens_per_second:mean_24h"
+RULE_REQUESTS_MEAN_24H = "llm:requests_per_second:mean_24h"
+RULE_DECODED_TOKENS_1H = "llm:decoded_tokens:sum_1h"
+RULE_DECODED_TOKENS_24H = "llm:decoded_tokens:sum_24h"
+RULE_DECODED_TOKENS_7D = "llm:decoded_tokens:sum_7d"
+RULE_PROMPT_TOKENS_24H = "llm:prompt_tokens_processed:sum_24h"
+RULE_REQUESTS_DONE_24H = "llm:requests_completed:sum_24h"
+RULE_CACHE_MEAN_24H = "llm:prompt_cache_hit_ratio:mean_24h"
+RULE_DRAFT_MEAN_24H = "llm:draft_acceptance_ratio:mean_24h"
+RULE_KV_MAX_24H = "llm:kv_cache_usage_ratio:max_24h"
+RULE_SCRAPE_OK_24H = "llm:scrape_success_ratio:mean_24h"
+
+#: Prometheus' own self-scrape (the `prometheus` job in prometheus.yml): the
+#: history budget itself. Pinned to `job="prometheus"` rather than $job, because
+#: "how much history is this box keeping, and how much of the size budget has it
+#: used" must not empty out when $job is pinned to a model server.
+PROM_RETENTION_SECONDS = "prometheus_tsdb_retention_limit_seconds"
+PROM_RETENTION_BYTES = "prometheus_tsdb_retention_limit_bytes"
+PROM_BLOCKS_BYTES = "prometheus_tsdb_storage_blocks_bytes"
+PROM_HEAD_SERIES = "prometheus_tsdb_head_series"
+RULE_TTFT = {
+    p: "llm:time_to_first_token_seconds:p%d" % int(round(p * 100))
+    for p in (0.5, 0.9, 0.99)
+}
+RULE_TPOT = {
+    p: "llm:time_per_output_token_seconds:p%d" % int(round(p * 100))
+    for p in (0.5, 0.9, 0.99)
+}
+RULE_E2E = {
+    p: "llm:end_to_end_response_seconds:p%d" % int(round(p * 100))
+    for p in (0.5, 0.9, 0.99)
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -321,6 +482,60 @@ def rate(selector: str) -> str:
     return "sum(rate(%s[$__rate_interval]))" % selector
 
 
+def window_rate(names: str, window: str) -> str:
+    """`sum(rate(<sel>[<window>]))` — the mean rate over a *fixed* window.
+
+    The point-in-time answer to "how fast over the last <window>", which is what a
+    stat tile wants and what a timeseries of these becomes when Grafana evaluates
+    it across a range: the history of the average, not just the average. rate()
+    already divides by the window, so this is a per-second number however long the
+    window is, and it survives a counter reset (a restart shortens the measured
+    span rather than spiking).
+    """
+    return "sum(rate(%s[%s]))" % (sel(names), window)
+
+
+def window_rate_by(names: str, labels: str, window: str) -> str:
+    return "sum by (%s) (rate(%s[%s]))" % (labels, sel(names), window)
+
+
+def window_increase(names: str, window: str) -> str:
+    """`sum(increase(<sel>[<window>]))` — how much of a counter happened per window.
+
+    A total is the one thing a mean cannot give ("tokens decoded yesterday", not
+    "the average rate yesterday"), and increase() absorbs counter resets, which is
+    what makes these restart-safe where a lifetime ratio is not.
+    """
+    return "sum(increase(%s[%s]))" % (sel(names), window)
+
+
+def window_max(expr: str, window: str, step: str = "5m") -> str:
+    """`max_over_time(<expr>[window:step])` — the peak inside a window.
+
+    The inner expression has to be evaluated at `step`, so the peak is the peak of
+    that grid: 5m matches both the rollup group's interval and the width a
+    throughput line can meaningfully move in.
+    """
+    return "max_over_time(%s[%s:%s])" % (expr, window, step)
+
+
+def self_sel(names: str) -> str:
+    """Prometheus's own series (the `prometheus` job), deliberately not $job-filtered."""
+    return '{__name__=~"%s",job="prometheus"}' % names
+
+
+def window_cache_hit_ratio(window: str) -> str:
+    """Prompt-cache hit ratio pooled over a window: cached / (missed + cached).
+
+    The same llama.cpp convention as PROMPT_CACHE_HIT_RATIO (prompt_tokens_total
+    counts misses only), with increase() instead of rate() so the number is the
+    token-weighted answer for the window rather than a mean of ratios.
+    """
+    cached = window_increase(CACHE_CACHED, window)
+    missed = window_increase(PROMPT_TOKENS, window)
+    return "%s / clamp_min(%s + %s, 1)" % (cached, missed, cached)
+
+
 def rate_by(selector: str, labels: str) -> str:
     return "sum by (%s) (rate(%s[$__rate_interval]))" % (labels, selector)
 
@@ -335,49 +550,6 @@ def gauge_max(selector: str) -> str:
 
 def gauge_by(selector: str, labels: str) -> str:
     return "sum by (%s) (%s)" % (labels, selector)
-
-
-def by_model(expr: str) -> str:
-    """Group by one canonical `model` label, however the server spells it.
-
-    `label_replace(..., "model", "$1", "model_name", "(.+)")` copies vLLM's
-    `model_name` onto `model`; the `.+` matters — with `(.*)` an *absent* model_name
-    counts as a match on the empty string and silently blanks a perfectly good
-    `model` label (verified against a live Prometheus: llama.cpp series served by
-    file_sd labels came out as "unknown"). The second `label_replace` then turns
-    "neither label anywhere" into the literal `unknown` so the legend is never blank.
-
-    `model_filter_union()` explains why the $model filter has to be applied to both
-    spellings and why that cannot be done with one selector.
-    """
-    normalized = (
-        'label_replace(label_replace(%s, "model", "$1", "model_name", "(.+)"), '
-        '"model", "unknown", "model", "^$")' % expr
-    )
-    return "sum by (model) (%s)" % normalized
-
-
-def by_model_rate(names: str) -> str:
-    """Rate over a token counter, grouped by the canonical model, filtered by $model.
-
-    The filter is `A{model=~"$model"} or A{model_name=~"$model"}`: PromQL has no
-    "this label OR that label" matcher, and `label_match()` (which could do it after
-    normalization) is a 3.x extended function that the queried Prometheus has to be
-    started with --enable-feature=promql-extended-functions to know about, which a
-    dashboard may not assume. `or` unions the two branches and keeps the left-hand
-    value where a series matches both, so:
-
-      * $model = All (.*)  -> both branches match everything, union is the whole set;
-      * a llama.cpp `model` -> left branch matches it;
-      * a vLLM `model_name` -> right branch matches it.
-
-    With one branch instead of two, picking a specific model silently drops whichever
-    spelling it does not know — the kind of empty panel that gets blamed on the server.
-    """
-    grouped = "sum by (job, instance, model, model_name) (rate(%s[$__rate_interval]))"
-    left = grouped % sel(names)
-    right = grouped % sel(names, model_label="model_name")
-    return by_model("%s or %s" % (left, right))
 
 
 def p_label(probability: float) -> str:
@@ -425,7 +597,30 @@ def family_count(tail: str, *stems: str) -> str:
     may carry neither model spelling, and this panel is about the server, not the
     model).
     """
-    return "count by (instance, job) (%s)" % sel(suffix("|".join(stems), tail), model=False)
+    return "count by (instance, job) (%s)" % sel(
+        suffix("|".join(stems), tail), model=False
+    )
+
+
+def window_max_of_rate(names: str, window: str, step: str = "5m") -> str:
+    """The raw twin of an `llm:*:max_24h` rule: the peak windowed rate in a window.
+
+    Needs a subquery step because the inner `sum(rate(...))` is computed, not stored
+    — the same reason `host:gtt_usage_ratio:max_2d` writes `[2d:15m]`.
+    """
+    return window_max("sum(rate(%s[5m]))" % sel(names), window, step)
+
+
+def window_window_mean(expr: str, window: str, step: str = "5m") -> str:
+    """Mean of a computed expression over a window (subquery, so the step is required)."""
+    return "avg_over_time(%s[%s:%s])" % (expr, window, step)
+
+
+def window_draft_ratio(window: str) -> str:
+    """Speculative-decode acceptance pooled over a window (accepted / proposed)."""
+    return ratio(
+        window_increase(DRAFT_ACCEPTED, window), window_increase(DRAFT_TOTAL, window)
+    )
 
 
 def ratio(numerator: str, denominator: str) -> str:
@@ -443,6 +638,12 @@ PROMPT_CACHE_HIT_RATIO = ratio(
 DRAFT_ACCEPT_RATIO = ratio(rate(sel(DRAFT_ACCEPTED)), rate(sel(DRAFT_TOTAL)))
 #: Draft tokens spent per token accepted — the multiplier on wasted draft work.
 DRAFT_PER_ACCEPTED = ratio(rate(sel(DRAFT_TOTAL)), rate(sel(DRAFT_ACCEPTED)))
+#: Draft tokens rejected, derived (see DRAFT_TOTAL): proposed - accepted, clamped at 0
+#: so a counter reset on one of the two cannot draw a negative rate.
+DRAFT_REJECTED_RATE = "clamp_min(%s - %s, 0)" % (
+    rate(sel(DRAFT_TOTAL)),
+    rate(sel(DRAFT_ACCEPTED)),
+)
 #: Structured-output share of requests.
 STRUCTURED_SHARE = ratio(rate(sel(REQUESTS_STRUCTURED)), rate(sel(REQUESTS_TOTAL)))
 #: (verify + decide + estimated-draft - actual-draft) / verify. Below 1, speculation
@@ -466,11 +667,26 @@ LEGEND_TABLE = {
     "placement": "bottom",
     "showLast": True,
 }
-LEGEND_LIST = {"calcs": ["lastNotNull"], "displayMode": "list", "placement": "right", "showLast": True}
+LEGEND_LIST = {
+    "calcs": ["lastNotNull"],
+    "displayMode": "list",
+    "placement": "right",
+    "showLast": True,
+}
 
 
-def axis(ref, *, unit=None, decimals=None, placement=None, label=None, dashed=False,
-         color=None, min=None, max=None):
+def axis(
+    ref,
+    *,
+    unit=None,
+    decimals=None,
+    placement=None,
+    label=None,
+    dashed=False,
+    color=None,
+    min=None,
+    max=None,
+):
     """A per-query field override, matched on the target's `refId`.
 
     Why overrides instead of splitting the panel: several series with *different
@@ -497,17 +713,46 @@ def axis(ref, *, unit=None, decimals=None, placement=None, label=None, dashed=Fa
     if max is not None:
         properties.append({"id": "max", "value": max})
     if dashed:
-        properties.append({"id": "custom.lineStyle",
-                           "value": {"dash": [10, 10], "fill": "dash"}})
+        properties.append(
+            {"id": "custom.lineStyle", "value": {"dash": [10, 10], "fill": "dash"}}
+        )
     if color is not None:
-        properties.append({"id": "color",
-                           "value": {"fixedColor": color, "mode": "fixed"}})
+        properties.append(
+            {"id": "color", "value": {"fixedColor": color, "mode": "fixed"}}
+        )
     return {
         "id": "byFrameRefID",
         "matcher": {"id": "byFrameRefID", "options": ref},
         "properties": properties,
     }
 
+
+def assign_refs(targets: list[dict]) -> list[dict]:
+    """Number a panel's queries A, B, C... in the order they are listed.
+
+    refIds have to be unique inside a panel: two queries sharing one is a hard error
+    in Grafana ("multiple queries using the same RefId") and, for the panels this
+    generator writes, the duplicate would also be the thing `axis()` overrides and
+    the description try to point at. Call sites pass a ref only where the letter is
+    load-bearing (an `axis()` override names one); the rest are filled in by
+    position, so adding a query to a panel cannot collide with its neighbours.
+
+    Called from `_panel` *before* `describe()`, so the documented PromQL block always
+    carries the refIds the panel actually sends.
+    """
+    taken = {t["refId"] for t in targets if t.get("refId")}
+    spare = [letter for letter in REF_IDS if letter not in taken]
+    for item in targets:
+        if not item.get("refId"):
+            if not spare:
+                raise ValueError(
+                    "a panel cannot have more queries than %d refIds" % len(REF_IDS)
+                )
+            item["refId"] = spare.pop(0)
+    refs = [item.get("refId") for item in targets]
+    if len(set(refs)) != len(refs):
+        raise ValueError("duplicate refIds in one panel: %s" % refs)
+    return targets
 
 
 def describe(notes: str, targets: list[dict]) -> str:
@@ -518,21 +763,35 @@ def describe(notes: str, targets: list[dict]) -> str:
     """
     lines = [notes.strip(), "", "PromQL sent by this panel:", "", "```promql"]
     for item in targets:
-        lines.append("%s: %s" % (item.get("refId", "A"), item.get("expr", "")))
+        # Strict on purpose: a missing refId here means `assign_refs` was skipped, and
+        # defaulting it would write a description that documents a query the panel
+        # does not send.
+        lines.append("%s: %s" % (item["refId"], item.get("expr", "")))
     lines.append("```")
     return "\n".join(lines)
 
 
-def target(expr: str, legend: str, ref: str = "A") -> dict:
+def target(expr: str, legend: str, ref: str | None = None, step: str | None = None) -> dict:
+    """One panel query.
+
+    `step` is the panel's minimum step. It defaults to the scrape interval because a
+    finer step cannot invent resolution the TSDB does not have — but a *coarser* one
+    is sometimes the honest number: a 24 h moving average drawn at 15 s resolution
+    plots 1 500 points of the same average and pays for a day of samples per point
+    to do it. Panels that average over hours set 5m and say so.
+    """
     return {
         "datasource": DATASOURCE,
         "editorMode": "code",
         "expr": expr,
         "legendFormat": legend,
         "range": True,
+        # Left empty unless the letter matters; `assign_refs` fills the blanks in by
+        # position. Key order here is the key order in the committed JSON.
         "refId": ref,
-        # Min step == the scrape interval (see SCRAPE_INTERVAL).
-        "interval": SCRAPE_INTERVAL,
+        # Min step == the scrape interval (see SCRAPE_INTERVAL) unless the panel's
+        # own window makes a coarser step the honest one.
+        "interval": step or SCRAPE_INTERVAL,
         "intervalFactor": 1,
     }
 
@@ -577,11 +836,40 @@ def _defaults(*, unit, decimals, min_, max_, thresholds, band, no_value):
     return defaults
 
 
-def _panel(kind, title, notes, targets, *, pid, grid, unit="short", decimals=None,
-           min=None, max=None, thresholds=None, band=False, no_value=None,
-           legend=None, repeat=None, max_per_row=2, overrides=None):
-    pid = pid or next(FREE_IDS)
+def _panel(
+    kind,
+    title,
+    notes,
+    targets,
+    *,
+    pid,
+    grid,
+    unit="short",
+    decimals=None,
+    min=None,
+    max=None,
+    thresholds=None,
+    band=False,
+    no_value=None,
+    legend=None,
+    repeat=None,
+    max_per_row=2,
+    overrides=None,
+):
+    pid = take_pid(title, pid)
     w, h = grid
+    assign_refs(targets)
+    # An override that names a refId no query has renders as nothing at all: Grafana
+    # does not warn, the series just keeps the default unit/axis. Fail the build
+    # instead — this is the same class of silent breakage as a stale description.
+    refs = {t["refId"] for t in targets}
+    for override in overrides or []:
+        matcher = override.get("matcher") or {}
+        if matcher.get("id") == "byFrameRefID" and matcher.get("options") not in refs:
+            raise ValueError(
+                "panel %r has an axis override for refId %r but its queries are %s"
+                % (title, matcher.get("options"), sorted(refs))
+            )
     body: dict = {
         "id": pid,
         "type": kind,
@@ -591,8 +879,15 @@ def _panel(kind, title, notes, targets, *, pid, grid, unit="short", decimals=Non
         "gridPos": {"h": h, "w": w, "x": 0, "y": 0},
         "targets": targets,
         "fieldConfig": {
-            "defaults": _defaults(unit=unit, decimals=decimals, min_=min, max_=max,
-                                  thresholds=thresholds, band=band, no_value=no_value),
+            "defaults": _defaults(
+                unit=unit,
+                decimals=decimals,
+                min_=min,
+                max_=max,
+                thresholds=thresholds,
+                band=band,
+                no_value=no_value,
+            ),
             "overrides": overrides or [],
         },
     }
@@ -615,7 +910,9 @@ def _panel(kind, title, notes, targets, *, pid, grid, unit="short", decimals=Non
             "tooltip": {"mode": "multi", "sort": "desc"},
         }
         if thresholds and len(thresholds) > 1 and not band:
-            body["fieldConfig"]["defaults"]["custom"]["thresholdsStyle"] = {"mode": "line"}
+            body["fieldConfig"]["defaults"]["custom"]["thresholdsStyle"] = {
+                "mode": "line"
+            }
     if repeat:
         # Repeat-by-variable: one clone of this panel per selected value of $repeat.
         body["repeat"] = repeat
@@ -624,25 +921,64 @@ def _panel(kind, title, notes, targets, *, pid, grid, unit="short", decimals=Non
     return body
 
 
-def ts(title, notes, targets, *, pid=None, unit="short", decimals=None, min=None,
-       max=None, thresholds=None, band=False, no_value=None, legend=None,
-       w=12, h=8, repeat=None, max_per_row=2, overrides=None):
+def ts(
+    title,
+    notes,
+    targets,
+    *,
+    pid=None,
+    unit="short",
+    decimals=None,
+    min=None,
+    max=None,
+    thresholds=None,
+    band=False,
+    no_value=None,
+    legend=None,
+    w=12,
+    h=8,
+    repeat=None,
+    max_per_row=2,
+    overrides=None,
+):
     """A time-series panel."""
-    return _panel("timeseries", title, notes, targets, pid=pid, grid=(w, h), unit=unit,
-                  decimals=decimals, min=min, max=max, thresholds=thresholds, band=band,
-                  no_value=no_value, legend=legend, repeat=repeat, max_per_row=max_per_row,
-                  overrides=overrides)
+    return _panel(
+        "timeseries",
+        title,
+        notes,
+        targets,
+        pid=pid,
+        grid=(w, h),
+        unit=unit,
+        decimals=decimals,
+        min=min,
+        max=max,
+        thresholds=thresholds,
+        band=band,
+        no_value=no_value,
+        legend=legend,
+        repeat=repeat,
+        max_per_row=max_per_row,
+        overrides=overrides,
+    )
 
 
 def stat(title, notes, targets, *, w=4, h=4, **kwargs):
     """A single-number panel (instant queries, no range)."""
-    return _panel("stat", title, notes, targets, pid=kwargs.pop("pid", None), grid=(w, h),
-                  **kwargs)
+    return _panel(
+        "stat",
+        title,
+        notes,
+        targets,
+        pid=kwargs.pop("pid", None),
+        grid=(w, h),
+        **kwargs,
+    )
 
 
-def markdown(title, text, *, w=24, h=2):
+def markdown(title, text, *, w=24, h=2, pid=None):
     return {
-        "id": next(FREE_IDS),
+        "id": take_pid(title, pid),
         "type": "text",
         "title": title,
         "description": text,
@@ -669,8 +1005,8 @@ def query_variable(name, label, query, *, hint, refresh=2):
     plain series selector. No `sum(...)`, no `label_replace(...)`, no commas: anything
     fancier fails to parse and the variable silently offers no values, which is how a
     dashboard ends up filtering on an empty string and rendering nothing anywhere.
-    Normalizing label names is therefore done *in the panels* (see by_model()) and in
-    the recording rules, not in the variable query.
+    Normalizing label names is therefore done in the recording rules (which fold
+    vLLM's `model_name` onto `model`) rather than in the variable query.
     """
     return {
         "name": name,
@@ -692,6 +1028,40 @@ def query_variable(name, label, query, *, hint, refresh=2):
         "sort": 1,
         "description": hint,
     }
+
+
+def custom_variable(name, label, choices, *, chosen, hint):
+    """A fixed list the reader picks from (no query, so nothing can fail to resolve).
+
+    Used for the rollup window: a query variable would have to ask Prometheus for
+    durations it does not have, and a free-text box is a dashboard where a typo
+    renders as an empty panel. The list is also what `check_monitoring.py` reads to
+    hold the widest window against the retention the compose file defaults to.
+    """
+    return {
+        "name": name,
+        "label": label,
+        "type": "custom",
+        "query": ",".join(choices),
+        "current": {"text": chosen, "value": chosen, "selected": True},
+        "options": [{"text": c, "value": c, "selected": c == chosen} for c in choices],
+        "hide": 0,
+        "includeAll": False,
+        "multi": False,
+        "definition": ",".join(choices),
+        "refresh": 0,
+        "regex": "",
+        "skipUrlSync": False,
+        "sort": 0,
+        "description": hint,
+    }
+
+
+#: Durations the History row may average over. Every entry has to be shorter than
+#: PROMETHEUS_RETENTION_TIME (compose.yaml); 7d is the widest one shipped because a
+#: week is the horizon at which "yesterday was weird" becomes "this box has a
+#: pattern", and it is a tenth of the retention the stack defaults to.
+WINDOW_CHOICES = ["5m", "15m", "1h", "6h", "24h", "7d"]
 
 
 VARIABLES = [
@@ -720,34 +1090,53 @@ VARIABLES = [
         "Scrape job",
         "label_values(up, job)",
         hint="Which scrape path produced a series: 'llm-server' is the direct target, "
-             "'llm-server-via-proxy' is monitor/serve.py's passthrough (by default it "
-             "carries only llm_monitor_* — see monitoring/README.md, 'The two llm "
-             "scrape jobs'). 'prometheus' is the self-scrape and has no model series, "
-             "so leaving it selected is harmless. Derived from up, so the list is empty "
-             "rather than wrong when nothing is being scraped.",
+        "'llm-server-via-proxy' is monitor/serve.py's passthrough (by default it "
+        "carries only llm_monitor_* — see monitoring/README.md, 'The two llm "
+        "scrape jobs'). 'prometheus' is the self-scrape and has no model series, "
+        "so leaving it selected is harmless. Derived from up, so the list is empty "
+        "rather than wrong when nothing is being scraped.",
     ),
     query_variable(
         "instance",
         "Instance",
         'label_values(up{job=~"$job"}, instance)',
         hint="host:port of a scrape target, from up/instance. monitor/serve.py's Grafana "
-             "deep links set var-instance to the upstream's host:port, which is the "
-             "mapping that makes a link from the live page land on the right series. "
-             "Declared after $job so it narrows with it.",
+        "deep links set var-instance to the upstream's host:port, which is the "
+        "mapping that makes a link from the live page land on the right series. "
+        "Declared after $job so it narrows with it.",
     ),
     query_variable(
         "model",
         "Model",
         'label_values({__name__=~"'
-        + DECODE_TOKENS + "|" + PROMPT_TOKENS + "|" + RULE_DECODE
+        + DECODE_TOKENS
+        + "|"
+        + PROMPT_TOKENS
+        + "|"
+        + RULE_DECODE
         + '"}, model)',
         hint="Only servers that are labelled show up: llama.cpp does not label its own "
-             "metrics at all (the `model` here normally comes from "
-             "monitoring/prometheus/targets/llm-servers.json file_sd labels), and vLLM's "
-             "own label is model_name, which the llm:* recording rules normalize onto "
-             "`model` — hence the alias in the selector. An empty list means no model "
-             "label anywhere: All (.*) then keeps every panel working, and the per-model "
-             "panel draws one line called 'unknown'.",
+        "metrics at all (the `model` here normally comes from "
+        "monitoring/prometheus/targets/llm-servers.json file_sd labels), and vLLM's "
+        "own label is model_name, which the llm:* recording rules normalize onto "
+        "`model` — hence the alias in the selector. An empty list means no model "
+        "label anywhere: All (.*) then keeps every panel working.",
+    ),
+    custom_variable(
+        "window",
+        "Rollup window",
+        WINDOW_CHOICES,
+        chosen="1h",
+        hint=(
+            "How wide the History row's windows are. Every value here is a PromQL "
+            "duration spliced straight into rate() / increase(), and the widest one is "
+            "the ceiling on how far back a panel can average - so it, and every literal "
+            "window in a panel or a recording rule, has to stay inside "
+            "PROMETHEUS_RETENTION_TIME, which is what check_monitoring.py enforces. A "
+            "window longer than retention does not error: it silently averages only the "
+            "part still on disk, which is the most misleading failure this dashboard "
+            "could have."
+        ),
     ),
 ]
 
@@ -767,15 +1156,17 @@ def overview_row():
         stat(
             "requests in flight",
             "Instant gauges, no rate(): `sum(llamacpp:requests_processing)` and "
-            "`sum(llamacpp:requests_deferred)` (halogen's `requests_running` / "
-            "`requests_queued` spellings match too).\n\ndeferred > 0 means arrivals are "
+            "`sum(llamacpp:requests_deferred)` (halogen publishes these two under the "
+            "llama.cpp names — it has no `halogen:` spelling of either).\n\ndeferred > 0 "
+            "means arrivals are "
             "waiting for a slot — the earliest sign the KV budget is the limit."
             + CAVEAT_NO_DATA,
             [
                 target(gauge_sum(sel(REQUESTS_PROCESSING)), "processing"),
                 target(gauge_sum(sel(REQUESTS_DEFERRED)), "deferred"),
             ],
-            w=4, h=5,
+            w=4,
+            h=5,
         ),
         stat(
             "KV cache used",
@@ -783,7 +1174,12 @@ def overview_row():
             "LLMKVCachePressure alerts read, so this tile and a page cannot disagree. "
             "1 = 100 % of the pool.",
             [target(gauge_max(sel(KV_RATIO)), "usage")],
-            unit="percentunit", decimals=1, min=0, max=1, w=4, h=5,
+            unit="percentunit",
+            decimals=1,
+            min=0,
+            max=1,
+            w=4,
+            h=5,
             thresholds=KV_BANDS,
         ),
         stat(
@@ -791,7 +1187,10 @@ def overview_row():
             "Instant read of the same rate() as the decode panel below: windowed "
             "throughput right now, not a lifetime average.",
             [target(rate(sel(DECODE_TOKENS)), "decode tok/s")],
-            unit="short", decimals=1, w=4, h=5,
+            unit="short",
+            decimals=1,
+            w=4,
+            h=5,
         ),
         stat(
             "prompt-cache hit ratio",
@@ -799,10 +1198,17 @@ def overview_row():
             "prompt_tokens_total counts cache MISSES, hence the `+ cached` in the "
             "denominator.",
             [target(PROMPT_CACHE_HIT_RATIO, "cache hit ratio")],
-            unit="percentunit", decimals=1, min=0, max=1, w=4, h=5,
-            thresholds=[{"color": "red", "value": None},
-                        {"color": "yellow", "value": 0.5},
-                        {"color": "green", "value": 0.8}],
+            unit="percentunit",
+            decimals=1,
+            min=0,
+            max=1,
+            w=4,
+            h=5,
+            thresholds=[
+                {"color": "red", "value": None},
+                {"color": "yellow", "value": 0.5},
+                {"color": "green", "value": 0.8},
+            ],
         ),
         stat(
             "draft acceptance",
@@ -810,7 +1216,13 @@ def overview_row():
             "Speculative decode row. No data simply means this server is not speculating "
             "(no draft counters) — not that speculation is failing.",
             [target(DRAFT_ACCEPT_RATIO, "accept ratio")],
-            unit="percentunit", decimals=1, min=0, max=1, w=4, h=5,
+            pid=24,
+            unit="percentunit",
+            decimals=1,
+            min=0,
+            max=1,
+            w=4,
+            h=5,
             no_value="no speculative decode on this server",
         ),
         stat(
@@ -819,7 +1231,11 @@ def overview_row():
             "build exposes no time_to_first_token histogram, so the server's own log is "
             "the only latency source (see the Latency row).",
             [target(quantile(0.99, _TTFT), "p99")],
-            unit="s", decimals=2, w=4, h=5, no_value="no histogram on this server",
+            unit="s",
+            decimals=2,
+            w=4,
+            h=5,
+            no_value="no histogram on this server",
         ),
         ts(
             "Decode throughput (tok/s)",
@@ -835,15 +1251,25 @@ def overview_row():
             "process and knows nothing about the window;\n"
             "* **(rule)** — the `llm:decode_tokens_per_second` alias.\n\n"
             "This is the panel that answers 'what was decode throughput at 03:00', which "
-            "the bespoke page could not answer at all." + CAVEAT_RATE + CAVEAT_RULE
+            "the bespoke page could not answer at all."
+            + CAVEAT_RATE
+            + CAVEAT_RULE
             + CAVEAT_VARS,
             [
                 target(rate(sel(DECODE_TOKENS)), "decode tok/s (all selected)"),
-                target(rate_by(sel(DECODE_TOKENS), "instance, job"), "{{instance}} {{job}}"),
-                target(gauge_sum(sel(DECODE_GAUGE)), "server gauge (avg since last scrape)"),
+                target(
+                    rate_by(sel(DECODE_TOKENS), "instance, job"), "{{instance}} {{job}}"
+                ),
+                target(
+                    gauge_sum(sel(DECODE_GAUGE)), "server gauge (avg since last scrape)"
+                ),
                 target(var(RULE_DECODE), "llm:decode_tokens_per_second (rule)"),
             ],
-            pid=1, unit="short", decimals=2, w=12, h=8,
+            pid=1,
+            unit="short",
+            decimals=2,
+            w=12,
+            h=8,
         ),
         ts(
             "Prompt throughput (tok/s)",
@@ -856,28 +1282,41 @@ def overview_row():
             "panel, and leaves with it." + CAVEAT_RATE + CAVEAT_RULE,
             [
                 target(rate(sel(PROMPT_TOKENS)), "prompt tok/s (all selected)"),
-                target(rate_by(sel(PROMPT_TOKENS), "instance, job"), "{{instance}} {{job}}"),
-                target(gauge_sum(sel(PROMPT_GAUGE)), "server gauge (avg since last scrape)"),
+                target(
+                    rate_by(sel(PROMPT_TOKENS), "instance, job"), "{{instance}} {{job}}"
+                ),
+                target(
+                    gauge_sum(sel(PROMPT_GAUGE)), "server gauge (avg since last scrape)"
+                ),
                 target(var(RULE_PROMPT), "llm:prompt_tokens_per_second (rule)"),
             ],
-            pid=2, unit="short", decimals=1, w=12, h=8,
+            pid=2,
+            unit="short",
+            decimals=1,
+            w=12,
+            h=8,
         ),
         ts(
             "Requests running / queued",
-            "Gauges, not rates: running vs deferred vs configured slot capacity. "
+            "Gauges, not rates: running vs deferred vs the stall itself. "
             "`deferred > 0` for minutes is queueing, and LLMQueueing in rules.yml fires "
             "on this same expression, so the panel and the alert cannot disagree.\n\n"
-            "Deferred > 0 while running < slot capacity is a scheduling stall; deferred "
-            "> 0 at full slots is plain saturation. Different incidents, and this is the "
-            "panel that tells them apart.",
+            "The third line is halogen's `kv_pool_waiting_for_room`: 1 while a request "
+            "waits for room in the KV pool. deferred > 0 with that line at 1 is the KV "
+            "budget being the limit; deferred > 0 with it at 0 is something else stalling "
+            "the scheduler. There is no slot-capacity series to plot — halogen keeps slot "
+            "counts in /props, not in /metrics — so the stall is drawn instead of the "
+            "ceiling it is measured against.",
             [
                 target(gauge_sum(sel(REQUESTS_PROCESSING)), "running"),
                 target(gauge_sum(sel(REQUESTS_DEFERRED)), "queued"),
-                target(gauge_sum(sel(SLOT_CAPACITY)), "slot capacity (halogen)"),
+                target(gauge_max(sel(QUEUE_WAITING)), "waiting for KV room (halogen)"),
                 target(var(RULE_RUNNING), "llm:requests_running (rule)"),
                 target(var(RULE_QUEUED), "llm:requests_queued (rule)"),
             ],
-            pid=5, w=8, h=8,
+            pid=5,
+            w=8,
+            h=8,
         ),
         ts(
             "Requests / s and structured share",
@@ -886,48 +1325,21 @@ def overview_row():
             "(`halogen:structured_requests_total / halogen:requests_total`).\n\n"
             "The structured share is the useful one when a client changes behaviour: a "
             "schema jump usually precedes a decode-rate change, because grammar-"
-            "constrained decoding does not overlap speculation well." + CAVEAT_RATE
+            "constrained decoding does not overlap speculation well."
+            + CAVEAT_RATE
             + CAVEAT_CLAMP,
             [
                 target(rate(sel(REQUESTS_TOTAL)), "requests/s"),
-                target(rate_by(sel(REQUESTS_TOTAL), "instance, job"), "{{instance}} {{job}}"),
+                target(
+                    rate_by(sel(REQUESTS_TOTAL), "instance, job"),
+                    "{{instance}} {{job}}",
+                ),
                 target(STRUCTURED_SHARE, "share under a JSON schema"),
                 target(var(RULE_REQUESTS), "llm:requests_per_second (rule)"),
             ],
-            unit="reqps", w=8, h=8,
-        ),
-        ts(
-            "Decode tok/s per model",
-            "The per-model comparison the bespoke page could not do. `label_replace` "
-            "folds llama.cpp's file_sd `model` label and vLLM's `model_name` onto one "
-            "`model` label and turns 'no model label at all' into the literal `unknown`, "
-            "so the legend is never blank. The $model filter is applied to both spellings "
-            "(`{model=~'$model'} or {model_name=~'$model'}`) because PromQL cannot match "
-            "'either of two labels' in one selector and `label_match()` is an optional "
-            "3.x extension this box does not assume. The `(rule)` line is the same answer "
-            "computed by Prometheus, where the rules normalize the label once.\n\n"
-            "On one llama.cpp server with no model label you get exactly one line called "
-            "'unknown' — correct, not broken. Name the model in the labels of "
-            "monitoring/prometheus/targets/llm-servers.json to get a name here.",
-            [
-                target(by_model_rate(DECODE_TOKENS), "{{model}}"),
-                # The alias is already a rate (a recorded gauge), so it is grouped,
-                # not rate()'d again — rate() of a gauge is empty, not a slower rate.
-                # by_model() reuses the same unknown-label fallback as the raw line.
-                target(by_model(var(RULE_DECODE)), "{{model}} (rule)"),
-            ],
-            unit="short", decimals=2, w=8, h=8,
-        ),
-        ts(
-            "Decode tok/s — one panel per $instance",
-            "Repeat-by-variable: Grafana clones this panel for each selected $instance "
-            "value, so N servers get N charts instead of N lines competing for one axis. "
-            "The expression is the per-target rate, so a clone carries its own instance "
-            "only.\n\n"
-            "Pin $instance to specific targets for a guaranteed one-panel-per-server; "
-            "with All selected the clone set is whatever Grafana expands All to.",
-            [target(rate_by(sel(DECODE_TOKENS), "instance, job"), "{{instance}} {{job}}")],
-            unit="short", decimals=2, w=12, h=7, repeat="instance", max_per_row=2,
+            unit="reqps",
+            w=8,
+            h=8,
         ),
         ts(
             "Lifetime tok/s — the arithmetic the old tile did",
@@ -939,14 +1351,408 @@ def overview_row():
             "start, and a restart silently re-bases it — which is the entire argument "
             "for the panels above." + CAVEAT_CLAMP,
             [
-                target(ratio(gauge_sum(sel(DECODE_TOKENS)), gauge_sum(sel(DECODE_SECONDS))),
-                       "tokens/s since server start"),
+                target(
+                    ratio(
+                        gauge_sum(sel(DECODE_TOKENS)), gauge_sum(sel(DECODE_SECONDS))
+                    ),
+                    "tokens/s since server start",
+                ),
                 target(rate(sel(DECODE_TOKENS)), "windowed rate for comparison"),
             ],
-            unit="short", decimals=2, w=12, h=7,
+            unit="short",
+            decimals=2,
+            w=12,
+            h=7,
         ),
     ]
     return ("Overview", panels, False)
+
+
+def history_row():
+    """The history row (amd-frx): averages over hours and days, not just right now.
+
+    Panel ids are pinned to the 70-89 block on purpose. `FREE_IDS` hands out ids in
+    definition order, so a row inserted second would otherwise renumber every panel
+    in the five rows below it — a diff of forty unchanged panels, and any bookmarked
+    `viewPanel=` link to them, silently moved. 1-7 stay ADR 0001 C4's; 70-89 are
+    this row's.
+    """
+    panels = [
+        markdown(
+            "What 'history' means on this box",
+            "Everything above this line answers *right now*. This row answers **how "
+            "fast was it yesterday, how much work happened last week, was the cache "
+            "warm overnight** — the same measurements folded over a window.\n\n"
+            "* **Where the numbers come from.** Each panel plots the raw expression "
+            "(computed at query time from the counters) and the pre-computed "
+            "`llm:*:mean_1h|mean_24h|sum_24h` rollups from "
+            "`monitoring/prometheus/recording_rules.yml` beside them, for the same "
+            "reason the other rows plot `(rule)` aliases: a panel must still render "
+            "where the rules have never run.\n\n"
+            "* **A mean over a window is a mean over the samples that exist.** Six "
+            "hours of a 24 h window with the server down contributes nothing to the "
+            "mean, so these read *mean throughput while it was up*. That is the useful "
+            "meaning; a mean that charged downtime to the average would say the box got "
+            "slower. `llm:scrape_success_ratio:mean_24h`, in the next chart down, is "
+            "how you tell the two apart.\n\n"
+            "* **Totals use `increase()`, not a mean times a window.** A restart "
+            "shortens the measured span instead of double-counting it, which is the "
+            "failure mode the 'Lifetime tok/s' tile above has.\n\n"
+            "* **Nothing here looks further back than retention allows.** Every window "
+            "in this row, and the widest value `$window` offers, is smaller than "
+            "`PROMETHEUS_RETENTION_TIME` (default 30 d), and `check_monitoring.py` "
+            "fails the build when that stops being true — because a window longer than "
+            "retention does not error, it silently averages whatever is left on disk. "
+            "The three tiles at the bottom of this row are that budget itself.",
+            w=24,
+            h=6,
+            pid=70,
+        ),
+        stat(
+            "decode tok/s · mean last hour",
+            "Mean generation throughput over the last hour: rate() over a fixed 1 h "
+            "window, which divides by its own window and so is a per-second number, "
+            "beside the `llm:decode_tokens_per_second:mean_1h` rollup that computes the "
+            "same thing inside Prometheus every 5m.\n\n"
+            "Where the two differ, the rollup is the lagging one: it folds the 5 m "
+            "aliases and is rewritten every 5 m, while the raw line is evaluated exactly "
+            "now.",
+            [
+                target(window_rate(DECODE_TOKENS, "1h"), "raw: 1 h mean"),
+                target(
+                    var(RULE_DECODE_MEAN_1H),
+                    "llm:decode_tokens_per_second:mean_1h (rule)",
+                ),
+            ],
+            pid=71,
+            unit="short",
+            decimals=1,
+            w=4,
+            h=5,
+        ),
+        stat(
+            "decode tok/s · mean last day",
+            "The same fold over 24 h: a full day of decode averaged into one number, the "
+            "night included. Compare with the 1 h tile to its left — a day mean well "
+            "below the hour mean means the box has been getting busier (or slower) since "
+            "midnight, not that anything is wrong now.\n\n"
+            "Idle hours *are* in this mean (an idle server still reports a 0 rate); hours "
+            "with no samples at all are not, which is what the note at the top of the row "
+            "is about.",
+            [
+                target(window_rate(DECODE_TOKENS, "24h"), "raw: 24 h mean"),
+                target(
+                    var(RULE_DECODE_MEAN_24H),
+                    "llm:decode_tokens_per_second:mean_24h (rule)",
+                ),
+            ],
+            pid=72,
+            unit="short",
+            decimals=1,
+            w=4,
+            h=5,
+        ),
+        stat(
+            "decode tok/s · mean last week",
+            "Seven days: the box's steady state rather than today's mood. This is the "
+            "number to quote when deciding whether a change (a quantisation, a different "
+            "slot count, another model) actually helped.\n\n"
+            "The rule side reads a 10 m-step subquery rather than every 30 s sample "
+            "(`[7d:10m]`), so it is a sampled mean — accurate to far less than the "
+            "variation worth noticing on a week's scale, and bounded in cost the same "
+            "way `host:gtt_usage_ratio:max_2d` is. On a Prometheus that just lost its "
+            "TSDB the rule side stays empty until the 10 m grid has a point (~10 min), "
+            "and is only a week-representative once it has a week.",
+            [
+                target(window_rate(DECODE_TOKENS, "7d"), "raw: 7 d mean"),
+                target(
+                    var(RULE_DECODE_MEAN_7D),
+                    "llm:decode_tokens_per_second:mean_7d (rule)",
+                ),
+            ],
+            pid=73,
+            unit="short",
+            decimals=1,
+            w=4,
+            h=5,
+        ),
+        stat(
+            "decode tok/s · peak last day",
+            "The best five minutes of the last day: "
+            "`max_over_time(sum(rate(<decode tokens>[5m]))[24h:5m])` and the "
+            "`llm:decode_tokens_per_second:max_24h` rollup. A mean cannot answer 'what "
+            "is this box capable of', and a capacity decision taken from a mean is a "
+            "decision taken against the idle half of the day.",
+            [
+                target(
+                    window_max_of_rate(DECODE_TOKENS, "24h"),
+                    "raw: 24 h peak of the 5 m rate",
+                ),
+                target(
+                    var(RULE_DECODE_MAX_24H),
+                    "llm:decode_tokens_per_second:max_24h (rule)",
+                ),
+            ],
+            pid=74,
+            unit="short",
+            decimals=1,
+            w=4,
+            h=5,
+        ),
+        stat(
+            "tokens decoded · last day",
+            "Not a rate: how much generation actually happened — "
+            "`sum(increase(<decode tokens>[24h]))` plus the `llm:decoded_tokens:sum_24h` "
+            "rollup. The throughput tiles say how fast, this says how much, and the pair "
+            "is what a cost or energy estimate needs.\n\n"
+            "`increase()` absorbs counter resets, so a restart overnight costs the hours "
+            "it was down and nothing else (unlike dividing two lifetime counters).",
+            [
+                target(window_increase(DECODE_TOKENS, "24h"), "raw: tokens in 24 h"),
+                target(
+                    var(RULE_DECODED_TOKENS_24H), "llm:decoded_tokens:sum_24h (rule)"
+                ),
+            ],
+            pid=75,
+            unit="short",
+            decimals=0,
+            w=4,
+            h=5,
+        ),
+        stat(
+            "requests · last day",
+            "Completed requests in the last 24 h, from the same counter the requests/s "
+            "panels rate, plus the `llm:requests_completed:sum_24h` rollup. Divide the "
+            "tokens tile above by this for tokens per request, which is the shape of the "
+            "traffic: the same tok/s means something different at 40-token answers and "
+            "at 2 000-token ones.",
+            [
+                target(window_increase(REQUESTS_TOTAL, "24h"), "raw: requests in 24 h"),
+                target(
+                    var(RULE_REQUESTS_DONE_24H), "llm:requests_completed:sum_24h (rule)"
+                ),
+            ],
+            pid=76,
+            unit="short",
+            decimals=0,
+            w=4,
+            h=5,
+        ),
+        ts(
+            "Decode tok/s — averaged over $window",
+            "The history of the average, not just the average: `rate()` over a fixed "
+            "$window evaluated at every step, so the line is a moving mean of throughput "
+            "$window wide. The $window picker is the whole point — 5 m is a zoomed-in "
+            "chart, 24 h is a daily shape, 7 d is the trend under the noise.\n\n"
+            "Two fixed rollups are drawn for reference, so a wide window still reads "
+            "against a narrow one: `llm:decode_tokens_per_second:mean_1h` and `:mean_24h`. "
+            "With $window = 1 h the raw line and the 1 h rollup are the same answer "
+            "computed twice (once at query time, once by Prometheus every 5 m); where "
+            "they disagree the rollup is up to one rule interval behind.\n\n"
+            "The minimum step here is 5 m, not the 15 s scrape: a $window-wide average "
+            "cannot show 15 s of detail no matter how many points are plotted, and every "
+            "extra point pays for a window of samples to compute it.",
+            [
+                target(
+                    window_rate(DECODE_TOKENS, "$window"),
+                    "mean over $window (raw)",
+                    step="5m",
+                ),
+                target(
+                    window_rate_by(DECODE_TOKENS, "instance, job", "$window"),
+                    "{{instance}} {{job}} over $window",
+                    step="5m",
+                ),
+                target(var(RULE_DECODE_MEAN_1H), "1 h mean (rule)"),
+                target(var(RULE_DECODE_MEAN_24H), "24 h mean (rule)"),
+            ],
+            pid=77,
+            unit="short",
+            decimals=2,
+            w=12,
+            h=8,
+        ),
+        ts(
+            "Work done per $window",
+            "Totals, not rates: `increase()` over $window for decode tokens (left axis), "
+            "prompt tokens (left axis) and completed requests (right axis, because a "
+            "request count is three orders of magnitude below a token count and on a "
+            "shared axis it would be a flat line).\n\n"
+            "This answers 'what did this box produce yesterday' without a spreadsheet, "
+            "and the shape it draws is the workload's own rhythm: the night that looks "
+            "merely low on a throughput chart is unmistakable here, because an idle night "
+            "is a 0 total rather than a low average.",
+            [
+                target(
+                    window_increase(DECODE_TOKENS, "$window"),
+                    "decode tokens / $window",
+                    "A",
+                    step="5m",
+                ),
+                target(
+                    window_increase(PROMPT_TOKENS, "$window"),
+                    "prompt tokens / $window",
+                    "B",
+                    step="5m",
+                ),
+                target(
+                    window_increase(REQUESTS_TOTAL, "$window"),
+                    "requests / $window",
+                    "C",
+                    step="5m",
+                ),
+                target(
+                    var(RULE_DECODED_TOKENS_24H), "decode tokens / 24 h (rule)", "D"
+                ),
+            ],
+            pid=78,
+            unit="short",
+            decimals=0,
+            w=12,
+            h=8,
+            overrides=[
+                axis("C", unit="short", decimals=0, placement="right", label="requests")
+            ],
+        ),
+        ts(
+            "Cache, speculation and KV pressure over $window",
+            "Three ratios that share a 0-1 axis, each pooled over $window (increases "
+            "divided by increases, which is the token-weighted answer rather than a mean "
+            "of five-minute ratios):\n\n"
+            "* prompt-cache hit ratio, `cached / (processed + cached)` — llama.cpp's "
+            "prompt counter counts cache MISSES, so the denominator is both halves;\n"
+            "* speculative-decode acceptance, `accepted / proposed`;\n"
+            "* the KV pool's **peak** usage inside the window, "
+            "`max_over_time(max(...)[...])` — a 30 s saturation that a 24 h mean smooths "
+            "into nothing still shows up here, which is the whole answer to 'was the KV "
+            "pool the limit overnight'.\n\n"
+            "`llm:prompt_cache_hit_ratio:mean_24h` and `llm:kv_cache_usage_ratio:max_24h` "
+            "are drawn as the fixed-window references.",
+            [
+                target(
+                    window_cache_hit_ratio("$window"),
+                    "prompt-cache hit ratio over $window",
+                    step="5m",
+                ),
+                target(
+                    window_draft_ratio("$window"),
+                    "draft acceptance over $window",
+                    step="5m",
+                ),
+                target(
+                    window_max(gauge_max(sel(KV_RATIO)), "$window"),
+                    "KV peak over $window",
+                    step="5m",
+                ),
+                target(var(RULE_CACHE_MEAN_24H), "prompt-cache hit ratio, 24 h (rule)"),
+                target(var(RULE_KV_MAX_24H), "KV peak, 24 h (rule)"),
+            ],
+            pid=79,
+            unit="percentunit",
+            decimals=2,
+            min=0,
+            max=1,
+            w=12,
+            h=8,
+        ),
+        ts(
+            "Was the history itself complete? scrape success over $window",
+            "A flat line is either an idle server or a blind monitor, and on a history "
+            "row that difference matters more than anywhere else: a 24 h mean computed "
+            "from six hours of samples is not a 24 h mean. `avg_over_time` of the "
+            "monitor's own `llm_monitor_scrape_ok` gauge over $window, beside "
+            "`llm:scrape_success_ratio:mean_24h` (which folds the 10 m alias the Scrape "
+            "health row plots).\n\n"
+            "1 = the monitor's most recent scrape had succeeded for the whole window. "
+            "Below that, part of the window has no data in it, and every mean on this row "
+            "describes the hours that reported rather than the hours that were quiet.",
+            [
+                target(
+                    "avg(avg_over_time(%s[$window]))" % raw(MONITOR_SCRAPE_OK),
+                    "mean over $window (raw)",
+                    step="5m",
+                ),
+                target(
+                    var(RULE_SCRAPE_OK_24H), "llm:scrape_success_ratio:mean_24h (rule)"
+                ),
+            ],
+            pid=80,
+            unit="percentunit",
+            decimals=3,
+            min=0,
+            max=1,
+            w=12,
+            h=8,
+            no_value="no llm_monitor_* series: the passthrough job is not being scraped",
+        ),
+        stat(
+            "history configured",
+            "`prometheus_tsdb_retention_limit_seconds` — how far back Prometheus keeps "
+            "anything, as Prometheus itself reports it: the "
+            "`--storage.tsdb.retention.time` flag behind `PROMETHEUS_RETENTION_TIME` in "
+            "`monitoring/.env`. Grafana renders the seconds as a duration, so this tile "
+            "is the row's own speed limit: no window on this row may exceed it.\n\n"
+            'Pinned to `job="prometheus"` on purpose — the monitoring stack\'s own '
+            "health must not empty out when `$job` is pinned to a model server.",
+            [target("avg(%s)" % self_sel(PROM_RETENTION_SECONDS), "retention time")],
+            pid=81,
+            unit="s",
+            decimals=0,
+            w=8,
+            h=5,
+            no_value="the prometheus self-scrape job is not being scraped",
+        ),
+        stat(
+            "history on disk",
+            "`sum(prometheus_tsdb_storage_blocks_bytes)` — the compacted history sitting "
+            "on disk right now, against the 2 GB `retention.size` cap the stack ships "
+            "(sizing arithmetic: monitoring/README.md, 'Retention sizing').\n\n"
+            'Pinned to `job="prometheus"` for the same reason as the tile beside it.',
+            [target("sum(%s)" % self_sel(PROM_BLOCKS_BYTES), "TSDB blocks")],
+            pid=82,
+            unit="bytes",
+            decimals=0,
+            w=8,
+            h=5,
+            no_value="the prometheus self-scrape job is not being scraped",
+        ),
+        stat(
+            "size budget used",
+            "On-disk TSDB over the `retention.size` budget: "
+            "`(sum(storage_blocks_bytes) and (sum(retention_limit_bytes) > 0)) / "
+            "clamp_min(sum(retention_limit_bytes), 1)`. The `and (sum(...) > 0)` guard is "
+            "why a box running with no size cap reads **No data** here instead of a "
+            "divide-by-nothing 100 %: with no cap there is no budget to have used.\n\n"
+            "This is the early-warning tile. Hitting the size cap is not an outage — "
+            "Prometheus deletes whole blocks of the oldest data — but it does mean the "
+            "history is shorter than `history configured` claims, and that the windows on "
+            "this row are averaging what is left.",
+            [
+                target(
+                    "(sum(%s) and (sum(%s) > 0)) / clamp_min(sum(%s), 1)"
+                    % (
+                        self_sel(PROM_BLOCKS_BYTES),
+                        self_sel(PROM_RETENTION_BYTES),
+                        self_sel(PROM_RETENTION_BYTES),
+                    ),
+                    "used / cap",
+                )
+            ],
+            pid=83,
+            unit="percentunit",
+            decimals=1,
+            min=0,
+            thresholds=[
+                {"color": "green", "value": None},
+                {"color": "yellow", "value": 0.75},
+                {"color": "red", "value": 0.9},
+            ],
+            w=8,
+            h=5,
+            no_value="no retention.size cap configured (or no self-scrape)",
+        ),
+    ]
+    return ("History & rollups", panels, False)
 
 
 def latency_row():
@@ -956,7 +1762,7 @@ def latency_row():
             "Quantiles need `_bucket` series. A `llama-server` that exposes counters and "
             "average gauges only — which is what most builds actually do — cannot answer "
             "p99 TTFT, and no dashboard can. Those panels therefore say **no histogram on "
-            "this server** instead of the useless \"No data\", and each one also plots the "
+            'this server** instead of the useless "No data", and each one also plots the '
             "arithmetic mean from `_sum` / `_count`, which exists even when buckets do "
             "not.\n\n"
             "The census panel at the bottom of this row states which latency families each "
@@ -985,7 +1791,12 @@ def latency_row():
                 target(var(RULE_TTFT[0.9]), "llm:...:p90 (rule)"),
                 target(var(RULE_TTFT[0.99]), "llm:...:p99 (rule)"),
             ],
-            pid=3, unit="s", decimals=3, w=24, h=10, legend=LEGEND_LIST,
+            pid=3,
+            unit="s",
+            decimals=3,
+            w=24,
+            h=10,
+            legend=LEGEND_LIST,
             no_value="no histogram on this server (averages only, if even those exist)",
         ),
         ts(
@@ -1003,7 +1814,11 @@ def latency_row():
                 target(mean_from_histogram(_TPOT), "mean (works without buckets)"),
                 target(var(RULE_TPOT[0.99]), "llm:...:p99 (rule)"),
             ],
-            unit="s", decimals=3, w=12, h=9, legend=LEGEND_LIST,
+            unit="s",
+            decimals=3,
+            w=12,
+            h=9,
+            legend=LEGEND_LIST,
             no_value="no histogram on this server (averages only, if even those exist)",
         ),
         ts(
@@ -1021,7 +1836,11 @@ def latency_row():
                 target(mean_from_histogram(_E2E), "mean (works without buckets)"),
                 target(var(RULE_E2E[0.99]), "llm:...:p99 (rule)"),
             ],
-            unit="s", decimals=2, w=12, h=9, legend=LEGEND_LIST,
+            unit="s",
+            decimals=2,
+            w=12,
+            h=9,
+            legend=LEGEND_LIST,
             no_value="no histogram on this server (averages only, if even those exist)",
         ),
         ts(
@@ -1036,13 +1855,19 @@ def latency_row():
             "the stem to the `_TTFT` / `_TPOT` / `_E2E` constants in make_dashboard.py. "
             "Nothing here at all means the server publishes no latency families.",
             [
-                target(family_count("_bucket", _TTFT, _TPOT, _E2E),
-                       "bucket series, all latency families"),
-                target(family_count("_count", _TTFT, _TPOT, _E2E),
-                       "_count series (a mean is possible)"),
+                target(
+                    family_count("_bucket", _TTFT, _TPOT, _E2E),
+                    "bucket series, all latency families",
+                ),
+                target(
+                    family_count("_count", _TTFT, _TPOT, _E2E),
+                    "_count series (a mean is possible)",
+                ),
                 target(family_count("_bucket", _TTFT), "buckets on the TTFT family"),
             ],
-            w=24, h=5, legend=LEGEND_LIST,
+            w=24,
+            h=5,
+            legend=LEGEND_LIST,
             no_value="no latency families on this server",
         ),
     ]
@@ -1066,13 +1891,25 @@ def cache_row():
             "`avg_over_time(max(x)[1h])` is a syntax error, not a shortcut.",
             [
                 target(gauge_max(sel(KV_RATIO)), "worst instance"),
-                target("avg_over_time(%s[%s:5m])" % (gauge_max(sel(KV_RATIO)), "1h"),
-                       "1h average of the worst instance"),
-                target(gauge_by(sel(KV_RATIO), "instance, job"), "{{instance}} {{job}}"),
+                target(
+                    "avg_over_time(%s[%s:5m])" % (gauge_max(sel(KV_RATIO)), "1h"),
+                    "1h average of the worst instance",
+                ),
+                target(
+                    gauge_by(sel(KV_RATIO), "instance, job"), "{{instance}} {{job}}"
+                ),
                 target(var(RULE_KV), "llm:kv_cache_usage_ratio (rule)"),
             ],
-            pid=4, unit="percentunit", decimals=1, min=0, max=1, w=12, h=9,
-            thresholds=KV_BANDS, band=True, legend=LEGEND_LIST,
+            pid=4,
+            unit="percentunit",
+            decimals=1,
+            min=0,
+            max=1,
+            w=12,
+            h=9,
+            thresholds=KV_BANDS,
+            band=True,
+            legend=LEGEND_LIST,
             no_value="no KV-cache metrics on this server",
         ),
         ts(
@@ -1088,9 +1925,14 @@ def cache_row():
                 target(gauge_sum(sel(KV_TOKENS)), "in use"),
                 target(gauge_sum(sel(KV_POOL)), "pool capacity"),
                 target(gauge_sum(sel(KV_RESERVED)), "reserved by slots (halogen)"),
-                target(gauge_by(sel(KV_TOKENS), "instance, job"), "in use {{instance}}"),
+                target(
+                    gauge_by(sel(KV_TOKENS), "instance, job"), "in use {{instance}}"
+                ),
             ],
-            unit="short", w=12, h=9, legend=LEGEND_LIST,
+            unit="short",
+            w=12,
+            h=9,
+            legend=LEGEND_LIST,
             no_value="no KV-cache metrics on this server",
         ),
         ts(
@@ -1106,15 +1948,23 @@ def cache_row():
             "Plotted together because they explain each other: a cold prompt cache and a "
             "collapsing draft-accept ratio together mean something restarted, or slots are "
             "evicting each other's prefixes — which is what LLMPromptCacheCold pages on."
-            + CAVEAT_CLAMP + CAVEAT_RULE,
+            + CAVEAT_CLAMP
+            + CAVEAT_RULE,
             [
                 target(PROMPT_CACHE_HIT_RATIO, "prompt-cache hit ratio"),
                 target(DRAFT_ACCEPT_RATIO, "draft-accept ratio"),
                 target(var(RULE_CACHE), "llm:prompt_cache_hit_ratio (rule)"),
                 target(var(RULE_DRAFT), "llm:draft_acceptance_ratio (rule)"),
             ],
-            pid=6, unit="percentunit", decimals=1, min=0, max=1, w=12, h=9,
-            legend=LEGEND_LIST, no_value="no cache / speculation counters on this server",
+            pid=6,
+            unit="percentunit",
+            decimals=1,
+            min=0,
+            max=1,
+            w=12,
+            h=9,
+            legend=LEGEND_LIST,
+            no_value="no cache / speculation counters on this server",
         ),
         ts(
             "Prompt cache: served from cache vs reprocessed",
@@ -1128,9 +1978,15 @@ def cache_row():
             [
                 target(rate(sel(CACHE_CACHED)), "served from cache"),
                 target(rate(sel(PROMPT_TOKENS)), "reprocessed (cache misses)"),
-                target(rate_by(sel(CACHE_CACHED), "instance, job"), "cached {{instance}}"),
+                target(
+                    rate_by(sel(CACHE_CACHED), "instance, job"), "cached {{instance}}"
+                ),
             ],
-            unit="short", decimals=1, w=12, h=9, legend=LEGEND_LIST,
+            unit="short",
+            decimals=1,
+            w=12,
+            h=9,
+            legend=LEGEND_LIST,
             no_value="no prompt-cache counters on this server",
         ),
     ]
@@ -1145,10 +2001,18 @@ def spec_row():
             "proposed, how many the target model kept. Below ~0.5 the draft is mostly "
             "wasted work.",
             [target(DRAFT_ACCEPT_RATIO, "accept ratio")],
-            unit="percentunit", decimals=1, min=0, max=1, w=6, h=5,
-            thresholds=[{"color": "red", "value": None},
-                        {"color": "yellow", "value": 0.5},
-                        {"color": "green", "value": 0.75}],
+            pid=36,
+            unit="percentunit",
+            decimals=1,
+            min=0,
+            max=1,
+            w=6,
+            h=5,
+            thresholds=[
+                {"color": "red", "value": None},
+                {"color": "yellow", "value": 0.5},
+                {"color": "green", "value": 0.75},
+            ],
             no_value="no speculative decode on this server",
         ),
         stat(
@@ -1157,9 +2021,15 @@ def spec_row():
             "work, and the number to quote when arguing a drafter is not earning its "
             "keep.",
             [target(DRAFT_PER_ACCEPTED, "draft tokens per accepted")],
-            decimals=2, min=0, w=6, h=5,
-            thresholds=[{"color": "green", "value": None}, {"color": "yellow", "value": 2},
-                        {"color": "red", "value": 4}],
+            decimals=2,
+            min=0,
+            w=6,
+            h=5,
+            thresholds=[
+                {"color": "green", "value": None},
+                {"color": "yellow", "value": 2},
+                {"color": "red", "value": 4},
+            ],
             no_value="no speculative decode on this server",
         ),
         stat(
@@ -1171,8 +2041,14 @@ def spec_row():
             "separately from the speculation window; without it the ratio reads high on "
             "every MTP build.",
             [target(SPEC_TIME_RATIO, "time ratio")],
-            decimals=2, min=0, w=6, h=5,
-            thresholds=[{"color": "red", "value": None}, {"color": "green", "value": 1}],
+            decimals=2,
+            min=0,
+            w=6,
+            h=5,
+            thresholds=[
+                {"color": "red", "value": None},
+                {"color": "green", "value": 1},
+            ],
             no_value="no speculative decode on this server",
         ),
         stat(
@@ -1180,9 +2056,14 @@ def spec_row():
             "The draft head's own throughput, next to the accepted subset. Proposed is "
             "always the larger number; a draft rate that jumps while decode flatlines is "
             "speculation spinning against a stalled target model.",
-            [target(rate(sel(DRAFT_TOTAL)), "proposed tok/s"),
-             target(rate(sel(DRAFT_ACCEPTED)), "accepted tok/s")],
-            unit="short", decimals=1, w=6, h=5,
+            [
+                target(rate(sel(DRAFT_TOTAL)), "proposed tok/s"),
+                target(rate(sel(DRAFT_ACCEPTED)), "accepted tok/s"),
+            ],
+            unit="short",
+            decimals=1,
+            w=6,
+            h=5,
             no_value="no speculative decode on this server",
         ),
         ts(
@@ -1196,23 +2077,33 @@ def spec_row():
                 target(var(RULE_DRAFT), "llm:draft_acceptance_ratio (rule)"),
                 target(DRAFT_PER_ACCEPTED, "draft tokens per accepted"),
             ],
-            unit="percentunit", decimals=1, w=12, h=8, legend=LEGEND_LIST,
+            unit="percentunit",
+            decimals=1,
+            w=12,
+            h=8,
+            legend=LEGEND_LIST,
             no_value="no speculative decode on this server",
         ),
         ts(
             "Draft tokens: proposed / accepted / rejected",
-            "The three counters in tokens/s. `proposed = accepted + rejected` unless this "
-            "build has no rejected counter — then that line is simply absent, which is a "
-            "missing metric, not a zero.\n\n"
+            "Proposed and accepted are counters; rejected is derived, because no server "
+            "publishes a rejected counter and `proposed = accepted + rejected` by "
+            "definition. Both sides come from the same scrape, and the difference is "
+            "clamped at 0 so a counter reset on one of them cannot draw a negative "
+            "rate.\n\n"
             "Read the shape: accepted stepping down while proposed holds is the drafter "
             "getting worse (new prompt distribution); both dropping is speculation having "
             "been switched off or the drafter unloading.",
             [
                 target(rate(sel(DRAFT_TOTAL)), "proposed"),
                 target(rate(sel(DRAFT_ACCEPTED)), "accepted"),
-                target(rate(sel(DRAFT_REJECTED)), "rejected"),
+                target(DRAFT_REJECTED_RATE, "rejected (proposed - accepted)"),
             ],
-            unit="short", decimals=1, w=12, h=8, legend=LEGEND_LIST,
+            unit="short",
+            decimals=1,
+            w=12,
+            h=8,
+            legend=LEGEND_LIST,
             no_value="no speculative decode on this server",
         ),
         ts(
@@ -1229,7 +2120,11 @@ def spec_row():
                 target(rate(sel(SPEC_ESTIMATE)), "estimated draft"),
                 target(rate(sel(SPEC_DRAFT)), "actual draft"),
             ],
-            unit="s", decimals=2, w=24, h=8, legend=LEGEND_LIST,
+            unit="s",
+            decimals=2,
+            w=24,
+            h=8,
+            legend=LEGEND_LIST,
             no_value="no speculative timers on this server",
         ),
     ]
@@ -1240,15 +2135,21 @@ def scrape_row():
     panels = [
         stat(
             "targets up",
-            "`sum(up{job=~\"$job\"})` beside `count(up{...})`: how many scrape targets "
+            '`sum(up{job=~"$job"})` beside `count(up{...})`: how many scrape targets '
             "answered their last scrape. Any shortfall is the real explanation for every "
             "empty panel elsewhere on this dashboard.",
             [
                 target(gauge_sum(raw("up")), "up"),
                 target("count(%s)" % raw("up"), "targets configured"),
             ],
-            w=6, h=5, min=0, no_value="nothing scraped for this job selection",
-            thresholds=[{"color": "red", "value": None}, {"color": "green", "value": 1}],
+            w=6,
+            h=5,
+            min=0,
+            no_value="nothing scraped for this job selection",
+            thresholds=[
+                {"color": "red", "value": None},
+                {"color": "green", "value": 1},
+            ],
         ),
         stat(
             "monitor scrape ok",
@@ -1259,8 +2160,14 @@ def scrape_row():
             "This is the tile that separates 'the model is idle' from 'the thing watching "
             "the model is blind'." + CAVEAT_NO_DATA,
             [target("min(%s)" % MONITOR_SCRAPE_OK, "scrape ok")],
-            w=6, h=5, min=0, max=1,
-            thresholds=[{"color": "red", "value": None}, {"color": "green", "value": 1}],
+            w=6,
+            h=5,
+            min=0,
+            max=1,
+            thresholds=[
+                {"color": "red", "value": None},
+                {"color": "green", "value": 1},
+            ],
             no_value="no monitor scrape (direct-only setup?)",
         ),
         stat(
@@ -1271,22 +2178,28 @@ def scrape_row():
             "this series, which is how you tell a proxy that is up from a proxy that is "
             "blind.",
             [target("count(%s)" % MONITOR_BUILD_INFO, "monitors reporting")],
-            w=6, h=5, no_value="no monitor scraped yet",
+            w=6,
+            h=5,
+            no_value="no monitor scraped yet",
         ),
         stat(
             "alerts firing",
-            "`count(ALERTS{alertstate=\"firing\"})`. Here because this box wants one "
+            '`count(ALERTS{alertstate="firing"})`. Here because this box wants one '
             "place to look: Grafana reads the alert list off the same provisioned "
             "datasource Prometheus evaluated them with.",
             [target('count(ALERTS{alertstate="firing"})', "firing")],
-            w=6, h=5,
-            thresholds=[{"color": "green", "value": None}, {"color": "red", "value": 1}],
+            w=6,
+            h=5,
+            thresholds=[
+                {"color": "green", "value": None},
+                {"color": "red", "value": 1},
+            ],
             no_value="none firing",
         ),
         ts(
             "Scrape health (llm_monitor_*) + staleness",
             "Three failure layers in one panel, read top-down:\n\n"
-            "* `up{job=~\"$job\"}` — 0 means Prometheus could not reach the target at all: "
+            '* `up{job=~"$job"}` — 0 means Prometheus could not reach the target at all: '
             "nothing was scraped, and every other panel on this dashboard is showing "
             "history;\n"
             "* `min(llm_monitor_scrape_ok)` — 0 means the monitor is up but *its* scrape "
@@ -1307,11 +2220,18 @@ def scrape_row():
             [
                 target(raw("up"), "{{job}} {{instance}} up"),
                 target("min(%s)" % MONITOR_SCRAPE_OK, "monitor scrape ok"),
-                target("sum(increase(%s[$__rate_interval]))" % MONITOR_SCRAPE_SUCCESS,
-                       "successful monitor scrapes in window"),
-                target("max(time() - timestamp(%s))" % raw("up"), "worst sample age (s)"),
+                target(
+                    "sum(increase(%s[$__rate_interval]))" % MONITOR_SCRAPE_SUCCESS,
+                    "successful monitor scrapes in window",
+                ),
+                target(
+                    "max(time() - timestamp(%s))" % raw("up"), "worst sample age (s)"
+                ),
             ],
-            pid=7, w=12, h=8, legend=LEGEND_LIST,
+            pid=7,
+            w=12,
+            h=8,
+            legend=LEGEND_LIST,
         ),
         ts(
             "Monitor scrape latency and upstream status",
@@ -1325,7 +2245,11 @@ def scrape_row():
                 target(MONITOR_LATENCY, "{{upstream}} ms"),
                 target(MONITOR_STATUS, "{{upstream}} status"),
             ],
-            unit="ms", decimals=0, w=12, h=8, legend=LEGEND_LIST,
+            unit="ms",
+            decimals=0,
+            w=12,
+            h=8,
+            legend=LEGEND_LIST,
             no_value="no monitor scrape (direct-only setup?)",
         ),
         ts(
@@ -1337,11 +2261,17 @@ def scrape_row():
             "Plotted against `up` so 'Prometheus could not scrape the monitor' and 'the "
             "monitor could not scrape the model' are distinguishable on one chart.",
             [
-                target("rate(%s[$__rate_interval])" % MONITOR_SCRAPE_SUCCESS,
-                       "{{upstream}} scrapes/s"),
+                target(
+                    "rate(%s[$__rate_interval])" % MONITOR_SCRAPE_SUCCESS,
+                    "{{upstream}} scrapes/s",
+                ),
                 target(raw("up"), "{{job}} {{instance}} up"),
             ],
-            unit="ops", decimals=3, w=12, h=8, legend=LEGEND_LIST,
+            unit="ops",
+            decimals=3,
+            w=12,
+            h=8,
+            legend=LEGEND_LIST,
         ),
         ts(
             "Parse errors, truncation, series count",
@@ -1353,12 +2283,16 @@ def scrape_row():
             "its format and it is the derived panels, not the raw text, that should be "
             "distrusted.",
             [
-                target("sum(increase(%s[$__rate_interval]))" % MONITOR_PARSE_ERRORS,
-                       "parse errors in window"),
+                target(
+                    "sum(increase(%s[$__rate_interval]))" % MONITOR_PARSE_ERRORS,
+                    "parse errors in window",
+                ),
                 target("max(%s)" % MONITOR_PARSE_TRUNCATED, "series cap hit"),
                 target(MONITOR_SERIES, "{{upstream}} series kept"),
             ],
-            w=12, h=8, legend=LEGEND_LIST,
+            w=12,
+            h=8,
+            legend=LEGEND_LIST,
             no_value="no monitor scrape (direct-only setup?)",
         ),
         markdown(
@@ -1438,7 +2372,8 @@ def gpu_host_row():
             "* Nothing here needs ROCm: these are amdgpu **kernel driver** attributes, "
             "and the Vulkan path llama.cpp uses reads the same sysfs the ROCm path "
             "would. No `/dev/kfd`, no root, and the exporter is bound to loopback only."
-            + CAVEAT_ABSENT + CAVEAT_EXPORTER,
+            + CAVEAT_ABSENT
+            + CAVEAT_EXPORTER,
             h=5,
         ),
         stat(
@@ -1449,8 +2384,14 @@ def gpu_host_row():
             "`prometheus/alert_thresholds.env` and should be re-tuned from "
             "`host:gtt_usage_ratio:max_2d` after two days of real use.",
             [target(gauge_max(gtt_ratio), "of the GTT budget")],
-            unit="percentunit", decimals=1, min=0, max=1, w=4, h=5,
-            thresholds=GTT_BANDS, no_value="no GPU telemetry (host job down?)",
+            unit="percentunit",
+            decimals=1,
+            min=0,
+            max=1,
+            w=4,
+            h=5,
+            thresholds=GTT_BANDS,
+            no_value="no GPU telemetry (host job down?)",
         ),
         stat(
             "GTT headroom",
@@ -1459,10 +2400,15 @@ def gpu_host_row():
             "model fits. Absolute, because 'how much is enough' depends on what you are "
             "about to load, not on a percentage.",
             [target(gtt_headroom, "bytes free")],
-            unit="bytes", decimals=0, w=4, h=5,
-            thresholds=[{"color": "red", "value": None},
-                        {"color": "yellow", "value": 4000000000},
-                        {"color": "green", "value": 16000000000}],
+            unit="bytes",
+            decimals=0,
+            w=4,
+            h=5,
+            thresholds=[
+                {"color": "red", "value": None},
+                {"color": "yellow", "value": 4000000000},
+                {"color": "green", "value": 16000000000},
+            ],
             no_value="no GPU telemetry (host job down?)",
         ),
         stat(
@@ -1472,21 +2418,31 @@ def gpu_host_row():
             "Overview row: busy high and tok/s low is a thermally or memory-throttled "
             "box, busy low and tok/s low is an idle one.",
             [target(gauge_max(host_sel(GPU_BUSY)), "busy %")],
-            unit="percent", decimals=0, min=0, max=100, w=4, h=5,
+            unit="percent",
+            decimals=0,
+            min=0,
+            max=100,
+            w=4,
+            h=5,
             no_value="no gpu_busy_percent (see panel note: absent is not 0)",
         ),
         stat(
             "hottest GPU sensor",
-            "`max(node_hwmon_temp_celsius{chip=\"amdgpu\"})` — the hottest of the GPU's "
+            '`max(node_hwmon_temp_celsius{chip="amdgpu"})` — the hottest of the GPU\'s '
             "sensors, whichever the kernel names them (gfx1151's sensor names are only "
             "knowable on the box; `node_hwmon_chip_names` is the lookup). On this class "
             "of part the junction maximum is about 100 °C, which is why the bands match "
             "the two alerts.",
             [target("max(%s)" % hwmon(HWMON_TEMP), "°C")],
-            unit="celsius", decimals=0, w=4, h=5,
-            thresholds=[{"color": "green", "value": None},
-                        {"color": "yellow", "value": 95},
-                        {"color": "red", "value": 100}],
+            unit="celsius",
+            decimals=0,
+            w=4,
+            h=5,
+            thresholds=[
+                {"color": "green", "value": None},
+                {"color": "yellow", "value": 95},
+                {"color": "red", "value": 100},
+            ],
             no_value="no amdgpu hwmon temp exposed",
         ),
         stat(
@@ -1495,26 +2451,47 @@ def gpu_host_row():
             "wall clock with at least one task stalled on memory. This is the same "
             "expression NodeMemoryPressure{High,Critical} alert on, and on a box whose "
             "GPU memory *is* system RAM it is the earliest warning either half produces.",
-            [target("max(rate(%s[$__rate_interval]))" % host_sel(PSI_MEMORY_WAIT),
-                   "stalled fraction")],
-            unit="percentunit", decimals=2, min=0, w=4, h=5,
-            thresholds=[{"color": "green", "value": None},
-                        {"color": "yellow", "value": 0.10},
-                        {"color": "red", "value": 0.25}],
+            [
+                target(
+                    "max(rate(%s[$__rate_interval]))" % host_sel(PSI_MEMORY_WAIT),
+                    "stalled fraction",
+                )
+            ],
+            unit="percentunit",
+            decimals=2,
+            min=0,
+            w=4,
+            h=5,
+            thresholds=[
+                {"color": "green", "value": None},
+                {"color": "yellow", "value": 0.10},
+                {"color": "red", "value": 0.25},
+            ],
             no_value="no PSI on this kernel",
         ),
         stat(
             "drm collector",
-            "`node_scrape_collector_success{collector=\"drm\"}` — 1 means the GPU half of "
+            '`node_scrape_collector_success{collector="drm"}` — 1 means the GPU half of '
             "this row was actually collected on the last scrape. It is on this row and "
             "not only on Scrape health because the failure mode here is silent: a "
             "containerised exporter with a partial `/sys` mount, or a kernel that "
             "stopped binding the card, takes the whole row down without taking "
             "node_exporter down.",
-            [target('{__name__=~"%s",collector="drm",job=~"$job",instance=~"$instance"}'
-                    % NODE_COLLECTOR_OK, "drm ok")],
-            w=4, h=5, min=0, max=1,
-            thresholds=[{"color": "red", "value": None}, {"color": "green", "value": 1}],
+            [
+                target(
+                    '{__name__=~"%s",collector="drm",job=~"$job",instance=~"$instance"}'
+                    % NODE_COLLECTOR_OK,
+                    "drm ok",
+                )
+            ],
+            w=4,
+            h=5,
+            min=0,
+            max=1,
+            thresholds=[
+                {"color": "red", "value": None},
+                {"color": "green", "value": 1},
+            ],
             no_value="no host scrape at all",
         ),
         ts(
@@ -1541,17 +2518,22 @@ def gpu_host_row():
             "Not yet verified over a real traffic window from a development container "
             "with no GPU in it: on the box, `monitoring/collect_host_baseline.sh` prints "
             "the same two ratios over the last 24 h so the correlation is checked rather "
-            "than assumed."
-            + CAVEAT_ABSENT + CAVEAT_EXPORTER,
+            "than assumed." + CAVEAT_ABSENT + CAVEAT_EXPORTER,
             [
                 target(gtt_ratio, "GTT used (fraction of the GTT budget)", ref="A"),
                 target(var(RULE_GTT), "host:gtt_usage_ratio (rule)", ref="B"),
-                target(gauge_max(sel(KV_RATIO)), "KV cache used (fraction of the KV pool)",
-                       ref="C"),
+                target(
+                    gauge_max(sel(KV_RATIO)),
+                    "KV cache used (fraction of the KV pool)",
+                    ref="C",
+                ),
                 target(var(RULE_KV), "llm:kv_cache_usage_ratio (rule)", ref="D"),
                 target(host_sel(GTT_SIZE), "GTT budget (bytes) — right axis", ref="E"),
             ],
-            unit="percentunit", decimals=1, w=24, h=10,
+            unit="percentunit",
+            decimals=1,
+            w=24,
+            h=10,
             legend=LEGEND_LIST,
             no_value="no GPU telemetry (host job down?)",
             # No panel-level min/max: a panel-wide 0..1 would be applied to the byte
@@ -1563,8 +2545,16 @@ def gpu_host_row():
                 axis("B", min=0, max=1),
                 axis("C", min=0, max=1),
                 axis("D", min=0, max=1),
-                axis("E", unit="bytes", decimals=0, placement="right", min=0,
-                    label="GTT budget (bytes)", dashed=True, color="dark-yellow"),
+                axis(
+                    "E",
+                    unit="bytes",
+                    decimals=0,
+                    placement="right",
+                    min=0,
+                    label="GTT budget (bytes)",
+                    dashed=True,
+                    color="dark-yellow",
+                ),
             ],
         ),
         ts(
@@ -1584,10 +2574,17 @@ def gpu_host_row():
                 target(host_sel(GTT_SIZE), "GTT budget (amdgpu.gttsize)", ref="B"),
                 target(host_sel(VRAM_USED), "VRAM used (BIOS carve-out)", ref="C"),
                 target(host_sel(VIS_VRAM_USED), "visible VRAM used", ref="D"),
-                target(host_sel(MEM_AVAILABLE), "MemAvailable (system RAM) — right axis",
-                       ref="E"),
+                target(
+                    host_sel(MEM_AVAILABLE),
+                    "MemAvailable (system RAM) — right axis",
+                    ref="E",
+                ),
             ],
-            unit="bytes", decimals=0, w=12, h=8, legend=LEGEND_LIST,
+            unit="bytes",
+            decimals=0,
+            w=12,
+            h=8,
+            legend=LEGEND_LIST,
             no_value="no GPU telemetry (host job down?)",
             overrides=[
                 axis("B", dashed=True, color="dark-yellow"),
@@ -1617,10 +2614,19 @@ def gpu_host_row():
                 target(gauge_max(host_sel(GPU_BUSY)), "GPU busy %"),
                 target(gauge_max(host_sel(MEM_BUSY)), "memory busy %", ref="B"),
                 target(hwmon(HWMON_TEMP), "{{sensor}} {{chip}} °C", ref="C"),
-                target(hwmon(HWMON_POWER), "{{sensor}} avg power (W, no axis)", ref="D"),
-                target(hwmon(HWMON_POWER_CAP), "{{sensor}} power cap (W, no axis)", ref="E"),
+                target(
+                    hwmon(HWMON_POWER), "{{sensor}} avg power (W, no axis)", ref="D"
+                ),
+                target(
+                    hwmon(HWMON_POWER_CAP), "{{sensor}} power cap (W, no axis)", ref="E"
+                ),
             ],
-            unit="percent", decimals=1, min=0, w=12, h=8, legend=LEGEND_LIST,
+            unit="percent",
+            decimals=1,
+            min=0,
+            w=12,
+            h=8,
+            legend=LEGEND_LIST,
             no_value="no amdgpu busy % / hwmon sensors",
             # Same reason as the payoff panel: the axes disagree by orders of
             # magnitude, so the ranges are per field. Watts get a 150 W ceiling
@@ -1629,12 +2635,33 @@ def gpu_host_row():
             overrides=[
                 axis("A", min=0, max=100),
                 axis("B", min=0, max=100, color="orange"),
-                axis("C", unit="celsius", decimals=1, placement="right", label="°C",
-                     min=20, max=110),
-                axis("D", unit="watt", decimals=1, placement="hidden", min=0, max=150,
-                     dashed=True),
-                axis("E", unit="watt", decimals=1, placement="hidden", min=0, max=150,
-                     dashed=True),
+                axis(
+                    "C",
+                    unit="celsius",
+                    decimals=1,
+                    placement="right",
+                    label="°C",
+                    min=20,
+                    max=110,
+                ),
+                axis(
+                    "D",
+                    unit="watt",
+                    decimals=1,
+                    placement="hidden",
+                    min=0,
+                    max=150,
+                    dashed=True,
+                ),
+                axis(
+                    "E",
+                    unit="watt",
+                    decimals=1,
+                    placement="hidden",
+                    min=0,
+                    max=150,
+                    dashed=True,
+                ),
             ],
         ),
         ts(
@@ -1653,17 +2680,32 @@ def gpu_host_row():
             "together is the box running out of memory; GTT alone is a sizing problem in "
             "the model config.",
             [
-                target("max(rate(%s[$__rate_interval]))" % host_sel(PSI_MEMORY_WAIT),
-                       "memory PSI (stalled fraction)"),
+                target(
+                    "max(rate(%s[$__rate_interval]))" % host_sel(PSI_MEMORY_WAIT),
+                    "memory PSI (stalled fraction)",
+                ),
                 target(swap_used, "swap used — right axis", ref="B"),
-                target("sum(%s)" % host_sel(SWAP_TOTAL), "swap total — right axis", ref="C"),
+                target(
+                    "sum(%s)" % host_sel(SWAP_TOTAL), "swap total — right axis", ref="C"
+                ),
                 target(host_sel(LOAD1), "load1 (no axis)", ref="D"),
                 target(host_sel(LOAD5), "load5 (no axis)", ref="E"),
             ],
-            unit="percentunit", decimals=2, min=0, w=12, h=8, legend=LEGEND_LIST,
+            unit="percentunit",
+            decimals=2,
+            min=0,
+            w=12,
+            h=8,
+            legend=LEGEND_LIST,
             no_value="no host telemetry",
             overrides=[
-                axis("B", unit="bytes", decimals=0, placement="right", label="swap (bytes)"),
+                axis(
+                    "B",
+                    unit="bytes",
+                    decimals=0,
+                    placement="right",
+                    label="swap (bytes)",
+                ),
                 axis("C", unit="bytes", decimals=0, placement="hidden", dashed=True),
                 axis("D", unit="short", decimals=2, placement="hidden"),
                 axis("E", unit="short", decimals=2, placement="hidden"),
@@ -1687,21 +2729,45 @@ def gpu_host_row():
             "Nothing here is clamped by `$model` (a host has no model), which is "
             "deliberate — see the panel note.",
             [
-                target("min by (job, instance) (%s)" % host_sel(NODE_COLLECTOR_OK),
-                       "worst collector (0 = one failed)"),
-                target('{__name__=~"%s",collector="drm",job=~"$job",instance=~"$instance"}'
-                       % NODE_COLLECTOR_OK, "drm collector ok", ref="B"),
-                target('{__name__=~"%s",collector="drm",job=~"$job",instance=~"$instance"}'
-                       % NODE_COLLECTOR_TIME, "drm scrape time (s) — right axis", ref="C"),
-                target(host_sel(NODE_PROCESS_RSS), "exporter RSS (bytes, no axis)", ref="D"),
+                target(
+                    "min by (job, instance) (%s)" % host_sel(NODE_COLLECTOR_OK),
+                    "worst collector (0 = one failed)",
+                ),
+                target(
+                    '{__name__=~"%s",collector="drm",job=~"$job",instance=~"$instance"}'
+                    % NODE_COLLECTOR_OK,
+                    "drm collector ok",
+                    ref="B",
+                ),
+                target(
+                    '{__name__=~"%s",collector="drm",job=~"$job",instance=~"$instance"}'
+                    % NODE_COLLECTOR_TIME,
+                    "drm scrape time (s) — right axis",
+                    ref="C",
+                ),
+                target(
+                    host_sel(NODE_PROCESS_RSS), "exporter RSS (bytes, no axis)", ref="D"
+                ),
             ],
-            unit="short", decimals=2, min=0, w=12, h=8, legend=LEGEND_LIST,
+            unit="short",
+            decimals=2,
+            min=0,
+            w=12,
+            h=8,
+            legend=LEGEND_LIST,
             no_value="no host scrape at all",
             overrides=[
                 axis("A", min=0, max=1),
                 axis("B", min=0, max=1),
                 axis("C", unit="s", decimals=3, placement="right", label="s", min=0),
-                axis("D", unit="bytes", decimals=0, placement="hidden", min=0, dashed=True),
+                axis(
+                    "D",
+                    unit="bytes",
+                    decimals=0,
+                    placement="hidden",
+                    min=0,
+                    dashed=True,
+                ),
             ],
         ),
     ]
@@ -1745,14 +2811,20 @@ def build() -> dict:
     guaranteed to render without a re-layout on first open.
     """
     out: list[dict] = []
+    _PIN_HITS.clear()
     y = 0
     for title, panels, collapsed in [
-        overview_row(), latency_row(), cache_row(), spec_row(), scrape_row(),
-        gpu_host_row()
+        overview_row(),
+        history_row(),
+        latency_row(),
+        cache_row(),
+        spec_row(),
+        scrape_row(),
+        gpu_host_row(),
     ]:
         used = flow(panels, start_y=y + 1)
         entry: dict = {
-            "id": next(ROW_IDS),
+            "id": ROW_ID_BY_TITLE[title],
             "type": "row",
             "title": title,
             "collapsed": collapsed,
@@ -1768,6 +2840,11 @@ def build() -> dict:
             out.append(entry)
             out.extend(panels)
             y += used
+    stale = sorted(set(PANEL_ID_BY_TITLE) - _PIN_HITS)
+    if stale:
+        raise ValueError(
+            "PANEL_ID_BY_TITLE pins panels that no longer exist: %s" % ", ".join(stale)
+        )
     return {
         "annotations": {"list": []},
         "editable": True,
@@ -1819,12 +2896,15 @@ def main(argv: list[str]) -> int:
     dash = json.loads(text)
     entries = dash["panels"]
     nested = sum(len(p.get("panels") or []) for p in entries if p.get("type") == "row")
-    print("wrote %s: %d rows, %d panels (%d nested in collapsed rows)" % (
-        OUT,
-        sum(1 for p in entries if p.get("type") == "row"),
-        sum(1 for p in entries if p.get("type") != "row") + nested,
-        nested,
-    ))
+    print(
+        "wrote %s: %d rows, %d panels (%d nested in collapsed rows)"
+        % (
+            OUT,
+            sum(1 for p in entries if p.get("type") == "row"),
+            sum(1 for p in entries if p.get("type") != "row") + nested,
+            nested,
+        )
+    )
     return 0
 
 

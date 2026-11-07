@@ -27,6 +27,13 @@
 # Not generated; no thresholds involved. Committed and validated by
 # `promtool check rules monitoring/prometheus/recording_rules.yml`.
 #
+# Four groups live here now:
+#   `llm-aliases`       the 5 m vendor-neutral aliases ADR 0001 C3 names;
+#   `llm-scrape-health` whether the monitor is actually scraping;
+#   `llm-rollups`       those same measurements folded over an hour, a day and a
+#                       week — the series the dashboard's History row reads (amd-frx);
+#   `host-baselines`    the box's own GTT / PSI / temperature maxima (workspace-szw.13).
+#
 # The metric-name unions below must stay in step with the selector constants in
 # monitoring/grafana/make_dashboard.py (DECODE_TOKENS, CACHE_CACHED, ...). Both
 # sides are one edit each; if they ever drift, the `(rule)` series on a panel will
@@ -57,11 +64,11 @@ groups:
       # workspace-szw.5's queueing alerts should read.
       - record: llm:requests_running
         expr: >-
-          sum by (job, instance, model) (label_replace({__name__=~"llamacpp:requests_processing|halogen:requests_running|vllm:num_requests_running"}, "model", "$1", "model_name", "(.+)"))
+          sum by (job, instance, model) (label_replace({__name__=~"llamacpp:requests_processing|vllm:num_requests_running"}, "model", "$1", "model_name", "(.+)"))
 
       - record: llm:requests_queued
         expr: >-
-          sum by (job, instance, model) (label_replace({__name__=~"llamacpp:requests_deferred|halogen:requests_queued|vllm:num_requests_waiting"}, "model", "$1", "model_name", "(.+)"))
+          sum by (job, instance, model) (label_replace({__name__=~"llamacpp:requests_deferred|vllm:num_requests_waiting"}, "model", "$1", "model_name", "(.+)"))
 
       # Prompt-cache hit ratio over 5m. The `+ cached` in the denominator is the
       # llama.cpp convention: prompt_tokens_total counts only the tokens that
@@ -162,6 +169,141 @@ groups:
       - record: llm:scrape_success_ratio
         expr: >-
           avg by (job, instance) (avg_over_time(llm_monitor_scrape_ok[10m]))
+
+  # --------------------------------------------------------------------------- #
+  # Windowed rollups: "average tokens/s over the last hour / day / week".
+  #
+  # Everything above this line is a *rate over one scrape-scale window* (5m). This
+  # group is the same measurement folded over a much longer window, which is the
+  # question the dashboard is actually asked out loud: how fast was this box
+  # yesterday, how many tokens did it decode last week, was the cache warm
+  # overnight. Without these rows every such question is re-derived in the browser
+  # from the raw counters on every panel refresh, and a panel that asks for a week
+  # of history pays for a week of samples each time it redraws.
+  #
+  # Two sources, deliberately:
+  #
+  #   * `avg/max_over_time(llm:<alias>[w])` reads the *recorded* 5m aliases above,
+  #     never the raw counters. One series per window per (job, instance, model),
+  #     and the vendor-name union is already resolved there, so nothing here has to
+  #     know a vendor. Windows of a day or less read every 30s sample (2 880 of
+  #     them: cheap and exact). The 7d window reads a 10m-step subquery instead of
+  #     20 160 samples — the same bounded-read choice `host:gtt_usage_ratio:max_2d`
+  #     makes with `[2d:15m]`, and it costs a little sampling noise on a window
+  #     whose meaningful variation is measured in hours.
+  #
+  #   * `increase()` over the raw counters for the totals, because a total is the
+  #     one thing a mean cannot give you ("tokens decoded yesterday", not "the
+  #     average rate yesterday"). increase() also handles counter resets, which is
+  #     what makes these restart-safe where the lifetime ratio on the Overview row
+  #     is not.
+  #
+  # WINDOW SEMANTICS, because a mean over a window is not one number:
+  #   * Windows are relative to *now* (the evaluation time), and are re-evaluated
+  #     every `interval` below, so a panel can plot a series that is itself a
+  #     rolling mean — the history of the average, not just the average.
+  #   * `avg_over_time` averages the samples that EXIST. A server that was down (or
+  #     unscraped) for six hours of a 24h window contributes nothing to the mean,
+  #     so these read "mean throughput while it was up", which is the useful
+  #     meaning: a mean that counted downtime as zero would say the box got slower.
+  #     `llm:scrape_success_ratio:mean_24h` beside it is how you tell the two apart.
+  #   * `:mean_` on a ratio (cache hit, draft acceptance) is the token-weighted mean
+  #     over the window — increases divided by increases — not the arithmetic mean of
+  #     the five-minute ratios. Long-tailed bursts weight a pooled mean correctly;
+  #     a mean-of-means would not.
+  #
+  # Naming follows the file's existing `measure:aggregation_window` form
+  # (`host:gtt_usage_ratio:max_2d`): `llm:decode_tokens_per_second:mean_1h`.
+  # A window here longer than `PROMETHEUS_RETENTION_TIME` silently answers from a
+  # partial window, so `check_monitoring.py` compares the longest window in this
+  # file (and in the dashboard) against the retention the compose file defaults to.
+  #
+  # Cost: 15 rules, one series each per (job, instance, model). Two model servers
+  # labelled => 30 series written every 5m = 8 640 samples/day ≈ 13 kB/day
+  # compressed, against ~37 MB/day for the raw scrape (monitoring/README.md
+  # "Retention sizing"). Rollups are the cheap half of the history budget.
+  # --------------------------------------------------------------------------- #
+  - name: llm-rollups
+    interval: 5m
+    rules:
+      # --- decode throughput, folded ----------------------------------------- #
+      - record: llm:decode_tokens_per_second:mean_1h
+        expr: >-
+          avg_over_time(llm:decode_tokens_per_second[1h])
+
+      - record: llm:decode_tokens_per_second:mean_24h
+        expr: >-
+          avg_over_time(llm:decode_tokens_per_second[24h])
+
+      # Sampled at a 10m step rather than every 30s sample: see this group's header.
+      - record: llm:decode_tokens_per_second:mean_7d
+        expr: >-
+          avg_over_time(llm:decode_tokens_per_second[7d:10m])
+
+      # Peak, not mean: "how fast did this box ever go yesterday" is the number a
+      # capacity decision needs, and a mean cannot answer it.
+      - record: llm:decode_tokens_per_second:max_24h
+        expr: >-
+          max_over_time(llm:decode_tokens_per_second[24h])
+
+      # --- prompt (prefill) and request rates, folded ------------------------ #
+      - record: llm:prompt_tokens_per_second:mean_24h
+        expr: >-
+          avg_over_time(llm:prompt_tokens_per_second[24h])
+
+      - record: llm:requests_per_second:mean_24h
+        expr: >-
+          avg_over_time(llm:requests_per_second[24h])
+
+      # --- totals over a window (the "how much work" numbers) ---------------- #
+      # increase(), not a mean: these answer "how many tokens / requests in the
+      # last day", which no rate can. Same vendor-name unions as the aliases above,
+      # same label normalization, same clamp-free shape (a total has no denominator).
+      - record: llm:decoded_tokens:sum_1h
+        expr: >-
+          sum by (job, instance, model) (label_replace(increase({__name__=~"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total"}[1h]), "model", "$1", "model_name", "(.+)"))
+
+      - record: llm:decoded_tokens:sum_24h
+        expr: >-
+          sum by (job, instance, model) (label_replace(increase({__name__=~"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total"}[24h]), "model", "$1", "model_name", "(.+)"))
+
+      - record: llm:decoded_tokens:sum_7d
+        expr: >-
+          sum by (job, instance, model) (label_replace(increase({__name__=~"llamacpp:tokens_predicted_total|llamacpp:predicted_tokens_total|vllm:generation_tokens_total"}[7d]), "model", "$1", "model_name", "(.+)"))
+
+      - record: llm:prompt_tokens_processed:sum_24h
+        expr: >-
+          sum by (job, instance, model) (label_replace(increase({__name__=~"llamacpp:prompt_tokens_total|vllm:prompt_tokens_total"}[24h]), "model", "$1", "model_name", "(.+)"))
+
+      - record: llm:requests_completed:sum_24h
+        expr: >-
+          sum by (job, instance, model) (label_replace(increase({__name__=~"halogen:requests_total|llamacpp:requests_total|vllm:request_success_total"}[24h]), "model", "$1", "model_name", "(.+)"))
+
+      # --- ratios, pooled over the window ----------------------------------- #
+      - record: llm:prompt_cache_hit_ratio:mean_24h
+        expr: >-
+          sum by (job, instance, model) (label_replace(increase({__name__=~"halogen:prompt_tokens_cached_total|llamacpp:prompt_cache_tokens_cached_total"}[24h]), "model", "$1", "model_name", "(.+)"))
+          /
+          clamp_min(sum by (job, instance, model) (label_replace(increase({__name__=~"llamacpp:prompt_tokens_total|vllm:prompt_tokens_total"}[24h]), "model", "$1", "model_name", "(.+)")) + sum by (job, instance, model) (label_replace(increase({__name__=~"halogen:prompt_tokens_cached_total|llamacpp:prompt_cache_tokens_cached_total"}[24h]), "model", "$1", "model_name", "(.+)")), 1)
+
+      - record: llm:draft_acceptance_ratio:mean_24h
+        expr: >-
+          sum by (job, instance, model) (label_replace(increase({__name__=~"halogen:draft_tokens_accepted_total|llamacpp:draft_tokens_accepted_total"}[24h]), "model", "$1", "model_name", "(.+)"))
+          /
+          clamp_min(sum by (job, instance, model) (label_replace(increase({__name__=~"halogen:draft_tokens_total|llamacpp:draft_tokens_total"}[24h]), "model", "$1", "model_name", "(.+)")), 1)
+
+      # "Was the KV pool the limit overnight?" The max over a day, so a 30-second
+      # saturation that a 24h mean smooths into nothing still shows up here.
+      - record: llm:kv_cache_usage_ratio:max_24h
+        expr: >-
+          max_over_time(llm:kv_cache_usage_ratio[24h])
+
+      # Trust in the history itself: the fraction of the last day in which the
+      # monitor's scrape had succeeded. A flat line in Grafana is either an idle
+      # server or a blind monitor, and this is the series that says which.
+      - record: llm:scrape_success_ratio:mean_24h
+        expr: >-
+          avg_over_time(llm:scrape_success_ratio[24h])
 
   # --- host + GPU baselines (workspace-szw.13) ------------------------------
   # The rule this repo follows for a new alert is *measure first*, and the ticket

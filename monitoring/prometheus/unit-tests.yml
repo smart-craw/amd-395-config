@@ -534,3 +534,155 @@ tests:
       - eval_time: 14m
         alertname: NodeMemoryPressureCritical
         exp_alerts: []
+
+  # ===========================================================================
+  # Windowed rollups (amd-frx): "average tokens/s over the last hour / day /
+  # week", "how many tokens did the box decode yesterday".
+  #
+  # Three blocks, because the rollups sit two layers deep and promtool compares
+  # values exactly:
+  #
+  #   1. raw counters -> the totals and the pooled ratios (increase() over a
+  #      window), which is also where the `llm:decode_tokens_per_second` alias the
+  #      second layer reads gets pinned;
+  #   2. the recorded 5m aliases -> avg/max_over_time folds, fed in as input
+  #      series directly so the expected value is exact (a chained mean would
+  #      inherit the alias group's start-up ramp);
+  #   3. a constant series, i.e. the same number in every window.
+  #
+  # Expectations are chosen to be exactly representable: increase() extrapolates,
+  # and at a coarse input step that lands on 3599.9999999999995 rather than 3600
+  # — a real Prometheus does not care, promtool does.
+  # ===========================================================================
+  # ---------------------------------------------------------------------------
+  # Windowed rollups (amd-frx): "average tokens/s over the last hour / day /
+  # week", "how many tokens did the box decode yesterday".
+  #
+  # Three blocks because the rollups are two layers deep and promtool compares
+  # values exactly:
+  #
+  #   1. raw counters -> the totals and pooled ratios (increase() over a window),
+  #      which is also where the `llm:decode_tokens_per_second` alias the second
+  #      layer reads gets pinned;
+  #   2. the recorded 5m aliases -> avg/max_over_time folds, fed as input series
+  #      directly so the expected value is exact (a chained mean would inherit
+  #      the alias group's start-up ramp);
+  #   3. a constant series, i.e. the same number in every window.
+  #
+  # Expectations are chosen to be *exactly* representable: increase() on a linear
+  # counter extrapolates, and at a 5m input step that lands on 3599.9999999999995
+  # rather than 3600 — a real Prometheus does not care, promtool does.
+  # ---------------------------------------------------------------------------
+  - interval: 1m
+    input_series:
+      # 1 decode token/s, 2 prompt tokens/s, half the prompt cache hit, half the
+      # drafts accepted, 3 requests/min. All linear, so the windows have exact
+      # answers.
+      - series: 'llamacpp:tokens_predicted_total{job="llm-server",instance="llm.home:8080",model="qwen"}'
+        values: '0+60x1440'
+      - series: 'llamacpp:prompt_tokens_total{job="llm-server",instance="llm.home:8080",model="qwen"}'
+        values: '0+120x1440'
+      - series: 'llamacpp:prompt_cache_tokens_cached_total{job="llm-server",instance="llm.home:8080",model="qwen"}'
+        values: '0+120x1440'
+      - series: 'llamacpp:draft_tokens_total{job="llm-server",instance="llm.home:8080",model="qwen"}'
+        values: '0+40x1440'
+      - series: 'llamacpp:draft_tokens_accepted_total{job="llm-server",instance="llm.home:8080",model="qwen"}'
+        values: '0+20x1440'
+      - series: 'llamacpp:requests_total{job="llm-server",instance="llm.home:8080",model="qwen"}'
+        values: '0+3x1440'
+    promql_expr_test:
+      # The alias layer 2 folds, pinned first: 60 tokens/min is 1 token/s.
+      - expr: llm:decode_tokens_per_second
+        eval_time: 24h
+        exp_samples:
+          - {labels: 'llm:decode_tokens_per_second{instance="llm.home:8080",job="llm-server",model="qwen"}', value: 1}
+      - expr: llm:decoded_tokens:sum_1h
+        eval_time: 24h
+        exp_samples:
+          - {labels: 'llm:decoded_tokens:sum_1h{instance="llm.home:8080",job="llm-server",model="qwen"}', value: 3600}
+      - expr: llm:decoded_tokens:sum_24h
+        eval_time: 24h
+        exp_samples:
+          - {labels: 'llm:decoded_tokens:sum_24h{instance="llm.home:8080",job="llm-server",model="qwen"}', value: 86400}
+      - expr: llm:prompt_tokens_processed:sum_24h
+        eval_time: 24h
+        exp_samples:
+          - {labels: 'llm:prompt_tokens_processed:sum_24h{instance="llm.home:8080",job="llm-server",model="qwen"}', value: 172800}
+      - expr: llm:requests_completed:sum_24h
+        eval_time: 24h
+        exp_samples:
+          - {labels: 'llm:requests_completed:sum_24h{instance="llm.home:8080",job="llm-server",model="qwen"}', value: 4320}
+      # Pooled over the window: cached / (missed + cached) = 120 / 240.
+      - expr: llm:prompt_cache_hit_ratio:mean_24h
+        eval_time: 24h
+        exp_samples:
+          - {labels: 'llm:prompt_cache_hit_ratio:mean_24h{instance="llm.home:8080",job="llm-server",model="qwen"}', value: 0.5}
+      - expr: llm:draft_acceptance_ratio:mean_24h
+        eval_time: 24h
+        exp_samples:
+          - {labels: 'llm:draft_acceptance_ratio:mean_24h{instance="llm.home:8080",job="llm-server",model="qwen"}', value: 0.5}
+
+  - interval: 1m
+    input_series:
+      # 1 tok/s for the first 24 h, then 3 tok/s for the last 6 h, evaluated at
+      # 30 h: an hour-long window sees only 3, a day-long window also sees the 1s,
+      # so mean_1h = 3 and max_24h = 3 pin two different windows over the same
+      # data. The day mean is deliberately not asserted here: promtool compares
+      # values exactly, and a window that half-full of the step at its own edge
+      # lands on 1.4986 instead of 1.5 for reasons that belong to the test
+      # harness, not to this repo. The mean's own arithmetic is pinned on the
+      # constant series in the next block, where the edges cannot bite.
+      - series: 'llm:decode_tokens_per_second{job="llm-server",instance="a",model="m"}'
+        values: '1x1441 3x360'
+      # One 0.95 spike at the 24 h mark, i.e. inside the last day and long gone
+      # from any mean: this is the "was the KV pool the limit overnight" answer.
+      - series: 'llm:kv_cache_usage_ratio{job="llm-server",instance="a",model="m"}'
+        values: '0.3x1440 0.95 0.3x359'
+      # Present for 18 h, missing for 6: absent samples are not zeros, so the
+      # 24 h mean stays 1 instead of decaying to 0.75.
+      - series: 'llm:scrape_success_ratio{job="llm-server-via-proxy",instance="a"}'
+        values: '1x1080 _x360'
+    promql_expr_test:
+      - expr: llm:decode_tokens_per_second:mean_1h
+        eval_time: 30h
+        exp_samples:
+          - {labels: 'llm:decode_tokens_per_second:mean_1h{instance="a",job="llm-server",model="m"}', value: 3}
+      - expr: llm:decode_tokens_per_second:max_24h
+        eval_time: 30h
+        exp_samples:
+          - {labels: 'llm:decode_tokens_per_second:max_24h{instance="a",job="llm-server",model="m"}', value: 3}
+      - expr: llm:kv_cache_usage_ratio:max_24h
+        eval_time: 30h
+        exp_samples:
+          - {labels: 'llm:kv_cache_usage_ratio:max_24h{instance="a",job="llm-server",model="m"}', value: 0.95}
+      - expr: llm:scrape_success_ratio:mean_24h
+        eval_time: 24h
+        exp_samples:
+          - {labels: 'llm:scrape_success_ratio:mean_24h{instance="a",job="llm-server-via-proxy"}', value: 1}
+
+  - interval: 1m
+    input_series:
+      # A steady box: every window agrees.
+      - series: 'llm:decode_tokens_per_second{job="llm-server",instance="a",model="m"}'
+        values: '2x1440'
+      - series: 'llm:prompt_tokens_per_second{job="llm-server",instance="a",model="m"}'
+        values: '4x1440'
+      - series: 'llm:requests_per_second{job="llm-server",instance="a",model="m"}'
+        values: '0.1x1440'
+    promql_expr_test:
+      # The 7d window is read as a 10 m-step subquery (see the group's comment),
+      # which is why it is asserted on a constant rather than on the two-level
+      # series above: a sampled mean of a varying series is only approximately the
+      # mean, and promtool has no tolerance.
+      - expr: llm:decode_tokens_per_second:mean_7d
+        eval_time: 24h
+        exp_samples:
+          - {labels: 'llm:decode_tokens_per_second:mean_7d{instance="a",job="llm-server",model="m"}', value: 2}
+      - expr: llm:prompt_tokens_per_second:mean_24h
+        eval_time: 24h
+        exp_samples:
+          - {labels: 'llm:prompt_tokens_per_second:mean_24h{instance="a",job="llm-server",model="m"}', value: 4}
+      - expr: llm:requests_per_second:mean_24h
+        eval_time: 24h
+        exp_samples:
+          - {labels: 'llm:requests_per_second:mean_24h{instance="a",job="llm-server",model="m"}', value: 0.1}

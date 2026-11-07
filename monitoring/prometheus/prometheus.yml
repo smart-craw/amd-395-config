@@ -37,6 +37,14 @@ scrape_configs:
   #    adding an entry there, no restart needed (file_sd refreshes).
   # ---------------------------------------------------------------- #
   - job_name: llm-server
+    # The upstream is TLS (see LLM_UPSTREAM_URL in monitoring/.env and the
+    # llm_upstream label on the passthrough job below). Prometheus scrapes http
+    # unless told otherwise, and pointing this job at :443 over plain http fails the
+    # TLS handshake — a scrape failure that looks like "the model server has no
+    # data" on every panel. The certificate verifies against the system roots, so no
+    # tls_config is needed; check_monitoring.py keeps the scheme and the target port
+    # in step with LLM_UPSTREAM_URL.
+    scheme: https
     file_sd_configs:
       - files:
           - targets/llm-servers.json
@@ -79,7 +87,7 @@ scrape_configs:
           # match serve.py's --url (or llm-monitor.service's
           # LLM_MONITOR_UPSTREAM) or the passthrough scrapes a different
           # server than the direct job does.
-          llm_upstream: "http://llm.home:8080"
+          llm_upstream: "https://halogen.llm.danielhstahl.com"
     metrics_path: /metrics
     relabel_configs:
       # One proxy can front several servers: the llm_upstream label becomes the
